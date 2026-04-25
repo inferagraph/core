@@ -1,0 +1,13 @@
+.ig-container {
+  --ig-bg-color: #1a1a2e;
+  --ig-node-color: #4a9eff;
+  --ig-node-hover-color: #6bb3ff;
+  --ig-node-selected-color: #ff6b35;
+  --ig-edge-color: #444466;
+  --ig-label-color: #e0e0e0;
+  --ig-label-font: 12px system-ui, -apple-system, sans-serif;
+  --ig-tooltip-bg: #2a2a4a;
+  --ig-tooltip-color: #e0e0e0;
+  --ig-panel-bg: #1e1e3a;
+  --ig-panel-color: #e0e0e0;
+}

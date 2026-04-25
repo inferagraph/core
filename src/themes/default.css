@@ -1,0 +1,71 @@
+.ig-container {
+  --ig-bg-color: #ffffff;
+  --ig-node-color: #4a9eff;
+  --ig-node-hover-color: #2d7cd6;
+  --ig-node-selected-color: #ff6b35;
+  --ig-edge-color: #cccccc;
+  --ig-label-color: #333333;
+  --ig-label-font: 12px system-ui, -apple-system, sans-serif;
+  --ig-tooltip-bg: #ffffff;
+  --ig-tooltip-color: #333333;
+  --ig-panel-bg: #f8f9fa;
+  --ig-panel-color: #333333;
+}
+
+.ig-label {
+  position: absolute;
+  pointer-events: none;
+  font: var(--ig-label-font);
+  color: var(--ig-label-color);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.ig-tooltip {
+  position: absolute;
+  background: var(--ig-tooltip-bg);
+  color: var(--ig-tooltip-color);
+  padding: 8px 12px;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+  z-index: 100;
+}
+
+.ig-detail-panel {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 320px;
+  background: var(--ig-panel-bg);
+  color: var(--ig-panel-color);
+  padding: 16px;
+  overflow-y: auto;
+  box-shadow: -2px 0 8px rgba(0, 0, 0, 0.1);
+  z-index: 50;
+}
+
+.ig-chat-panel {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  right: 16px;
+  background: var(--ig-panel-bg);
+  color: var(--ig-panel-color);
+  padding: 16px;
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  z-index: 50;
+}
+
+.ig-overlay-root {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.ig-overlay-root > * {
+  pointer-events: auto;
+}
