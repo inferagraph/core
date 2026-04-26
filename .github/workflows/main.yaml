@@ -40,8 +40,8 @@ jobs:
 
       - name: Verify theme assets
         run: |
-          test -f dist/themes/default.css || (echo "Missing default theme" && exit 1)
-          test -f dist/themes/dark.css || (echo "Missing dark theme" && exit 1)
+          test -f src/themes/default.css || (echo "Missing default theme" && exit 1)
+          test -f src/themes/dark.css || (echo "Missing dark theme" && exit 1)
 
       - name: Check version change
         id: version
