@@ -9,7 +9,7 @@ export interface InferaGraphProps {
   style?: React.CSSProperties;
 }
 
-function InferaGraphInner({ data, layout, className, style }: InferaGraphProps): React.JSX.Element {
+function InferaGraphInner({ data: _data, layout: _layout, className, style }: InferaGraphProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

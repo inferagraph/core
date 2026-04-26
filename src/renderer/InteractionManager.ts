@@ -2,10 +2,14 @@ type EventCallback = (event: { nodeId?: string; x: number; y: number }) => void;
 
 export class InteractionManager {
   private listeners = new Map<string, Set<EventCallback>>();
-  private container: HTMLElement | null = null;
+  private _container: HTMLElement | null = null;
+
+  get container(): HTMLElement | null {
+    return this._container;
+  }
 
   attach(container: HTMLElement): void {
-    this.container = container;
+    this._container = container;
   }
 
   on(event: string, callback: EventCallback): void {
@@ -30,6 +34,6 @@ export class InteractionManager {
 
   detach(): void {
     this.listeners.clear();
-    this.container = null;
+    this._container = null;
   }
 }

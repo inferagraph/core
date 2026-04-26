@@ -16,25 +16,25 @@ export interface GraphProviderProps {
 }
 
 export function GraphProvider({ children }: GraphProviderProps): React.JSX.Element {
-  const storeRef = useRef<GraphStore>();
+  const storeRef = useRef<GraphStore>(null);
   if (!storeRef.current) {
-    storeRef.current = new GraphStore();
+    (storeRef as React.MutableRefObject<GraphStore>).current = new GraphStore();
   }
 
-  const queryRef = useRef<QueryEngine>();
+  const queryRef = useRef<QueryEngine>(null);
   if (!queryRef.current) {
-    queryRef.current = new QueryEngine(storeRef.current);
+    (queryRef as React.MutableRefObject<QueryEngine>).current = new QueryEngine(storeRef.current!);
   }
 
-  const aiRef = useRef<AIEngine>();
+  const aiRef = useRef<AIEngine>(null);
   if (!aiRef.current) {
-    aiRef.current = new AIEngine(storeRef.current, queryRef.current);
+    (aiRef as React.MutableRefObject<AIEngine>).current = new AIEngine(storeRef.current!, queryRef.current!);
   }
 
   const value: GraphContextValue = {
-    store: storeRef.current,
-    queryEngine: queryRef.current,
-    aiEngine: aiRef.current,
+    store: storeRef.current!,
+    queryEngine: queryRef.current!,
+    aiEngine: aiRef.current!,
   };
 
   return <GraphContext.Provider value={value}>{children}</GraphContext.Provider>;

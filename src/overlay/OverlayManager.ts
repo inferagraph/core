@@ -1,9 +1,13 @@
 export class OverlayManager {
-  private container: HTMLElement | null = null;
+  private _container: HTMLElement | null = null;
   private overlayRoot: HTMLElement | null = null;
 
+  get container(): HTMLElement | null {
+    return this._container;
+  }
+
   attach(container: HTMLElement): void {
-    this.container = container;
+    this._container = container;
     this.overlayRoot = document.createElement('div');
     this.overlayRoot.className = 'ig-overlay-root';
     container.appendChild(this.overlayRoot);
@@ -16,6 +20,6 @@ export class OverlayManager {
   detach(): void {
     this.overlayRoot?.remove();
     this.overlayRoot = null;
-    this.container = null;
+    this._container = null;
   }
 }

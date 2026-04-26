@@ -12,8 +12,8 @@ export class AIEngine {
   private readonly responseHandler: ResponseHandler;
 
   constructor(
-    private readonly store: GraphStore,
-    private readonly queryEngine: QueryEngine,
+    store: GraphStore,
+    queryEngine: QueryEngine,
   ) {
     this.contextBuilder = new ContextBuilder(store, queryEngine);
     const intentParser = new IntentParser(store);

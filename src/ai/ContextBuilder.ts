@@ -5,7 +5,7 @@ import type { QueryEngine } from '../store/QueryEngine.js';
 export class ContextBuilder {
   constructor(
     private readonly store: GraphStore,
-    private readonly queryEngine: QueryEngine,
+    _queryEngine: QueryEngine,
   ) {}
 
   buildContext(nodeIds: NodeId[]): string {

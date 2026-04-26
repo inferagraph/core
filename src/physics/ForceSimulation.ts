@@ -1,6 +1,5 @@
 import type { Vector3, NodeId } from '../types.js';
 import { BarnesHut } from './BarnesHut.js';
-import { CoulombForce } from './forces/CoulombForce.js';
 import { SpringForce } from './forces/SpringForce.js';
 import { CenteringForce } from './forces/CenteringForce.js';
 import { DampingForce } from './forces/DampingForce.js';
@@ -20,7 +19,6 @@ export class ForceSimulation {
   private nodes: SimulationNode[] = [];
   private edges: SimulationEdge[] = [];
   private readonly barnesHut = new BarnesHut();
-  private readonly coulomb = new CoulombForce();
   private readonly spring = new SpringForce();
   private readonly centering = new CenteringForce();
   private readonly damping = new DampingForce();
