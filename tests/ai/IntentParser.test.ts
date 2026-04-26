@@ -33,4 +33,27 @@ describe('IntentParser', () => {
     const ids = parser.extractReferencedNodeIds('No biblical names here');
     expect(ids).toHaveLength(0);
   });
+
+  describe('custom configuration', () => {
+    it('should use custom nameKey', () => {
+      store.addNode('3', { title: 'Jerusalem', label: 'Holy City' });
+      const customParser = new IntentParser(store, { nameKey: 'title', aliasesKey: 'aliases' });
+      const ids = customParser.extractReferencedNodeIds('The city of Jerusalem');
+      expect(ids).toContain('3');
+    });
+
+    it('should use custom aliasesKey', () => {
+      store.addNode('4', { name: 'Test', alternateNames: ['Alt1', 'Alt2'] });
+      const customParser = new IntentParser(store, { nameKey: 'name', aliasesKey: 'alternateNames' });
+      const ids = customParser.extractReferencedNodeIds('This references Alt1');
+      expect(ids).toContain('4');
+    });
+
+    it('should allow reconfiguration via configure()', () => {
+      store.addNode('5', { label: 'Custom', name: 'NotUsed' });
+      parser.configure({ nameKey: 'label' });
+      const ids = parser.extractReferencedNodeIds('Custom is referenced');
+      expect(ids).toContain('5');
+    });
+  });
 });

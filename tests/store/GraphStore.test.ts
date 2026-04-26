@@ -98,6 +98,99 @@ describe('GraphStore', () => {
     });
   });
 
+  describe('hasEdge', () => {
+    it('should return true for existing edge', () => {
+      store.addNode('1', { name: 'Adam', type: 'person' });
+      store.addNode('2', { name: 'Eve', type: 'person' });
+      store.addEdge('e1', '1', '2', { type: 'husband_of' });
+      expect(store.hasEdge('e1')).toBe(true);
+    });
+
+    it('should return false for non-existing edge', () => {
+      expect(store.hasEdge('e999')).toBe(false);
+    });
+  });
+
+  describe('merge', () => {
+    it('should merge new nodes and edges into an existing store', () => {
+      store.addNode('1', { name: 'Adam', type: 'person' });
+      store.addNode('2', { name: 'Eve', type: 'person' });
+      store.addEdge('e1', '1', '2', { type: 'husband_of' });
+
+      store.merge({
+        nodes: [
+          { id: '3', attributes: { name: 'Cain', type: 'person' } },
+        ],
+        edges: [
+          { id: 'e2', sourceId: '1', targetId: '3', attributes: { type: 'father_of' } },
+        ],
+      });
+
+      expect(store.nodeCount).toBe(3);
+      expect(store.edgeCount).toBe(2);
+      expect(store.getNode('3')?.attributes.name).toBe('Cain');
+      expect(store.getEdge('e2')?.attributes.type).toBe('father_of');
+    });
+
+    it('should skip duplicate node IDs', () => {
+      store.addNode('1', { name: 'Adam', type: 'person' });
+
+      store.merge({
+        nodes: [
+          { id: '1', attributes: { name: 'Different Adam', type: 'person' } },
+          { id: '2', attributes: { name: 'Eve', type: 'person' } },
+        ],
+        edges: [],
+      });
+
+      expect(store.nodeCount).toBe(2);
+      // Original node should be untouched
+      expect(store.getNode('1')?.attributes.name).toBe('Adam');
+      expect(store.getNode('2')?.attributes.name).toBe('Eve');
+    });
+
+    it('should skip duplicate edge IDs', () => {
+      store.addNode('1', { name: 'Adam', type: 'person' });
+      store.addNode('2', { name: 'Eve', type: 'person' });
+      store.addEdge('e1', '1', '2', { type: 'husband_of' });
+
+      store.merge({
+        nodes: [],
+        edges: [
+          { id: 'e1', sourceId: '1', targetId: '2', attributes: { type: 'different_type' } },
+        ],
+      });
+
+      expect(store.edgeCount).toBe(1);
+      // Original edge should be untouched
+      expect(store.getEdge('e1')?.attributes.type).toBe('husband_of');
+    });
+
+    it('should handle merging empty data', () => {
+      store.addNode('1', { name: 'Adam', type: 'person' });
+
+      store.merge({ nodes: [], edges: [] });
+
+      expect(store.nodeCount).toBe(1);
+      expect(store.edgeCount).toBe(0);
+    });
+
+    it('should merge into an empty store', () => {
+      store.merge({
+        nodes: [
+          { id: '1', attributes: { name: 'Adam', type: 'person' } },
+          { id: '2', attributes: { name: 'Eve', type: 'person' } },
+        ],
+        edges: [
+          { id: 'e1', sourceId: '1', targetId: '2', attributes: { type: 'husband_of' } },
+        ],
+      });
+
+      expect(store.nodeCount).toBe(2);
+      expect(store.edgeCount).toBe(1);
+    });
+  });
+
   describe('clear', () => {
     it('should remove all nodes and edges', () => {
       store.addNode('1', { name: 'Adam', type: 'person', gender: 'male' });

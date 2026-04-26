@@ -10,4 +10,8 @@
   --ig-tooltip-color: #e0e0e0;
   --ig-panel-bg: #1e1e3a;
   --ig-panel-color: #e0e0e0;
+  --ig-card-bg: rgba(30, 30, 46, 0.9);
+  --ig-card-border: rgba(255, 255, 255, 0.1);
+  --ig-card-border-radius: 8px;
+  --ig-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }

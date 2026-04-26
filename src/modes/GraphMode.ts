@@ -1,18 +1,24 @@
-import type { LayoutMode } from '../types.js';
+import type { LayoutMode, LayoutOptions } from '../types.js';
 
 export class GraphMode {
   readonly name: LayoutMode = 'graph';
-  private active = false;
+  private _active = false;
+  private _options: LayoutOptions = {};
 
-  activate(): void {
-    this.active = true;
+  activate(options?: LayoutOptions): void {
+    this._active = true;
+    this._options = options ?? {};
   }
 
   deactivate(): void {
-    this.active = false;
+    this._active = false;
   }
 
   isActive(): boolean {
-    return this.active;
+    return this._active;
+  }
+
+  get options(): LayoutOptions {
+    return this._options;
   }
 }

@@ -43,4 +43,35 @@ describe('SearchEngine', () => {
   it('should return empty for no matches', () => {
     expect(engine.search('xyznonexistent')).toHaveLength(0);
   });
+
+  describe('custom searchableKeys', () => {
+    it('should search only configured keys', () => {
+      const customEngine = new SearchEngine(store, { searchableKeys: ['name'] });
+      const results = customEngine.search('garden');
+      expect(results).toHaveLength(0); // 'garden' is a tag, not a name
+    });
+
+    it('should prioritize earlier keys over later keys', () => {
+      store.addNode('4', { name: 'garden', type: 'place', tags: ['special'] });
+      const customEngine = new SearchEngine(store, { searchableKeys: ['name', 'tags'] });
+      const results = customEngine.search('garden');
+      // Node 4 has 'garden' as name (higher priority), node 3 has it as tag (lower priority)
+      expect(results[0].nodeId).toBe('4');
+      expect(results[0].score).toBeGreaterThan(results[1].score);
+    });
+
+    it('should allow reconfiguration via configure()', () => {
+      engine.configure({ searchableKeys: ['type'] });
+      const results = engine.search('person');
+      expect(results).toHaveLength(2);
+    });
+
+    it('should search custom attribute keys', () => {
+      store.addNode('5', { name: 'Test', title: 'Important Document', category: 'research' });
+      const customEngine = new SearchEngine(store, { searchableKeys: ['title', 'category'] });
+      const results = customEngine.search('Important');
+      expect(results).toHaveLength(1);
+      expect(results[0].nodeId).toBe('5');
+    });
+  });
 });

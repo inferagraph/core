@@ -4,44 +4,8 @@ export type NodeId = string;
 /** Unique identifier for an edge */
 export type EdgeId = string;
 
-/** Node type categories */
-export type NodeType = 'person' | 'place' | 'clan' | 'group' | 'event';
-
-/** Gender for person nodes */
-export type Gender = 'male' | 'female' | 'unknown';
-
-/** Biblical era */
-export type Era =
-  | 'Creation'
-  | 'Patriarchs'
-  | 'Exodus'
-  | 'Judges'
-  | 'United Kingdom'
-  | 'Divided Kingdom'
-  | 'Exile'
-  | 'Return'
-  | 'Intertestamental'
-  | 'New Testament';
-
-/** Scripture reference */
-export interface ScriptureReference {
-  book: string;
-  startChapter: number;
-  startVerse: number;
-  endChapter?: number;
-  endVerse?: number;
-}
-
 /** Node attributes */
 export interface NodeAttributes {
-  name: string;
-  type: NodeType;
-  aliases?: string[];
-  gender?: Gender;
-  era?: Era;
-  references?: ScriptureReference[];
-  tags?: string[];
-  content?: string;
   [key: string]: unknown;
 }
 
@@ -113,6 +77,12 @@ export interface LLMCompletionResponse {
   };
 }
 
+/** LLM stream chunk */
+export interface LLMStreamChunk {
+  type: 'text' | 'done' | 'error';
+  content: string;
+}
+
 /** AI query result */
 export interface AIQueryResult {
   answer: string;
@@ -120,14 +90,105 @@ export interface AIQueryResult {
   context: string;
 }
 
+/**
+ * Function that renders a custom node into a DOM container.
+ * Returns an optional cleanup function called on removal.
+ */
+export type NodeRenderFn = (
+  container: HTMLElement,
+  node: NodeData,
+  state: NodeRenderState
+) => void | (() => void);
+
+/**
+ * State passed to custom node renderers.
+ */
+export interface NodeRenderState {
+  isSelected: boolean;
+  isHighlighted: boolean;
+}
+
+/**
+ * Props interface for React custom node components.
+ */
+export interface NodeComponentProps {
+  node: NodeData;
+  isSelected: boolean;
+  isHighlighted: boolean;
+}
+
+/**
+ * Data passed to custom tooltip renderers.
+ */
+export interface TooltipData {
+  type: 'node' | 'edge';
+  node?: NodeData;
+  edge?: EdgeData;
+}
+
+/**
+ * Function that renders a custom tooltip into a DOM container.
+ * Returns an optional cleanup function called on hide.
+ */
+export type TooltipRenderFn = (
+  container: HTMLElement,
+  data: TooltipData
+) => void | (() => void);
+
+/**
+ * Props interface for React custom tooltip components.
+ */
+export interface TooltipComponentProps {
+  type: 'node' | 'edge';
+  node?: NodeData;
+  edge?: EdgeData;
+}
+
+/**
+ * Configuration for custom tooltip rendering.
+ */
+export interface TooltipConfig {
+  /** Framework-agnostic custom renderer function — takes priority over component. */
+  renderTooltip?: TooltipRenderFn;
+  /** React.ComponentType<TooltipComponentProps> — typed as unknown to avoid React dep in core. */
+  component?: unknown;
+}
+
+/** How nodes are visually rendered */
+export type NodeStyle = 'dot' | 'card' | 'custom';
+
+/** Configuration for node rendering */
+export interface NodeRenderConfig {
+  /** Visual style: 'dot' (small circle, label outside) or 'card' (rounded rect, label inside) or 'custom' (user-provided renderer). Default: 'dot' */
+  style?: NodeStyle;
+  /** Card width in world units. Only used when style='card'. Default: 80 */
+  cardWidth?: number;
+  /** Card height in world units. Only used when style='card'. Default: 36 */
+  cardHeight?: number;
+  /** Framework-agnostic custom renderer function. Used when style='custom'. */
+  renderNode?: NodeRenderFn;
+  /** React.ComponentType<NodeComponentProps> — typed as unknown to avoid React dep in core. Used when style='custom'. */
+  component?: unknown;
+  /** Invisible sphere radius for raycasting. Used when style='custom'. Default: 20 */
+  hitboxRadius?: number;
+}
+
 /** Layout mode */
 export type LayoutMode = 'graph' | 'tree';
+
+/** Layout options */
+export interface LayoutOptions {
+  /** Whether nodes should animate (float/breathe) or remain static after layout computation. Default varies by layout. */
+  animated?: boolean;
+}
 
 /** InferaGraph configuration */
 export interface InferaGraphConfig {
   container: HTMLElement;
   data?: GraphData;
   layout?: LayoutMode;
+  layoutOptions?: LayoutOptions;
+  nodeRender?: NodeRenderConfig;
   theme?: string;
 }
 
@@ -144,4 +205,63 @@ export interface PluginContext {
   graphStore: unknown;
   renderer: unknown;
   aiEngine: unknown;
+}
+
+/** Serialized graph metadata */
+export interface SerializedGraphMetadata {
+  exportedAt: string;
+  nodeCount: number;
+  edgeCount: number;
+  [key: string]: unknown;
+}
+
+/** Versioned serialized graph */
+export interface SerializedGraph {
+  version: number;
+  nodes: NodeData[];
+  edges: EdgeData[];
+  metadata: SerializedGraphMetadata;
+}
+
+/** Era definition for timeline functionality */
+export interface EraDefinition {
+  name: string;
+  startYear: number;
+  endYear: number;
+  description?: string;
+}
+
+/** Time range for timeline queries */
+export interface TimeRange {
+  start: number;
+  end: number;
+}
+
+/** Content data for a node */
+export interface ContentData {
+  nodeId: NodeId;
+  content: string;
+  contentType?: string; // 'markdown' | 'html' | 'text'
+  metadata?: Record<string, unknown>;
+}
+
+/** Pagination options for data queries */
+export interface PaginationOptions {
+  offset: number;
+  limit: number;
+}
+
+/** Paginated result wrapper */
+export interface PaginatedResult<T> {
+  items: T[];
+  total: number;
+  hasMore: boolean;
+}
+
+/** Data filter for querying nodes */
+export interface DataFilter {
+  types?: string[];
+  tags?: string[];
+  attributes?: Record<string, unknown>;
+  search?: string;
 }

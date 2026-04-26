@@ -2,6 +2,10 @@
   "name": "@inferagraph/core",
   "version": "0.1.0",
   "description": "AI-powered knowledge graph platform with WebGL visualization",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/inferagraph/core.git"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

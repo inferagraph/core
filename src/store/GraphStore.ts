@@ -1,4 +1,4 @@
-import type { NodeId, EdgeId, NodeAttributes, EdgeAttributes, GraphData } from '../types.js';
+import type { NodeId, EdgeId, NodeAttributes, EdgeAttributes, GraphData, SerializedGraph } from '../types.js';
 import { Node } from './Node.js';
 import { Edge } from './Edge.js';
 import { Indexer } from './Indexer.js';
@@ -73,6 +73,10 @@ export class GraphStore {
     return this.edges.get(id);
   }
 
+  hasEdge(id: EdgeId): boolean {
+    return this.edges.has(id);
+  }
+
   getEdgesForNode(nodeId: NodeId): Edge[] {
     const edgeIds = this.adjacency.get(nodeId) ?? new Set();
     return [...edgeIds].map((id) => this.edges.get(id)!).filter(Boolean);
@@ -128,10 +132,57 @@ export class GraphStore {
     }
   }
 
+  /**
+   * Merge new graph data into the store without clearing existing data.
+   * Nodes that already exist (by ID) are skipped.
+   * Edges that already exist (by ID) are skipped.
+   */
+  merge(data: GraphData): void {
+    for (const nodeData of data.nodes) {
+      if (!this.hasNode(nodeData.id)) {
+        this.addNode(nodeData.id, nodeData.attributes);
+      }
+    }
+    for (const edgeData of data.edges) {
+      if (!this.hasEdge(edgeData.id)) {
+        this.addEdge(edgeData.id, edgeData.sourceId, edgeData.targetId, edgeData.attributes);
+      }
+    }
+  }
+
   clear(): void {
     this.nodes.clear();
     this.edges.clear();
     this.adjacency.clear();
     this.indexer.clear();
+  }
+
+  toJSON(): SerializedGraph {
+    return {
+      version: 1,
+      nodes: Array.from(this.nodes.values()).map(n => ({
+        id: n.id,
+        attributes: { ...n.attributes },
+      })),
+      edges: Array.from(this.edges.values()).map(e => ({
+        id: e.id,
+        sourceId: e.sourceId,
+        targetId: e.targetId,
+        attributes: { ...e.attributes },
+      })),
+      metadata: {
+        exportedAt: new Date().toISOString(),
+        nodeCount: this.nodeCount,
+        edgeCount: this.edgeCount,
+      },
+    };
+  }
+
+  fromJSON(data: SerializedGraph): void {
+    if (!data || data.version !== 1) {
+      throw new Error(`Unsupported schema version: ${data?.version}`);
+    }
+    this.clear();
+    this.loadData({ nodes: data.nodes, edges: data.edges });
   }
 }

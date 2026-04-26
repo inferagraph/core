@@ -1,9 +1,13 @@
-import type { NodeId, Vector3 } from '../types.js';
+import type { NodeId, Vector3, LayoutOptions } from '../types.js';
 import { LayoutEngine } from './LayoutEngine.js';
 
 export class TreeLayout extends LayoutEngine {
   readonly name = 'tree';
   private positions = new Map<NodeId, Vector3>();
+
+  constructor(options?: LayoutOptions) {
+    super({ animated: false, ...options });
+  }
 
   compute(
     nodeIds: NodeId[],

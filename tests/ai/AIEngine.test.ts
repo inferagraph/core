@@ -7,8 +7,10 @@ import type { LLMCompletionRequest, LLMCompletionResponse } from '../../src/type
 
 class MockProvider extends LLMProvider {
   readonly name = 'mock';
+  lastRequest: LLMCompletionRequest | null = null;
 
-  async complete(_request: LLMCompletionRequest): Promise<LLMCompletionResponse> {
+  async complete(request: LLMCompletionRequest): Promise<LLMCompletionResponse> {
+    this.lastRequest = request;
     return { content: 'Adam was the first human. Eve was his wife.', usage: { inputTokens: 100, outputTokens: 20 } };
   }
 
@@ -46,5 +48,35 @@ describe('AIEngine', () => {
     const provider = new MockProvider();
     engine.setProvider(provider);
     expect(engine.getProvider()).toBe(provider);
+  });
+
+  describe('custom system prompt', () => {
+    it('should use default generic prompt when no config provided', async () => {
+      const provider = new MockProvider();
+      engine.setProvider(provider);
+      await engine.query('Who is Adam?');
+      const systemMessage = provider.lastRequest!.messages[0];
+      expect(systemMessage.content).toContain('You are a knowledgeable assistant');
+    });
+
+    it('should use custom system prompt when configured', async () => {
+      const customEngine = new AIEngine(store, queryEngine, {
+        systemPrompt: 'You are a custom domain expert.',
+      });
+      const provider = new MockProvider();
+      customEngine.setProvider(provider);
+      await customEngine.query('Who is Adam?');
+      const systemMessage = provider.lastRequest!.messages[0];
+      expect(systemMessage.content).toContain('You are a custom domain expert.');
+    });
+
+    it('should allow reconfiguring system prompt via configure()', async () => {
+      const provider = new MockProvider();
+      engine.setProvider(provider);
+      engine.configure({ systemPrompt: 'Updated prompt.' });
+      await engine.query('Who is Adam?');
+      const systemMessage = provider.lastRequest!.messages[0];
+      expect(systemMessage.content).toContain('Updated prompt.');
+    });
   });
 });

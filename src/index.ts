@@ -2,10 +2,8 @@
 export type {
   NodeId,
   EdgeId,
-  NodeType,
-  Gender,
-  Era,
-  ScriptureReference,
+  EraDefinition,
+  TimeRange,
   NodeAttributes,
   EdgeAttributes,
   NodeData,
@@ -18,11 +16,28 @@ export type {
   LLMMessage,
   LLMCompletionRequest,
   LLMCompletionResponse,
+  LLMStreamChunk,
   AIQueryResult,
+  NodeStyle,
+  NodeRenderFn,
+  NodeRenderState,
+  NodeComponentProps,
+  NodeRenderConfig,
+  TooltipData,
+  TooltipRenderFn,
+  TooltipComponentProps,
+  TooltipConfig,
   LayoutMode,
+  LayoutOptions,
   InferaGraphConfig,
   Plugin,
   PluginContext,
+  SerializedGraph,
+  SerializedGraphMetadata,
+  ContentData,
+  PaginationOptions,
+  PaginatedResult,
+  DataFilter,
 } from './types.js';
 
 // Store
@@ -33,6 +48,10 @@ export { QueryEngine } from './store/QueryEngine.js';
 export { FilterEngine } from './store/FilterEngine.js';
 export { SearchEngine } from './store/SearchEngine.js';
 export { Indexer } from './store/Indexer.js';
+export { exportGraph, importGraph } from './store/Serializer.js';
+export { TimelineEngine } from './store/TimelineEngine.js';
+export { ClusterEngine } from './store/ClusterEngine.js';
+export type { Cluster } from './store/ClusterEngine.js';
 
 // AI
 export { AIEngine } from './ai/AIEngine.js';
@@ -40,6 +59,11 @@ export { LLMProvider } from './ai/LLMProvider.js';
 export { ContextBuilder } from './ai/ContextBuilder.js';
 export { IntentParser } from './ai/IntentParser.js';
 export { ResponseHandler } from './ai/ResponseHandler.js';
+
+// Animation
+export { AnimationManager } from './animation/AnimationManager.js';
+export { Tween, Easings } from './animation/Tween.js';
+export type { EasingFunction, TweenState } from './animation/Tween.js';
 
 // Physics
 export { ForceSimulation } from './physics/ForceSimulation.js';
@@ -60,7 +84,9 @@ export { WebGLRenderer } from './renderer/WebGLRenderer.js';
 export { NodeMesh } from './renderer/NodeMesh.js';
 export { EdgeMesh } from './renderer/EdgeMesh.js';
 export { LabelRenderer } from './renderer/LabelRenderer.js';
+export { CustomNodeRenderer } from './renderer/CustomNodeRenderer.js';
 export { Raycaster } from './renderer/Raycaster.js';
+export { CameraController } from './renderer/CameraController.js';
 export { InteractionManager } from './renderer/InteractionManager.js';
 export { ThemeManager } from './renderer/ThemeManager.js';
 
@@ -69,17 +95,39 @@ export { TooltipOverlay } from './overlay/TooltipOverlay.js';
 export { DetailPanel } from './overlay/DetailPanel.js';
 export { ChatPanel } from './overlay/ChatPanel.js';
 export { OverlayManager } from './overlay/OverlayManager.js';
+export { Minimap } from './overlay/Minimap.js';
+export type { MinimapConfig, ViewportRect } from './overlay/Minimap.js';
 
 // Modes
 export { GraphMode } from './modes/GraphMode.js';
 export { TreeMode } from './modes/TreeMode.js';
 export { ModeManager } from './modes/ModeManager.js';
+export { SelectionManager } from './modes/SelectionManager.js';
+export type { SelectionRect, SelectionMode } from './modes/SelectionManager.js';
+export { BatchOperations } from './modes/BatchOperations.js';
+export { KeyboardManager } from './modes/KeyboardManager.js';
+export type { KeyBinding, KeyAction, KeyboardContext } from './modes/KeyboardManager.js';
 
 // React
 export { InferaGraph } from './react/InferaGraph.js';
 export { useInferaGraph } from './react/useInferaGraph.js';
 export { GraphProvider } from './react/GraphProvider.js';
+export { createReactNodeRenderFn, createReactTooltipRenderFn } from './react/ReactNodeRenderer.js';
+
+// Export
+export { ExportEngine } from './export/ExportEngine.js';
+export type { ExportOptions, NodePosition, EdgePosition } from './export/ExportEngine.js';
+
+// Data
+export type { DataAdapter, DataAdapterConfig } from './data/DataAdapter.js';
+export { StaticDataAdapter } from './data/StaticDataAdapter.js';
+export { DataManager } from './data/DataManager.js';
+export { Datasource } from './data/Datasource.js';
 
 // Plugins
 export { PluginInterface } from './plugins/PluginInterface.js';
 export { PluginManager } from './plugins/PluginManager.js';
+
+// Utils
+export { joinNatural, aggregateEdges } from './utils/index.js';
+export type { EdgeLabelMap, AggregatedEdge } from './utils/index.js';

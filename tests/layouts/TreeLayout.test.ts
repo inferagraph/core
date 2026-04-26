@@ -27,4 +27,22 @@ describe('TreeLayout', () => {
     const positions = layout.compute([], []);
     expect(positions.size).toBe(0);
   });
+
+  it('should default animated to false', () => {
+    const layout = new TreeLayout();
+    expect(layout.animated).toBe(false);
+  });
+
+  it('should accept animated=true override', () => {
+    const layout = new TreeLayout({ animated: true });
+    expect(layout.animated).toBe(true);
+  });
+
+  it('should allow changing animated at runtime via setOptions', () => {
+    const layout = new TreeLayout();
+    expect(layout.animated).toBe(false);
+
+    layout.setOptions({ animated: true });
+    expect(layout.animated).toBe(true);
+  });
 });

@@ -10,15 +10,34 @@
   --ig-tooltip-color: #333333;
   --ig-panel-bg: #f8f9fa;
   --ig-panel-color: #333333;
+  --ig-card-bg: rgba(255, 255, 255, 0.9);
+  --ig-card-border: rgba(0, 0, 0, 0.1);
+  --ig-card-border-radius: 8px;
+  --ig-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
 .ig-label {
   position: absolute;
-  pointer-events: none;
   font: var(--ig-label-font);
   color: var(--ig-label-color);
   white-space: nowrap;
   user-select: none;
+}
+
+.ig-label-dot {
+  pointer-events: none;
+}
+
+.ig-label-card {
+  background: var(--ig-card-bg);
+  border: 1px solid var(--ig-card-border);
+  border-radius: var(--ig-card-border-radius);
+  box-shadow: var(--ig-card-shadow);
+  padding: 8px 16px;
+  font-weight: 500;
+  text-align: center;
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .ig-tooltip {

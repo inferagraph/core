@@ -14,4 +14,26 @@ describe('TreeMode', () => {
     mode.deactivate();
     expect(mode.isActive()).toBe(false);
   });
+
+  it('should store options when activated with options', () => {
+    const mode = new TreeMode();
+    mode.activate({ animated: false });
+    expect(mode.options).toEqual({ animated: false });
+  });
+
+  it('should default options to empty object when activated without options', () => {
+    const mode = new TreeMode();
+    mode.activate();
+    expect(mode.options).toEqual({});
+  });
+
+  it('should replace options on re-activation', () => {
+    const mode = new TreeMode();
+    mode.activate({ animated: false });
+    expect(mode.options).toEqual({ animated: false });
+
+    mode.deactivate();
+    mode.activate({ animated: true });
+    expect(mode.options).toEqual({ animated: true });
+  });
 });

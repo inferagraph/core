@@ -1,10 +1,15 @@
-import type { NodeId, Vector3 } from '../types.js';
+import type { NodeId, Vector3, LayoutOptions } from '../types.js';
 import { LayoutEngine } from './LayoutEngine.js';
 import { ForceSimulation } from '../physics/ForceSimulation.js';
 
 export class ForceLayout3D extends LayoutEngine {
   readonly name = 'force-3d';
   private readonly simulation = new ForceSimulation();
+  private computed = false;
+
+  constructor(options?: LayoutOptions) {
+    super({ animated: true, ...options });
+  }
 
   compute(
     nodeIds: NodeId[],
@@ -17,11 +22,14 @@ export class ForceLayout3D extends LayoutEngine {
       this.simulation.tick();
     }
 
+    this.computed = true;
     return this.simulation.getPositions();
   }
 
   tick(): void {
-    this.simulation.tick();
+    if (this.animated && this.computed) {
+      this.simulation.tick();
+    }
   }
 
   getPositions(): Map<NodeId, Vector3> {

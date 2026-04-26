@@ -30,6 +30,10 @@ export class ThemeManager {
       '--ig-tooltip-color',
       '--ig-panel-bg',
       '--ig-panel-color',
+      '--ig-card-bg',
+      '--ig-card-border',
+      '--ig-card-border-radius',
+      '--ig-card-shadow',
     ];
     for (const prop of props) {
       const value = style.getPropertyValue(prop).trim();

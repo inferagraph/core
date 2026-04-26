@@ -1,8 +1,8 @@
-import type { LayoutMode } from '../types.js';
+import type { LayoutMode, LayoutOptions } from '../types.js';
 
 interface Mode {
   name: LayoutMode;
-  activate(): void;
+  activate(options?: LayoutOptions): void;
   deactivate(): void;
 }
 
@@ -14,11 +14,11 @@ export class ModeManager {
     this.modes.set(mode.name, mode);
   }
 
-  switch(name: LayoutMode): void {
+  switch(name: LayoutMode, options?: LayoutOptions): void {
     if (this.activeMode) {
       this.modes.get(this.activeMode)?.deactivate();
     }
-    this.modes.get(name)?.activate();
+    this.modes.get(name)?.activate(options);
     this.activeMode = name;
   }
 
