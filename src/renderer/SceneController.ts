@@ -1317,22 +1317,28 @@ export class SceneController {
     const node = this.nodesByIndex[index];
     if (!node) return;
 
-    // Read positions from the cache as the source of truth.
+    // Pick the right position source for the active layout type.
     //
-    // Why not `this.layoutEngine.getPositions()`? On a round-trip into a
-    // static layout (graph → tree → graph → tree), `setLayout` constructs
-    // a NEW TreeLayout instance, then `computeActiveLayout` SHORT-CIRCUITS
-    // the recompute on cache hit. The new engine's internal `positions`
-    // map stays empty even though the cached map is fully populated. If we
-    // read from the engine here we'd miss every entry and fall through to
-    // {0,0,0} — making every hover slam the card to the origin (bug 0.1.19
-    // is fixing). The graph-mode (animated) engine always has live
-    // positions because its `compute()` runs on every entry, so the cache
-    // is equivalent there; we read from the same source for consistency.
-    const cached = this.layoutCache.get(this.layoutMode);
-    const positions = cached ?? this.layoutEngine.getPositions();
+    // Animated layouts (e.g. {@link ForceLayout3D}, `animated === true`):
+    // the engine ticks every frame and the live positions live on the
+    // engine instance — `layoutCache` only holds the INITIAL `compute()`
+    // snapshot and is never updated as physics evolves. Reading from the
+    // cache during a hover would snap the node back to its initial
+    // position for a single frame before the next physics tick restored
+    // the live position — a visible flicker (bug 0.1.24 fixes).
+    //
+    // Static layouts (e.g. {@link TreeLayout}, `animated === false`):
+    // positions are settled at compute time and never change. On a
+    // round-trip into the same static mode (graph → tree → graph → tree)
+    // `computeActiveLayout` short-circuits on a cache hit and the freshly
+    // constructed engine's internal `positions` map stays empty — so the
+    // engine is NOT a valid source here. The cache is the source of truth
+    // (bug 0.1.19's original fix, preserved).
+    const positions = this.layoutEngine.animated
+      ? this.layoutEngine.getPositions()
+      : this.layoutCache.get(this.layoutMode);
     const id = this.nodeIdsByIndex[index];
-    const pos = positions.get(id) ?? { x: 0, y: 0, z: 0 };
+    const pos = positions?.get(id) ?? { x: 0, y: 0, z: 0 };
 
     const color = hovered
       ? this.colorResolver.resolveHover(node)

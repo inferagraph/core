@@ -1283,6 +1283,123 @@ describe('SceneController', () => {
     });
   });
 
+  describe('paintNode position source', () => {
+    // Regression for the 0.1.24 graph-mode hover flicker.
+    //
+    // 0.1.19 made paintNode read from `layoutCache` to fix the tree-mode
+    // round-trip bug (a freshly-constructed TreeLayout's `getPositions()`
+    // is empty after a cache-hit re-entry). That fix is correct for STATIC
+    // layouts but wrong for ANIMATED ones: ForceLayout3D ticks every frame
+    // and the live positions live on the engine — `layoutCache` only holds
+    // the INITIAL `compute()` snapshot. Reading from the cache during a
+    // graph-mode hover snapped the node back to that initial position for a
+    // single frame before the next physics tick restored it (visible
+    // flicker). 0.1.24 makes paintNode pick the right source per layout
+    // type: engine for animated, cache for static.
+    const family: GraphData = {
+      nodes: [
+        { id: 'adam', attributes: { name: 'Adam', type: 'person' } },
+        { id: 'eve', attributes: { name: 'Eve', type: 'person' } },
+        { id: 'cain', attributes: { name: 'Cain', type: 'person' } },
+      ],
+      edges: [
+        { id: 'm1', sourceId: 'adam', targetId: 'eve', attributes: { type: 'husband_of' } },
+        { id: 'p1', sourceId: 'adam', targetId: 'cain', attributes: { type: 'father_of' } },
+      ],
+    };
+
+    it('paintNode reads live engine positions when the active layout is animated', () => {
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Tick the physics engine a few times so live positions diverge from
+      // the initial-compute snapshot the cache is holding.
+      const engine = ctrl.getLayoutEngine();
+      for (let i = 0; i < 5; i++) engine.tick();
+
+      const targetId = 'adam';
+      // @ts-expect-error — internal access for the assertion
+      const cached = ctrl['layoutCache'].get('graph') as Map<string, { x: number; y: number; z: number }>;
+      const live = engine.getPositions();
+      const cachedPos = cached.get(targetId)!;
+      const livePos = live.get(targetId)!;
+
+      // Sanity: physics has actually moved the node away from the initial
+      // cached snapshot. If this fails the test below would be vacuous.
+      const moved =
+        cachedPos.x !== livePos.x ||
+        cachedPos.y !== livePos.y ||
+        cachedPos.z !== livePos.z;
+      expect(moved).toBe(true);
+
+      // Spy on the node mesh's per-instance update so we can read the
+      // exact position paintNode handed to the renderer.
+      // @ts-expect-error — internal access for the spy
+      const nodeMesh = ctrl['nodeMesh']!;
+      const updateSpy = vi.spyOn(nodeMesh, 'updateInstance');
+
+      // @ts-expect-error — drive paintNode directly (the hover path in
+      // updateHover() funnels straight here).
+      ctrl['paintNode'](0, /* hovered */ true);
+
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      const [, passedPos] = updateSpy.mock.calls[0];
+      // Must equal the LIVE engine position, not the initial cached one.
+      expect(passedPos).toEqual(livePos);
+      expect(passedPos).not.toEqual(cachedPos);
+
+      ctrl.detach();
+    });
+
+    it('paintNode reads cached positions when the active layout is static (regression for tree-mode hover)', () => {
+      // Round-trip into tree mode: graph → tree → graph → tree. On the
+      // second entry into tree mode `computeActiveLayout` short-circuits on
+      // a cache hit, so the freshly-constructed TreeLayout's internal
+      // positions map stays empty. paintNode therefore MUST read from the
+      // cache for static layouts (else the tree card would slam to {0,0,0}
+      // on every hover).
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      ctrl.setLayout('tree');
+      ctrl.setLayout('graph');
+      ctrl.setLayout('tree');
+
+      // Precondition: the new TreeLayout instance's live positions are
+      // empty (cache hit re-entry).
+      expect(ctrl.getLayoutEngine().getPositions().size).toBe(0);
+
+      // The cache, on the other hand, must be populated.
+      // @ts-expect-error — internal access
+      const cached = ctrl['layoutCache'].get('tree') as Map<string, { x: number; y: number; z: number }>;
+      expect(cached).toBeTruthy();
+      expect(cached.size).toBeGreaterThan(0);
+
+      const targetId = 'adam';
+      const cachedPos = cached.get(targetId)!;
+
+      // @ts-expect-error — internal access
+      const treeMesh = ctrl['treeNodeMesh']!;
+      const updateSpy = vi.spyOn(treeMesh, 'updateCard');
+
+      // @ts-expect-error — drive paintNode directly
+      ctrl['paintNode'](0, /* hovered */ true);
+
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      const [passedId, passedPos] = updateSpy.mock.calls[0];
+      expect(passedId).toBe(targetId);
+      // Must equal the CACHED position; if the engine were used we'd see
+      // {0,0,0} (engine.getPositions() is empty here).
+      expect(passedPos).toEqual(cachedPos);
+
+      ctrl.detach();
+    });
+  });
+
   describe('per-mode camera state persistence', () => {
     // The two views must keep COMPLETELY independent camera state.
     // Toggling graph→tree→graph must restore the user's prior graph
