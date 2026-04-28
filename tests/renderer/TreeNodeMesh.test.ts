@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock three.js with the surface area TreeNodeMesh actually touches:
 // Group, Shape, ShapeGeometry, BufferGeometry (with setFromPoints),
@@ -106,6 +106,7 @@ vi.mock('three', () => {
       opacity: opts.opacity ?? 1,
       depthWrite: opts.depthWrite ?? true,
       side: opts.side,
+      map: opts.map ?? null,
     })),
     LineBasicMaterial: vi.fn().mockImplementation((opts: Record<string, unknown> = {}) => ({
       dispose: vi.fn(),
@@ -118,6 +119,18 @@ vi.mock('three', () => {
       },
       transparent: opts.transparent ?? false,
       opacity: opts.opacity ?? 1,
+    })),
+    PlaneGeometry: vi.fn().mockImplementation((width: number, height: number) => ({
+      type: 'PlaneGeometry',
+      parameters: { width, height },
+      dispose: vi.fn(),
+    })),
+    CanvasTexture: vi.fn().mockImplementation((canvas: unknown) => ({
+      type: 'CanvasTexture',
+      image: canvas,
+      needsUpdate: false,
+      anisotropy: 1,
+      dispose: vi.fn(),
     })),
     DoubleSide: 2,
   };
@@ -139,9 +152,33 @@ const sampleEntries: CardEntry[] = [
 
 describe('TreeNodeMesh', () => {
   let mesh: TreeNodeMesh;
+  let getContextSpy: ReturnType<typeof vi.spyOn> | null = null;
 
   beforeEach(() => {
     mesh = new TreeNodeMesh();
+    // jsdom's `<canvas>` returns `null` from `getContext('2d')` (no canvas
+    // backend bundled). Stub it with a no-op 2D context so the label-plane
+    // path actually executes.
+    getContextSpy = vi
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .mockImplementation(((type: string) => {
+        if (type !== '2d') return null;
+        return {
+          clearRect: vi.fn(),
+          fillText: vi.fn(),
+          measureText: vi.fn().mockReturnValue({ width: 50 }),
+          font: '',
+          textAlign: '',
+          textBaseline: '',
+          fillStyle: '',
+        } as unknown as CanvasRenderingContext2D;
+      }) as unknown as typeof HTMLCanvasElement.prototype.getContext);
+  });
+
+  afterEach(() => {
+    getContextSpy?.mockRestore();
+    getContextSpy = null;
   });
 
   describe('build', () => {
@@ -239,6 +276,64 @@ describe('TreeNodeMesh', () => {
         width: TreeNodeMesh.DEFAULT_WIDTH,
         height: TreeNodeMesh.DEFAULT_HEIGHT,
       });
+    });
+  });
+
+  describe('label rendering', () => {
+    // 0.1.16: tree-mode card text is rasterised inside the WebGL card via
+    // a CanvasTexture-backed plane. The HTML LabelRenderer overlay is
+    // intentionally not used in tree mode, so the card itself owns the
+    // text. These tests guard the structural shape of the resulting mesh
+    // group.
+    it('adds a third child plane carrying a CanvasTexture when label is supplied', () => {
+      mesh.build([
+        { id: 'adam', position: { x: 0, y: 0, z: 0 }, color: '#fff', label: 'Adam' },
+      ]);
+      const targets = mesh.getRaycastTargets();
+      const card = targets[0] as {
+        children: Array<{
+          type?: string;
+          geometry?: { type?: string };
+          material?: { map?: { type?: string } };
+        }>;
+      };
+      // fill mesh + outline LineLoop + label plane = 3 children.
+      expect(card.children.length).toBe(3);
+      const labelMesh = card.children.find(
+        (c) => c.geometry?.type === 'PlaneGeometry',
+      );
+      expect(labelMesh).toBeDefined();
+      // The label plane's material must carry a CanvasTexture in `.map`.
+      expect(labelMesh?.material?.map?.type).toBe('CanvasTexture');
+    });
+
+    it('omits the label plane when no label is supplied (back-compat)', () => {
+      mesh.build([
+        { id: 'adam', position: { x: 0, y: 0, z: 0 }, color: '#fff' },
+      ]);
+      const targets = mesh.getRaycastTargets();
+      const card = targets[0] as { children: Array<{ geometry?: { type?: string } }> };
+      // Only fill + outline; no label plane.
+      expect(card.children.length).toBe(2);
+      expect(
+        card.children.some((c) => c.geometry?.type === 'PlaneGeometry'),
+      ).toBe(false);
+    });
+
+    it('omits the label plane gracefully when 2D canvas context is unavailable', () => {
+      // Restore the stub so getContext returns null again — mirrors a
+      // pure SSR / Node-without-jsdom environment.
+      getContextSpy?.mockRestore();
+      vi
+        .spyOn(HTMLCanvasElement.prototype, 'getContext')
+        .mockReturnValue(null as unknown as CanvasRenderingContext2D);
+
+      mesh.build([
+        { id: 'adam', position: { x: 0, y: 0, z: 0 }, color: '#fff', label: 'Adam' },
+      ]);
+      const targets = mesh.getRaycastTargets();
+      const card = targets[0] as { children: Array<{ geometry?: { type?: string } }> };
+      expect(card.children.length).toBe(2);
     });
   });
 

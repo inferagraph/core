@@ -10,6 +10,7 @@ const setNodeRender = vi.fn();
 const setTooltip = vi.fn();
 const setIncomingEdgeLabels = vi.fn();
 const setOutgoingEdgeLabels = vi.fn();
+const setTreeFilter = vi.fn();
 const resize = vi.fn();
 
 let lastConstructorArgs: unknown[] = [];
@@ -26,6 +27,7 @@ vi.mock('../../src/renderer/SceneController.js', () => ({
       setTooltip,
       setIncomingEdgeLabels,
       setOutgoingEdgeLabels,
+      setTreeFilter,
       resize,
     };
   }),
@@ -55,6 +57,7 @@ describe('InferaGraph', () => {
     setTooltip.mockReset();
     setIncomingEdgeLabels.mockReset();
     setOutgoingEdgeLabels.mockReset();
+    setTreeFilter.mockReset();
     resize.mockReset();
     lastConstructorArgs = [];
   });

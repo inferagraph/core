@@ -489,6 +489,109 @@ describe('SceneController', () => {
     });
   });
 
+  describe('treeFilter', () => {
+    // The Bible-Graph use case: tree mode should show ONLY people, hiding
+    // events / places / clans. The filter is wired on the React layer
+    // (`<InferaGraph treeFilter={...} />`) but the SceneController is the
+    // single source of truth; verify the predicate is applied to both
+    // cards and connectors.
+    const mixed: GraphData = {
+      nodes: [
+        { id: 'noah', attributes: { name: 'Noah', type: 'person' } },
+        { id: 'shem', attributes: { name: 'Shem', type: 'person' } },
+        { id: 'flood', attributes: { name: 'The Flood', type: 'event' } },
+        { id: 'ararat', attributes: { name: 'Ararat', type: 'place' } },
+      ],
+      edges: [
+        // father_of: noah -> shem (kept).
+        { id: 'p1', sourceId: 'noah', targetId: 'shem', attributes: { type: 'father_of' } },
+        // participant_in: noah -> flood (dropped because flood is filtered).
+        { id: 'p2', sourceId: 'noah', targetId: 'flood', attributes: { type: 'participant_in' } },
+      ],
+    };
+
+    it('passes only filter-passing nodes to TreeNodeMesh on build', async () => {
+      seedStore(store, mixed);
+      const ctrl = new SceneController({
+        store,
+        layout: 'tree',
+        treeFilter: (n) => n.attributes.type === 'person',
+      });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // The only Object3D added to the scene under '__tree_nodes__' is the
+      // TreeNodeMesh root Group, whose children are the per-node card
+      // groups. The filter should leave only the two people.
+      const root = ctrl.getRenderer().getObject('__tree_nodes__') as
+        | { children: Array<{ userData: { nodeId: string } }> }
+        | undefined;
+      expect(root).toBeDefined();
+      const ids = root!.children.map((c) => c.userData.nodeId).sort();
+      expect(ids).toEqual(['noah', 'shem']);
+
+      ctrl.detach();
+    });
+
+    it('renders every node when no treeFilter is supplied (back-compat)', () => {
+      seedStore(store, mixed);
+      const ctrl = new SceneController({ store, layout: 'tree' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      const root = ctrl.getRenderer().getObject('__tree_nodes__') as
+        | { children: Array<{ userData: { nodeId: string } }> }
+        | undefined;
+      expect(root).toBeDefined();
+      const ids = root!.children.map((c) => c.userData.nodeId).sort();
+      expect(ids).toEqual(['ararat', 'flood', 'noah', 'shem']);
+
+      ctrl.detach();
+    });
+
+    it('exposes a setter that rebuilds the tree on a runtime filter swap', () => {
+      seedStore(store, mixed);
+      const ctrl = new SceneController({ store, layout: 'tree' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Swap to a person-only predicate at runtime.
+      ctrl.setTreeFilter((n) => n.attributes.type === 'person');
+      const root = ctrl.getRenderer().getObject('__tree_nodes__') as
+        | { children: Array<{ userData: { nodeId: string } }> }
+        | undefined;
+      const ids = root!.children.map((c) => c.userData.nodeId).sort();
+      expect(ids).toEqual(['noah', 'shem']);
+
+      // Clear the filter and confirm everything comes back.
+      ctrl.setTreeFilter(undefined);
+      const root2 = ctrl.getRenderer().getObject('__tree_nodes__') as
+        | { children: Array<{ userData: { nodeId: string } }> }
+        | undefined;
+      const ids2 = root2!.children.map((c) => c.userData.nodeId).sort();
+      expect(ids2).toEqual(['ararat', 'flood', 'noah', 'shem']);
+
+      ctrl.detach();
+    });
+
+    it('keeps the HTML LabelRenderer overlay empty in tree mode', () => {
+      // Tree mode renders labels inside the WebGL cards (CanvasTexture),
+      // so the HTML overlay must stay empty. This guards against the
+      // 0.1.15 regression where graph-mode labels collapsed to (0,0) when
+      // the orthographic tree camera projected them.
+      seedStore(store, mixed);
+      const ctrl = new SceneController({ store, layout: 'tree' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      const overlay = container.querySelector('.ig-label-overlay');
+      expect(overlay).not.toBeNull();
+      expect(overlay!.querySelectorAll('.ig-label').length).toBe(0);
+
+      ctrl.detach();
+    });
+  });
+
   describe('lazy layout dispatch', () => {
     // Regression: SceneController must compute ONLY the active layout. The
     // inactive layout's `compute()` must never run on attach + sync, and

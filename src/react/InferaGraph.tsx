@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useMemo } from 'react';
 import type {
   GraphData,
   LayoutMode,
+  NodeData,
   NodeRenderConfig,
   NodeComponentProps,
   TooltipConfig,
@@ -40,6 +41,17 @@ export interface InferaGraphProps {
    * description (e.g. `{ father_of: 'Father of' }`).
    */
   outgoingEdgeLabels?: EdgeLabelMap;
+  /**
+   * Optional consumer-supplied predicate used to restrict which nodes are
+   * visible in tree mode. When supplied, only nodes for which the predicate
+   * returns `true` are rendered as cards (and only edges between visible
+   * nodes appear as connectors). Has no effect in graph mode.
+   *
+   * Use case: a Bible-Graph-style consumer that wants tree mode to show
+   * ONLY people, hiding places / events / clans, can pass
+   * `(n) => n.attributes.type === 'person'`. Default: no filter.
+   */
+  treeFilter?: (node: NodeData) => boolean;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -55,6 +67,7 @@ interface InferaGraphInnerProps {
   edgeColorFn?: EdgeColorFn;
   incomingEdgeLabels?: EdgeLabelMap;
   outgoingEdgeLabels?: EdgeLabelMap;
+  treeFilter?: (node: NodeData) => boolean;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -70,6 +83,7 @@ function InferaGraphInner({
   edgeColorFn,
   incomingEdgeLabels,
   outgoingEdgeLabels,
+  treeFilter,
   className,
   style,
 }: InferaGraphInnerProps): React.JSX.Element {
@@ -119,6 +133,7 @@ function InferaGraphInner({
       edgeColorFn,
       incomingEdgeLabels,
       outgoingEdgeLabels,
+      treeFilter,
     });
     controller.attach(container);
     controllerRef.current = controller;
@@ -182,6 +197,12 @@ function InferaGraphInner({
     controller.setOutgoingEdgeLabels(outgoingEdgeLabels);
   }, [outgoingEdgeLabels]);
 
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    controller.setTreeFilter(treeFilter);
+  }, [treeFilter]);
+
   return (
     <div
       ref={containerRef}
@@ -204,6 +225,7 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     edgeColorFn,
     incomingEdgeLabels,
     outgoingEdgeLabels,
+    treeFilter,
     className,
     style,
   } = props;
@@ -220,6 +242,7 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
         edgeColorFn={edgeColorFn}
         incomingEdgeLabels={incomingEdgeLabels}
         outgoingEdgeLabels={outgoingEdgeLabels}
+        treeFilter={treeFilter}
         className={className}
         style={style}
       />

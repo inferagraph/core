@@ -94,6 +94,21 @@ export interface SceneControllerOptions {
    * {@link SceneControllerOptions.incomingEdgeLabels}.
    */
   outgoingEdgeLabels?: EdgeLabelMap;
+  /**
+   * Optional consumer-supplied predicate used to restrict which nodes are
+   * visible in tree mode. When supplied, only nodes for which the predicate
+   * returns `true` are passed to {@link TreeLayout} / {@link TreeNodeMesh},
+   * and edges whose source or target is filtered out are dropped from the
+   * tree connectors.
+   *
+   * The predicate ONLY affects tree mode. Graph mode always renders the
+   * full data set so consumers can flip into tree view to focus a specific
+   * sub-population (e.g. only people, hiding places + events) and back to
+   * the full graph without surprise.
+   *
+   * Default: `() => true` (no filter — same as 0.1.15 behaviour).
+   */
+  treeFilter?: (node: NodeData) => boolean;
 }
 
 /**
@@ -154,6 +169,7 @@ export class SceneController {
   private tooltip: TooltipConfig | undefined;
   private incomingEdgeLabels: EdgeLabelMap | undefined;
   private outgoingEdgeLabels: EdgeLabelMap | undefined;
+  private treeFilter: (node: NodeData) => boolean;
 
   private showLabels: boolean;
   private enableHover: boolean;
@@ -199,6 +215,7 @@ export class SceneController {
     this.tooltip = options.tooltip;
     this.incomingEdgeLabels = options.incomingEdgeLabels;
     this.outgoingEdgeLabels = options.outgoingEdgeLabels;
+    this.treeFilter = options.treeFilter ?? (() => true);
     this.showLabels = options.showLabels ?? true;
     this.enableHover = options.enableHover ?? true;
 
@@ -414,7 +431,26 @@ export class SceneController {
       this.applyGraphCamera();
       this.buildGraphMeshes(edges, positions);
     }
-    this.frameToFit(positions);
+    // Frame to the visible nodes only — in tree mode the consumer's
+    // `treeFilter` may have hidden a chunk of the data set; centring the
+    // camera on the unfiltered centroid would leave the tree off-axis.
+    this.frameToFit(this.framingPositions(positions));
+  }
+
+  /**
+   * Restrict a positions map to the nodes that are actually rendered in
+   * the active layout. Graph mode renders everything; tree mode honours
+   * the consumer's {@link SceneControllerOptions.treeFilter} predicate.
+   */
+  private framingPositions(positions: Map<string, Vector3>): Map<string, Vector3> {
+    if (this.layoutMode !== 'tree') return positions;
+    const visible = this.getTreeVisibleIds();
+    if (visible.size === positions.size) return positions;
+    const out = new Map<string, Vector3>();
+    for (const [id, p] of positions) {
+      if (visible.has(id)) out.set(id, p);
+    }
+    return out;
   }
 
   /**
@@ -477,46 +513,66 @@ export class SceneController {
 
   /**
    * Build the tree-view meshes:
-   *   - A {@link TreeNodeMesh} (one rounded-rect card per node, fill
-   *     translucent dark, outline = node colour).
+   *   - A {@link TreeNodeMesh} (one rounded-rect card per visible node,
+   *     fill translucent dark, outline = node colour, with the node's
+   *     title rasterised inside).
    *   - A {@link TreeEdgeMesh} containing the orthogonal connectors
    *     (marriage line, parent-to-bar drop, sibling bar, drops to
    *     children).
    *
    * Called from {@link syncFromStore} and on entry to tree mode from
    * {@link setLayout}.
+   *
+   * Honours the consumer's {@link SceneControllerOptions.treeFilter}
+   * predicate. Nodes that fail the filter are skipped, and any edge whose
+   * source or target is hidden is dropped.
    */
   private buildTreeMeshes(positions: Map<string, Vector3>): void {
+    const visibleIds = this.getTreeVisibleIds();
+
     const treeNodeMesh = new TreeNodeMesh();
-    const entries = this.nodeIdsByIndex.map((id, index) => ({
-      id,
-      position: positions.get(id) ?? { x: 0, y: 0, z: 0 },
-      color: this.baseColorsByIndex[index],
-    }));
+    const entries: Array<{
+      id: string;
+      position: Vector3;
+      color: string;
+      label?: string;
+    }> = [];
+    this.nodeIdsByIndex.forEach((id, index) => {
+      if (!visibleIds.has(id)) return;
+      const node = this.nodesByIndex[index];
+      const labelText = SceneController.getLabelText(node);
+      entries.push({
+        id,
+        position: positions.get(id) ?? { x: 0, y: 0, z: 0 },
+        color: this.baseColorsByIndex[index],
+        label: labelText ?? undefined,
+      });
+    });
     treeNodeMesh.build(entries);
     const root = treeNodeMesh.getMesh();
     if (root) this.renderer.addObject('__tree_nodes__', root);
     this.treeNodeMesh = treeNodeMesh;
 
-    // HTML labels overlay the cards. Use the existing 'card' label style
-    // so the text sits centred inside the rectangle.
-    this.labelRenderer.setStyle('card');
-    if (this.showLabels) {
-      this.nodesByIndex.forEach((node) => {
-        const text = SceneController.getLabelText(node);
-        if (text) this.labelRenderer.addLabel(node.id, text);
-      });
-    }
+    // Tree-mode labels are rasterised inside each card by the TreeNodeMesh
+    // itself; the HTML LabelRenderer is intentionally NOT populated here.
+    // Leaving HTML labels in place would project them through whichever
+    // camera the renderer holds — when the user toggles into tree mode,
+    // those projections collapse to (0,0) of the screen because the
+    // graph-mode label set still references the prior force-layout
+    // positions / projection matrix. Keeping the tree-mode label set
+    // empty is the simplest fix and makes the tree view self-contained.
 
     // Raycast targets are the per-card groups (each carries
-    // `userData.nodeId`).
+    // `userData.nodeId`). Only visible cards exist, so no ghost hits from
+    // filtered nodes.
     this.raycaster.setObjects(treeNodeMesh.getRaycastTargets());
     this.raycaster.setNodeIds(this.nodeIdsByIndex);
     const cam = this.renderer.getCamera();
     if (cam) this.raycaster.setCamera(cam);
 
     // Build the orthogonal connectors from the tree topology + positions.
-    const segments = this.computeTreeEdgeSegments(positions);
+    // Edges whose source or target is hidden by the filter are skipped.
+    const segments = this.computeTreeEdgeSegments(positions, visibleIds);
     if (segments.length > 0) {
       const treeEdgeMesh = new TreeEdgeMesh();
       treeEdgeMesh.build(segments);
@@ -524,6 +580,20 @@ export class SceneController {
       if (mesh) this.renderer.addObject('__tree_edges__', mesh);
       this.treeEdgeMesh = treeEdgeMesh;
     }
+  }
+
+  /**
+   * Set of node ids currently visible in tree mode. Built from the
+   * consumer's {@link SceneControllerOptions.treeFilter} predicate; the
+   * graph view always renders the full data set.
+   */
+  private getTreeVisibleIds(): Set<string> {
+    const visible = new Set<string>();
+    for (let i = 0; i < this.nodeIdsByIndex.length; i++) {
+      const node = this.nodesByIndex[i];
+      if (this.treeFilter(node)) visible.add(this.nodeIdsByIndex[i]);
+    }
+    return visible;
   }
 
   private teardownGraphMeshes(): void {
@@ -568,6 +638,7 @@ export class SceneController {
    */
   private computeTreeEdgeSegments(
     positions: Map<string, Vector3>,
+    visibleIds?: Set<string>,
   ): TreeEdgeSegment[] {
     const segments: TreeEdgeSegment[] = [];
     const cardSize = this.treeNodeMesh?.getCardSize() ?? {
@@ -582,11 +653,16 @@ export class SceneController {
     const PARENT = new Set(['father_of', 'mother_of', 'parent_of']);
     const SPOUSE = new Set(['husband_of', 'wife_of', 'married_to', 'spouse_of']);
 
-    // Build groupings: child -> parent ids; node -> spouse ids.
+    // Build groupings: child -> parent ids; node -> spouse ids. Edges
+    // touching a filtered-out node are skipped here so the connector
+    // graph never references hidden cards.
     const parentsOfChild = new Map<string, Set<string>>();
     const spousesOf = new Map<string, Set<string>>();
     for (const e of this.edgeEndpoints) {
       if (!e.type) continue;
+      if (visibleIds && (!visibleIds.has(e.sourceId) || !visibleIds.has(e.targetId))) {
+        continue;
+      }
       if (PARENT.has(e.type)) {
         const ps = parentsOfChild.get(e.targetId) ?? new Set<string>();
         ps.add(e.sourceId);
@@ -777,7 +853,9 @@ export class SceneController {
       const edges = this.store.getAllEdges();
       this.buildGraphMeshes(edges, positions);
     }
-    this.frameToFit(positions);
+    // Frame against the visible-only positions in tree mode so a heavily
+    // filtered subset still sits centred in the viewport.
+    this.frameToFit(this.framingPositions(positions));
   }
 
   /**
@@ -815,7 +893,10 @@ export class SceneController {
     if (this.showLabels === show) return;
     this.showLabels = show;
     this.labelRenderer.clear();
-    if (show) {
+    // The HTML LabelRenderer is graph-mode only. Tree-mode labels live
+    // inside the WebGL cards (rasterised by TreeNodeMesh) and are toggled
+    // by rebuilding the cards, not by repopulating the overlay.
+    if (show && this.layoutMode !== 'tree') {
       this.nodesByIndex.forEach((node) => {
         const text = SceneController.getLabelText(node);
         if (text) this.labelRenderer.addLabel(node.id, text);
@@ -952,8 +1033,11 @@ export class SceneController {
     // scale modulation is applied on top of the latest layout positions.
     this.applyPulse();
 
-    // Project labels.
-    if (this.showLabels) this.projectLabels();
+    // Project labels. Tree mode renders its labels inside the WebGL cards
+    // (CanvasTexture) so the HTML overlay stays empty there — projecting
+    // it through the orthographic camera would otherwise collapse every
+    // label to the screen origin.
+    if (this.showLabels && this.layoutMode !== 'tree') this.projectLabels();
 
     // Update hover state if pointer is over the canvas.
     if (this.enableHover && this.pointerActive) this.updateHover();
@@ -1153,6 +1237,31 @@ export class SceneController {
   /** Active outgoing-edge label map (for tests + introspection). */
   getOutgoingEdgeLabels(): EdgeLabelMap | undefined {
     return this.outgoingEdgeLabels;
+  }
+
+  /**
+   * Replace the tree-mode visibility predicate. When tree mode is active
+   * the meshes are rebuilt so the change is visible immediately; in graph
+   * mode the new filter is just stashed for the next entry into tree mode.
+   * Pass `undefined` to clear the filter.
+   */
+  setTreeFilter(filter: ((node: NodeData) => boolean) | undefined): void {
+    this.treeFilter = filter ?? (() => true);
+    if (!this.container) return;
+    if (this.layoutMode !== 'tree') return;
+    if (this.nodeIdsByIndex.length === 0) return;
+    // Tear down the old tree meshes and rebuild from the cached layout.
+    this.teardownTreeMeshes();
+    this.labelRenderer.clear();
+    const positions = this.computeActiveLayout();
+    this.applyTreeCamera();
+    this.buildTreeMeshes(positions);
+    this.frameToFit(this.framingPositions(positions));
+  }
+
+  /** Active tree-mode filter (for tests + introspection). */
+  getTreeFilter(): (node: NodeData) => boolean {
+    return this.treeFilter;
   }
 
   /**

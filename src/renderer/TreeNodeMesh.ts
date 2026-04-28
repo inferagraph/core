@@ -4,9 +4,10 @@ import type { Vector3 } from '../types.js';
 /**
  * Per-node "card" mesh used by the tree view. Each node renders as a
  * rounded-rectangle plane (translucent dark fill) with a coloured outline
- * matching the node's resolved colour. A single `THREE.Group` aggregates
- * fill + outline so the SceneController can swap one Object3D per node
- * into the scene.
+ * matching the node's resolved colour, plus a centred CanvasTexture-backed
+ * text plane that displays the node's title. A single `THREE.Group`
+ * aggregates fill + outline + label so the SceneController can swap one
+ * Object3D per node into the scene.
  *
  * Why not InstancedMesh? Because each card needs a per-instance border
  * colour, and instancing-with-vertex-colour would require a custom
@@ -14,6 +15,13 @@ import type { Vector3 } from '../types.js';
  * one mesh per node is well below 1ms per frame and dramatically simpler
  * to maintain. Instancing is reserved for the graph view's sphere mesh
  * which routinely hits 1000+ nodes.
+ *
+ * Why CanvasTexture for labels (instead of HTML overlays)? The HTML
+ * `LabelRenderer` projects through whichever camera the renderer holds.
+ * Switching to the orthographic tree camera while still iterating the
+ * graph-mode label set caused every label to collapse to (0,0). Painting
+ * the title directly into the card mesh removes the cross-system
+ * coupling entirely and makes the tree view self-contained.
  *
  * Hit-testing: each Group stamps its `userData.nodeId` so the
  * {@link Raycaster} can resolve a hit back to the originating node id.
@@ -28,11 +36,23 @@ export class TreeNodeMesh {
   static readonly DEFAULT_FILL_COLOR = '#1e1e2e';
   static readonly DEFAULT_FILL_OPACITY = 0.8;
 
+  /** Default label colour — zinc-200, matches the marketing-site spec. */
+  static readonly DEFAULT_LABEL_COLOR = '#e4e4e7';
+
+  /**
+   * Pixel density for the label canvas. The card is sized in world units
+   * but the canvas it textures is rasterised at a fixed pixels-per-unit so
+   * the resulting glyphs stay crisp at the orthographic camera's typical
+   * zoom range. Roughly matches a 1.5× DPR-adjusted CSS pixel.
+   */
+  static readonly LABEL_PIXELS_PER_UNIT = 6;
+
   private readonly width: number;
   private readonly height: number;
   private readonly radius: number;
   private readonly fillColor: string;
   private readonly fillOpacity: number;
+  private readonly labelColor: string;
 
   /**
    * Group of per-node card objects. Each child is a `THREE.Group`
@@ -48,26 +68,35 @@ export class TreeNodeMesh {
     radius?: number;
     fillColor?: string;
     fillOpacity?: number;
+    labelColor?: string;
   }) {
     this.width = options?.width ?? TreeNodeMesh.DEFAULT_WIDTH;
     this.height = options?.height ?? TreeNodeMesh.DEFAULT_HEIGHT;
     this.radius = options?.radius ?? TreeNodeMesh.DEFAULT_RADIUS;
     this.fillColor = options?.fillColor ?? TreeNodeMesh.DEFAULT_FILL_COLOR;
     this.fillOpacity = options?.fillOpacity ?? TreeNodeMesh.DEFAULT_FILL_OPACITY;
+    this.labelColor = options?.labelColor ?? TreeNodeMesh.DEFAULT_LABEL_COLOR;
   }
 
   /**
    * (Re)build the card group from scratch. Disposes any prior geometry
    * so successive `build` calls are safe.
+   *
+   * Each entry may carry an optional `label` — when present, a
+   * CanvasTexture-backed plane is added inside the card to display the
+   * label. Entries without a label render as bare cards (back-compat with
+   * pre-0.1.16 callers).
    */
-  build(entries: Array<{ id: string; position: Vector3; color: string }>): void {
+  build(
+    entries: Array<{ id: string; position: Vector3; color: string; label?: string }>,
+  ): void {
     this.dispose();
 
     const root = new THREE.Group();
     root.name = 'TreeNodeMesh.root';
 
     for (const entry of entries) {
-      const card = this.createCard(entry.id, entry.color);
+      const card = this.createCard(entry.id, entry.color, entry.label);
       card.group.position.set(entry.position.x, entry.position.y, entry.position.z);
       root.add(card.group);
       this.cards.set(entry.id, card);
@@ -114,6 +143,9 @@ export class TreeNodeMesh {
       card.fillMaterial.dispose();
       card.outlineGeometry.dispose();
       card.outlineMaterial.dispose();
+      card.labelGeometry?.dispose();
+      card.labelMaterial?.dispose();
+      card.labelTexture?.dispose();
     }
     this.cards.clear();
     this.root = null;
@@ -121,7 +153,11 @@ export class TreeNodeMesh {
 
   // --- internals ---
 
-  private createCard(nodeId: string, outlineColor: string): TreeCardEntry {
+  private createCard(
+    nodeId: string,
+    outlineColor: string,
+    label?: string,
+  ): TreeCardEntry {
     const w = this.width;
     const h = this.height;
     const r = Math.min(this.radius, w / 2, h / 2);
@@ -169,13 +205,87 @@ export class TreeNodeMesh {
     group.add(fillMesh);
     group.add(outlineMesh);
 
+    // ---- Optional label plane ----
+    let labelGeometry: THREE.PlaneGeometry | undefined;
+    let labelMaterial: THREE.MeshBasicMaterial | undefined;
+    let labelTexture: THREE.CanvasTexture | undefined;
+    if (label && label.length > 0) {
+      const built = this.buildLabelPlane(label);
+      if (built) {
+        labelGeometry = built.geometry;
+        labelMaterial = built.material;
+        labelTexture = built.texture;
+        const labelMesh = new THREE.Mesh(built.geometry, built.material);
+        // Sit above the outline (z=0.01) so the text isn't clipped.
+        labelMesh.position.set(0, 0, 0.02);
+        labelMesh.renderOrder = 2;
+        group.add(labelMesh);
+      }
+    }
+
     return {
       group,
       fillGeometry,
       fillMaterial,
       outlineGeometry,
       outlineMaterial,
+      labelGeometry,
+      labelMaterial,
+      labelTexture,
     };
+  }
+
+  /**
+   * Rasterise the supplied text into an offscreen canvas, upload it as a
+   * `THREE.CanvasTexture`, and return a transparent plane mesh sized to
+   * fill the card. Returns null in environments where 2D canvas isn't
+   * available (e.g. the headless test mock for `three`).
+   */
+  private buildLabelPlane(text: string): {
+    geometry: THREE.PlaneGeometry;
+    material: THREE.MeshBasicMaterial;
+    texture: THREE.CanvasTexture;
+  } | null {
+    const ppu = TreeNodeMesh.LABEL_PIXELS_PER_UNIT;
+    const canvasW = Math.max(1, Math.round(this.width * ppu));
+    const canvasH = Math.max(1, Math.round(this.height * ppu));
+
+    // `document.createElement` exists in jsdom; in non-DOM contexts the
+    // texture path is skipped entirely.
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
+      return null;
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    // Transparent background — the rounded-rect fill mesh sits behind us.
+    ctx.clearRect(0, 0, canvasW, canvasH);
+    // Font sized to the card height with comfortable padding (50% of height).
+    const fontPx = Math.max(8, Math.round(this.height * ppu * 0.5));
+    ctx.font = `bold ${fontPx}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = this.labelColor;
+    ctx.fillText(text, canvasW / 2, canvasH / 2);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    // Crisper text under the orthographic camera.
+    if ('anisotropy' in (texture as unknown as Record<string, unknown>)) {
+      (texture as unknown as { anisotropy: number }).anisotropy = 4;
+    }
+    texture.needsUpdate = true;
+
+    const geometry = new THREE.PlaneGeometry(this.width, this.height);
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+    });
+
+    return { geometry, material, texture };
   }
 }
 
@@ -185,4 +295,7 @@ interface TreeCardEntry {
   fillMaterial: THREE.MeshBasicMaterial;
   outlineGeometry: THREE.BufferGeometry;
   outlineMaterial: THREE.LineBasicMaterial;
+  labelGeometry?: THREE.PlaneGeometry;
+  labelMaterial?: THREE.MeshBasicMaterial;
+  labelTexture?: THREE.CanvasTexture;
 }
