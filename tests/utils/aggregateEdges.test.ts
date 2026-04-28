@@ -142,6 +142,82 @@ describe('aggregateEdges', () => {
     expect(result[0].description).toBe('Father of Jacob');
   });
 
+  it('uses the singular form of an { one, other } label when one target', () => {
+    // The Flood is the TARGET of an incoming `participant_in` edge from
+    // a single source — the bucket has count 1 so the singular form wins.
+    const edges: EdgeData[] = [
+      edge('e1', 'abraham', 'flood', 'participant_in'),
+    ];
+
+    const result = aggregateEdges(
+      'flood',
+      edges,
+      getName,
+      { participant_in: { one: 'Has participant', other: 'Has participants' } },
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].label).toBe('Has participant');
+    expect(result[0].names).toEqual(['Abraham']);
+    expect(result[0].description).toBe('Has participant Abraham');
+  });
+
+  it('uses the plural form of an { one, other } label when many targets', () => {
+    // Reproduces the original bug: "Has participant Noah, Shem, Ham, and
+    // Japheth" — the bucket has four targets, so the consumer-supplied
+    // plural form must be picked.
+    const flood = (sourceId: string): EdgeData =>
+      edge(`e-${sourceId}`, sourceId, 'flood', 'participant_in');
+    const edges: EdgeData[] = [
+      flood('noah'),
+      flood('shem'),
+      flood('ham'),
+      flood('japheth'),
+    ];
+
+    const localNames: Record<string, string> = {
+      noah: 'Noah',
+      shem: 'Shem',
+      ham: 'Ham',
+      japheth: 'Japheth',
+    };
+    const localGetName = (id: string): string => localNames[id] ?? id;
+
+    const result = aggregateEdges(
+      'flood',
+      edges,
+      localGetName,
+      { participant_in: { one: 'Has participant', other: 'Has participants' } },
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].label).toBe('Has participants');
+    expect(result[0].names).toEqual(['Noah', 'Shem', 'Ham', 'Japheth']);
+    expect(result[0].description).toBe(
+      'Has participants Noah, Shem, Ham, and Japheth',
+    );
+  });
+
+  it('treats plain-string labels as invariant across cardinality', () => {
+    // Verb phrases like "Was home to" do not pluralize — a plain string
+    // value must continue to be used as-is for any number of targets.
+    const edges: EdgeData[] = [
+      edge('e1', 'abraham', 'canaan', 'dwelt_in'),
+      edge('e2', 'isaac', 'canaan', 'dwelt_in'),
+    ];
+
+    const result = aggregateEdges(
+      'canaan',
+      edges,
+      getName,
+      { dwelt_in: 'Was home to' },
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].label).toBe('Was home to');
+    expect(result[0].description).toBe('Was home to Abraham and Isaac');
+  });
+
   it('dedupes targets when bidirectional edges map to the same label', () => {
     // Bible Graph seed has both directions explicit:
     //   adam → father_of → seth   AND   seth → son_of → adam
