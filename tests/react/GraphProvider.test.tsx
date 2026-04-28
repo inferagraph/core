@@ -166,6 +166,41 @@ describe('GraphProvider', () => {
     expect(dataManagerRef).not.toBe('not-set');
   });
 
+  it('returns a stable context value across re-renders when data is unchanged', () => {
+    // Regression: prior to 0.1.7 the context value object was rebuilt on every
+    // render of `GraphProvider`. Combined with a fresh `StaticDataAdapter`
+    // also recreated on every render, downstream consumer effects (e.g.
+    // `InferaGraphInner`'s controller-mount effect) could re-fire on every
+    // parent render and — on graphs with bidirectional edges (`father_of`
+    // ↔ `son_of`) — produce a runaway render loop that exhausted the call
+    // stack with `RangeError: Maximum call stack size exceeded`.
+    const data: GraphData = {
+      nodes: [
+        { id: 'abraham', attributes: { name: 'Abraham', type: 'person' } },
+        { id: 'isaac', attributes: { name: 'Isaac', type: 'person' } },
+      ],
+      edges: [
+        { id: 'e1', sourceId: 'abraham', targetId: 'isaac', attributes: { type: 'father_of' } },
+        { id: 'e2', sourceId: 'isaac', targetId: 'abraham', attributes: { type: 'son_of' } },
+      ],
+    };
+    const seen: Array<ReturnType<typeof useGraphContext>> = [];
+    const { rerender } = render(
+      <GraphProvider data={data}>
+        <ContextReader onContext={(ctx) => { seen.push(ctx); }} />
+      </GraphProvider>,
+    );
+    rerender(
+      <GraphProvider data={data}>
+        <ContextReader onContext={(ctx) => { seen.push(ctx); }} />
+      </GraphProvider>,
+    );
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    // Same `data` reference + same isReady → context value should be
+    // referentially stable so consumer effects don't re-fire.
+    expect(seen[0]).toBe(seen[seen.length - 1]);
+  });
+
   it('should throw when useGraphContext is used outside of GraphProvider', () => {
     function BadComponent() {
       useGraphContext();

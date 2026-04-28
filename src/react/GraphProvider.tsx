@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useRef, useEffect, useState, useCallback, type ReactNode } from 'react';
+import React, { createContext, useContext, useRef, useEffect, useMemo, useState, useCallback, type ReactNode } from 'react';
 import { GraphStore } from '../store/GraphStore.js';
 import { QueryEngine } from '../store/QueryEngine.js';
 import { AIEngine } from '../ai/AIEngine.js';
@@ -52,8 +52,17 @@ export function GraphProvider({
 
   const dataManagerRef = useRef<DataManager | null>(null);
 
-  // Create DataManager from adapter or data prop
-  const resolvedAdapter = adapter ?? (data ? new StaticDataAdapter(data) : null);
+  // Create DataManager from adapter or data prop. The resolved adapter is
+  // memoized on the (adapter, data) pair so we don't churn out a fresh
+  // `StaticDataAdapter` on every render — that previously caused the
+  // initialization `useEffect` below to refire on every parent re-render
+  // (its dep array referenced the unmemoized adapter), which compounded
+  // with downstream renderer effects and could produce a runaway render
+  // loop on graphs with bidirectional edges.
+  const resolvedAdapter = useMemo<DataAdapter | null>(
+    () => adapter ?? (data ? new StaticDataAdapter(data) : null),
+    [adapter, data],
+  );
 
   if (!dataManagerRef.current && resolvedAdapter) {
     dataManagerRef.current = new DataManager(storeRef.current!, resolvedAdapter);
@@ -81,16 +90,27 @@ export function GraphProvider({
     }
   }, [resolvedAdapter, initialize]);
 
-  const value: GraphContextValue = {
-    store: storeRef.current!,
-    queryEngine: queryRef.current!,
-    aiEngine: aiRef.current!,
-    dataManager: dataManagerRef.current,
-  };
-
-  // Expose isReady through a second context or directly on the value
-  // For simplicity, we'll store it on the value object
-  (value as GraphContextValue & { isReady: boolean }).isReady = isReady;
+  // Memoize the context value so that consumer renders + downstream effects
+  // (e.g. `InferaGraphInner`'s controller-mount effect) only fire when one
+  // of the underlying engines or `isReady` actually changes. Without this
+  // every render produces a fresh object reference, which makes any consumer
+  // useEffect that depends on the destructured context unstable — the
+  // observed symptom on graphs with bidirectional edges (`father_of` ↔
+  // `son_of`) was a runaway re-render that exhausted the call stack.
+  const value = useMemo<GraphContextValue & { isReady: boolean }>(
+    () => ({
+      store: storeRef.current!,
+      queryEngine: queryRef.current!,
+      aiEngine: aiRef.current!,
+      dataManager: dataManagerRef.current,
+      isReady,
+    }),
+    // dataManagerRef.current changes from null → DataManager exactly once
+    // when `resolvedAdapter` first becomes non-null, so we depend on
+    // `resolvedAdapter` to capture that transition. The store / query /
+    // ai engines are created once per provider lifetime.
+    [isReady, resolvedAdapter],
+  );
 
   return <GraphContext.Provider value={value}>{children}</GraphContext.Provider>;
 }

@@ -196,6 +196,51 @@ describe('InferaGraph', () => {
     expect(detach).not.toHaveBeenCalled();
   });
 
+  it('does not re-mount the controller when the parent re-renders with the same data + props (bidirectional edges)', async () => {
+    // Regression for the runaway-render stack overflow seen on graphs with
+    // bidirectional edges (Bible Graph's `father_of` ↔ `son_of`). Repeated
+    // parent re-renders must not tear down + rebuild the SceneController —
+    // a stable context value from `GraphProvider` is what makes this hold.
+    const familyData: GraphData = {
+      nodes: [
+        { id: 'abraham', attributes: { name: 'Abraham', type: 'person' } },
+        { id: 'isaac', attributes: { name: 'Isaac', type: 'person' } },
+      ],
+      edges: [
+        { id: 'e1', sourceId: 'abraham', targetId: 'isaac', attributes: { type: 'father_of' } },
+        { id: 'e2', sourceId: 'isaac', targetId: 'abraham', attributes: { type: 'son_of' } },
+      ],
+    };
+    const incoming = { father_of: 'Son of', son_of: 'Father of' };
+    const outgoing = { father_of: 'Father of', son_of: 'Son of' };
+    const { rerender } = render(
+      <InferaGraph
+        data={familyData}
+        incomingEdgeLabels={incoming}
+        outgoingEdgeLabels={outgoing}
+      />,
+    );
+    await waitFor(() => expect(attach).toHaveBeenCalledTimes(1));
+
+    // Three forced re-renders with the same prop references — the controller
+    // must mount exactly once. Without the GraphProvider context-value
+    // memoization, the inner `useEffect([store, renderer])` would fire on
+    // every render and tear down + rebuild the controller, which is the
+    // pathology that produced `RangeError: Maximum call stack size exceeded`.
+    for (let i = 0; i < 3; i++) {
+      rerender(
+        <InferaGraph
+          data={familyData}
+          incomingEdgeLabels={incoming}
+          outgoingEdgeLabels={outgoing}
+        />,
+      );
+    }
+
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(detach).not.toHaveBeenCalled();
+  });
+
   it('observes container resize and forwards to the controller', async () => {
     const observeSpy = vi.fn();
     const disconnectSpy = vi.fn();
