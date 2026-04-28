@@ -45,4 +45,30 @@ describe('TreeLayout', () => {
     layout.setOptions({ animated: true });
     expect(layout.animated).toBe(true);
   });
+
+  it('should not blow the stack on bidirectional edges (cycle)', () => {
+    // Bible Graph emits gender-specific reciprocal edges, e.g.
+    //   adam -> father_of -> cain
+    //   cain -> son_of    -> adam
+    // which forms a cycle in the directed graph the layout traverses.
+    const layout = new TreeLayout();
+    const nodeIds = ['a', 'b', 'c'];
+    const edges = [
+      { sourceId: 'a', targetId: 'b' },
+      { sourceId: 'b', targetId: 'a' },
+      { sourceId: 'b', targetId: 'c' },
+      { sourceId: 'c', targetId: 'b' },
+    ];
+
+    expect(() => layout.compute(nodeIds, edges)).not.toThrow();
+    const positions = layout.compute(nodeIds, edges);
+    expect(positions.size).toBeGreaterThan(0);
+  });
+
+  it('should not blow the stack on a self-loop', () => {
+    const layout = new TreeLayout();
+    expect(() =>
+      layout.compute(['x'], [{ sourceId: 'x', targetId: 'x' }]),
+    ).not.toThrow();
+  });
 });
