@@ -74,7 +74,7 @@ export class NodeMesh {
       case 'card':
         this.geometry = this.createRoundedRectGeometry(this.cardWidth, this.cardHeight, 6);
         this.material = new THREE.MeshPhongMaterial({
-          color: this.color,
+          color: 0xffffff, // white base — instance colors render directly via setColorAt
           shininess: 30,
           specular: 0x111111,
         });
@@ -93,7 +93,7 @@ export class NodeMesh {
         // depth-aware look instead of a flat-shaded disc.
         this.geometry = new THREE.SphereGeometry(1, 24, 24);
         this.material = new THREE.MeshPhongMaterial({
-          color: this.color,
+          color: 0xffffff, // white base — instance colors render directly via setColorAt
           shininess: 40,
           specular: 0x222233,
         });
