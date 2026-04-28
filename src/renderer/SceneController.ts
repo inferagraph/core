@@ -597,7 +597,6 @@ export class SceneController {
     if (this.layoutMode === 'tree') {
       this.applyTreeCamera();
       this.buildTreeMeshes(positions);
-      this.cameraController.resetCameraOrientation();
     } else {
       this.applyGraphCamera();
       this.buildGraphMeshes(edges, positions);
@@ -606,6 +605,16 @@ export class SceneController {
     // `treeFilter` may have hidden a chunk of the data set; centring the
     // camera on the unfiltered centroid would leave the tree off-axis.
     this.frameToFit(this.framingPositions(positions));
+    // Tree first-entry: re-assert axis-alignment AFTER frameToFit so the
+    // orthographic eye is purely along +Z relative to the freshly-framed
+    // tree centroid. (frameToFit's setTarget→placeCameraAtRadius preserves
+    // whatever direction the prior eye vector pointed in — which, on the
+    // graph→tree transition, can carry residual X/Y components from the
+    // prior perspective camera state. Resetting last guarantees a clean
+    // axis-aligned eye regardless of the incoming state.)
+    if (this.layoutMode === 'tree') {
+      this.cameraController.resetCameraOrientation();
+    }
   }
 
   /**
@@ -1058,8 +1067,14 @@ export class SceneController {
       this.buildTreeMeshes(positions);
 
       // 2. Restore the saved tree-mode camera if we have one; otherwise
-      //    fall through to the first-entry default (axis-align +
-      //    frameToFit on the visible subset).
+      //    fall through to the first-entry default (frameToFit on the
+      //    visible subset, then axis-align). The reset MUST run AFTER
+      //    frameToFit: frameToFit's setTarget→placeCameraAtRadius
+      //    preserves the prior eye direction, which on the graph→tree
+      //    transition still carries residual X/Y components from the
+      //    perspective camera. Resetting last guarantees the orthographic
+      //    eye is purely along +Z relative to the freshly-framed tree
+      //    centroid.
       if (this.treeCameraSnapshot && this.orthographicCamera) {
         applyCameraState(
           this.orthographicCamera,
@@ -1067,8 +1082,8 @@ export class SceneController {
           this.treeCameraSnapshot,
         );
       } else {
-        this.cameraController.resetCameraOrientation();
         this.frameToFit(this.framingPositions(positions));
+        this.cameraController.resetCameraOrientation();
       }
     } else {
       this.teardownTreeMeshes();

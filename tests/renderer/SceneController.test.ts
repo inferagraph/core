@@ -1186,6 +1186,69 @@ describe('SceneController', () => {
       expect(resetSpy).not.toHaveBeenCalled();
       ctrl.detach();
     });
+
+    it('orthographic camera is axis-aligned on first entry to tree mode regardless of prior graph rotation', () => {
+      // Regression for 0.1.20: on the graph→tree transition, frameToFit's
+      // setTarget→placeCameraAtRadius preserved whatever eye direction the
+      // (rotated) perspective camera carried, so the orthographic eye ended
+      // up off the +Z axis and projected every card at an angle. The fix
+      // re-asserts axis-alignment AFTER frameToFit so the final eye vector
+      // is purely along +Z relative to the freshly-framed tree centroid.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Pose the perspective camera as if the user had rotated + panned
+      // the graph view to a non-trivial off-axis state. Both the camera
+      // position and the trackball target are non-zero AND non-collinear
+      // along Z, so any code path that preserves the prior eye direction
+      // when re-targeting will produce a non-axis-aligned orthographic
+      // eye.
+      const persp = ctrl.getRenderer().getCamera() as unknown as {
+        position: { set: (x: number, y: number, z: number) => unknown; x: number; y: number; z: number };
+      };
+      const controls = ctrl.getCameraController().getControls();
+      if (!persp || !controls) throw new Error('camera/controls not attached');
+      persp.position.set(100, 200, 50);
+      controls.target.set(10, 20, 0);
+      // A few update() ticks bake the state into the trackball internals
+      // so any residual damping cannot hide the off-axis eye.
+      ctrl.getCameraController().update();
+      ctrl.getCameraController().update();
+      ctrl.getCameraController().update();
+
+      // First-ever entry to tree mode.
+      ctrl.setLayout('tree');
+
+      // The orthographic camera must end up purely along +Z relative to
+      // the trackball target — the orthographic projection assumes
+      // axis-aligned cards, so any off-axis component skews the render.
+      const ortho = ctrl.getRenderer().getCamera() as unknown as {
+        position: { x: number; y: number; z: number };
+        up: { set: ReturnType<typeof vi.fn>; x: number; y: number; z: number };
+        quaternion: { x: number; y: number; z: number; w: number };
+      };
+      const target = ctrl.getCameraController().getTarget();
+
+      // Eye = position - target must be (0, 0, +radius).
+      expect(ortho.position.x).toBeCloseTo(target.x, 5);
+      expect(ortho.position.y).toBeCloseTo(target.y, 5);
+      expect(ortho.position.z).toBeGreaterThan(target.z);
+
+      // up was rewritten to the canonical Y axis.
+      expect(ortho.up.set).toHaveBeenCalledWith(0, 1, 0);
+
+      // The orthographic camera carries no leftover rotation. lookAt is
+      // mocked so the quaternion is whatever resetCameraOrientation /
+      // earlier swap paths wrote; in practice that's the identity.
+      expect(Math.abs(ortho.quaternion.x)).toBeLessThan(1e-6);
+      expect(Math.abs(ortho.quaternion.y)).toBeLessThan(1e-6);
+      expect(Math.abs(ortho.quaternion.z)).toBeLessThan(1e-6);
+      expect(Math.abs(Math.abs(ortho.quaternion.w) - 1)).toBeLessThan(1e-6);
+
+      ctrl.detach();
+    });
   });
 
   describe('per-mode camera state persistence', () => {
