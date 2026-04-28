@@ -140,6 +140,21 @@ export class SceneController {
   private edgeEndpoints: Array<{ sourceId: string; targetId: string }> = [];
   private baseColorsByIndex: string[] = [];
 
+  /**
+   * Per-mode cache of computed layout positions. Only the active layout is
+   * ever computed — inactive layouts are NEVER invoked. Cleared whenever the
+   * underlying graph data changes (in `syncFromStore`) so stale positions
+   * don't outlive the data they describe.
+   *
+   * Static (non-animated) layouts (e.g. {@link TreeLayout}) take advantage
+   * of this cache so toggling away and back doesn't re-run the layout.
+   * Animated layouts (e.g. {@link ForceLayout3D}) always recompute on entry
+   * — their internal physics state needs seeding and the recompute is cheap
+   * — but their entry still goes through the same single-engine pathway
+   * so the inactive layout remains untouched.
+   */
+  private layoutCache = new Map<LayoutMode, Map<string, Vector3>>();
+
   private hoveredIndex: number | null = null;
   private pointerX: number = 0;
   private pointerY: number = 0;
@@ -346,10 +361,19 @@ export class SceneController {
     this.baseColorsByIndex = this.nodesByIndex.map((n) => this.colorResolver.resolve(n));
     this.pulseController.reset();
 
+    // The graph data just changed — every cached layout is stale. Drop
+    // them so the next entry into any mode (active or otherwise) recomputes
+    // from the fresh data. We deliberately do NOT pre-populate inactive
+    // modes' caches: only the active layout runs on sync.
+    this.layoutCache.clear();
+
     if (nodes.length === 0) return;
 
-    // Compute initial positions.
-    const positions = this.layoutEngine.compute(this.nodeIdsByIndex, this.edgeEndpoints);
+    // Compute positions for the ACTIVE layout only. Inactive layouts (e.g.
+    // TreeLayout while in graph view) are never touched, so a buggy
+    // inactive layout cannot leak compute cost or exceptions into the
+    // active code path.
+    const positions = this.computeActiveLayout();
 
     // Build the (single) instanced node mesh that holds every node.
     const nodeMesh = new NodeMesh(this.nodeRender);
@@ -405,8 +429,12 @@ export class SceneController {
   }
 
   /**
-   * Switch layout mode at runtime. Re-runs layout and rebuilds positions
-   * (but reuses existing meshes when possible).
+   * Switch layout mode at runtime. Lazily computes the new mode's positions
+   * (via the active engine only — inactive layouts are never invoked) and
+   * caches them so a later toggle back can short-circuit.
+   *
+   * Existing meshes are reused; only the per-instance positions are
+   * rewritten.
    */
   setLayout(mode: LayoutMode): void {
     if (mode === this.layoutMode) return;
@@ -415,7 +443,7 @@ export class SceneController {
 
     if (this.nodeIdsByIndex.length === 0) return;
 
-    const positions = this.layoutEngine.compute(this.nodeIdsByIndex, this.edgeEndpoints);
+    const positions = this.computeActiveLayout();
     this.applyPositions(positions);
     this.frameToFit(positions);
   }
@@ -510,6 +538,42 @@ export class SceneController {
   }
 
   // --- internals ---
+
+  /**
+   * Compute (or recover from cache) the positions for the active layout.
+   *
+   * This is the single chokepoint through which both `syncFromStore` and
+   * `setLayout` go — it guarantees the inactive layout's `compute()` is
+   * NEVER invoked, no matter how many times the consumer toggles modes.
+   *
+   * Cache rules:
+   *  - Static layouts (e.g. {@link TreeLayout}, `animated === false`):
+   *    cached. A toggle away and back skips the recompute entirely.
+   *  - Animated layouts (e.g. {@link ForceLayout3D}, `animated === true`):
+   *    always recompute on entry so the engine's internal physics state
+   *    is seeded for the per-frame `tick()`. We still cache the freshly
+   *    computed positions so consumers (like {@link applyPulse}) that read
+   *    `getPositions()` between ticks see a consistent snapshot.
+   *
+   * The cache is invalidated wholesale by {@link syncFromStore} whenever
+   * the underlying graph data changes.
+   */
+  private computeActiveLayout(): Map<string, Vector3> {
+    const mode = this.layoutMode;
+    const engine = this.layoutEngine;
+
+    // Static layouts: short-circuit on cache hit. The inactive engine is
+    // never touched even if a stale entry for the OTHER mode lives in the
+    // cache — we only ever read by the active mode key.
+    if (!engine.animated) {
+      const cached = this.layoutCache.get(mode);
+      if (cached) return cached;
+    }
+
+    const positions = engine.compute(this.nodeIdsByIndex, this.edgeEndpoints);
+    this.layoutCache.set(mode, positions);
+    return positions;
+  }
 
   private applyPositions(positions: Map<string, Vector3>): void {
     if (this.nodeMesh) {

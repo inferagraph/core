@@ -361,6 +361,77 @@ describe('SceneController', () => {
     });
   });
 
+  describe('lazy layout dispatch', () => {
+    // Regression: SceneController must compute ONLY the active layout. The
+    // inactive layout's `compute()` must never run on attach + sync, and
+    // toggling away and back must not re-trigger it. This keeps a buggy
+    // inactive layout (e.g. TreeLayout cycle exception) out of the active
+    // code path and avoids wasted compute when the user never toggles.
+    it('never invokes TreeLayout.compute while in graph view', () => {
+      seedStore(store, sample);
+      const treeSpy = vi.spyOn(TreeLayout.prototype, 'compute');
+
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      expect(treeSpy).not.toHaveBeenCalled();
+
+      ctrl.detach();
+      treeSpy.mockRestore();
+    });
+
+    it('only invokes TreeLayout.compute on the toggle into tree mode', () => {
+      seedStore(store, sample);
+      const treeSpy = vi.spyOn(TreeLayout.prototype, 'compute');
+
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+      expect(treeSpy).not.toHaveBeenCalled();
+
+      ctrl.setLayout('tree');
+      expect(treeSpy).toHaveBeenCalledTimes(1);
+
+      // Toggling back to graph must NOT touch TreeLayout again — graph
+      // recomputes via its own ForceLayout3D engine.
+      ctrl.setLayout('graph');
+      expect(treeSpy).toHaveBeenCalledTimes(1);
+
+      ctrl.detach();
+      treeSpy.mockRestore();
+    });
+
+    it('caches static-layout positions across toggles within a sync window', () => {
+      seedStore(store, sample);
+      const treeSpy = vi.spyOn(TreeLayout.prototype, 'compute');
+
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // First entry into tree: compute fires.
+      ctrl.setLayout('tree');
+      expect(treeSpy).toHaveBeenCalledTimes(1);
+
+      // Toggle away and back — without an intervening syncFromStore the
+      // positions are still valid, so the cache must absorb the second
+      // entry without a recompute.
+      ctrl.setLayout('graph');
+      ctrl.setLayout('tree');
+      expect(treeSpy).toHaveBeenCalledTimes(1);
+
+      // After syncFromStore the data may have changed, so the cache is
+      // invalidated and a fresh compute is required.
+      ctrl.syncFromStore();
+      ctrl.setLayout('tree');
+      expect(treeSpy).toHaveBeenCalledTimes(2);
+
+      ctrl.detach();
+      treeSpy.mockRestore();
+    });
+  });
+
   describe('setNodeRender', () => {
     it('stores the new config', () => {
       const ctrl = new SceneController({ store });
