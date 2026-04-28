@@ -22,6 +22,7 @@ import {
   type NodeColorFn,
   type NodeColorResolverOptions,
 } from './NodeColorResolver.js';
+import { PulseController, type PulseOption } from './PulseController.js';
 
 export interface SceneControllerOptions {
   store: GraphStore;
@@ -36,6 +37,13 @@ export interface SceneControllerOptions {
   showLabels?: boolean;
   /** Toggle hover tooltip + colour change. Default: true. */
   enableHover?: boolean;
+  /**
+   * Pulse animation: `false` disables, `true` (or omitted) uses defaults,
+   * an object lets the host tune period / amplitude / colour amplitude.
+   * Hovered nodes are automatically excluded from the pulse so the active
+   * node feels stable while interacted with.
+   */
+  pulse?: PulseOption;
 }
 
 /**
@@ -59,6 +67,7 @@ export class SceneController {
   private readonly raycaster = new Raycaster();
   private readonly tooltipOverlay = new TooltipOverlay();
   private readonly colorResolver: NodeColorResolver;
+  private readonly pulseController: PulseController;
 
   private container: HTMLElement | null = null;
   private labelOverlay: HTMLElement | null = null;
@@ -78,6 +87,7 @@ export class SceneController {
   private nodeIdsByIndex: string[] = [];
   private nodesByIndex: NodeData[] = [];
   private edgeEndpoints: Array<{ sourceId: string; targetId: string }> = [];
+  private baseColorsByIndex: string[] = [];
 
   private hoveredIndex: number | null = null;
   private pointerX: number = 0;
@@ -104,6 +114,7 @@ export class SceneController {
       ...(options.nodeColors ?? {}),
       colorFn: options.nodeColorFn ?? options.nodeColors?.colorFn,
     });
+    this.pulseController = new PulseController(options.pulse);
   }
 
   /** The WebGLRenderer this controller drives. Exposed for advanced consumers. */
@@ -139,6 +150,16 @@ export class SceneController {
   /** The colour resolver (exposed for tests + advanced consumers). */
   getColorResolver(): NodeColorResolver {
     return this.colorResolver;
+  }
+
+  /** The pulse controller (exposed for tests + advanced consumers). */
+  getPulseController(): PulseController {
+    return this.pulseController;
+  }
+
+  /** The camera controller (exposed for advanced consumers — rotation, framing, etc.). */
+  getCameraController(): CameraController {
+    return this.cameraController;
   }
 
   /** Index of the currently hovered node, if any. */
@@ -218,8 +239,10 @@ export class SceneController {
     this.nodeIdsByIndex = [];
     this.nodesByIndex = [];
     this.edgeEndpoints = [];
+    this.baseColorsByIndex = [];
     this.hoveredIndex = null;
     this.pointerActive = false;
+    this.pulseController.reset();
 
     this.container = null;
   }
@@ -249,6 +272,8 @@ export class SceneController {
     this.nodeIdsByIndex = nodes.map((n) => n.id);
     this.nodesByIndex = nodes.slice();
     this.edgeEndpoints = edges.map((e) => ({ sourceId: e.sourceId, targetId: e.targetId }));
+    this.baseColorsByIndex = this.nodesByIndex.map((n) => this.colorResolver.resolve(n));
+    this.pulseController.reset();
 
     if (nodes.length === 0) return;
 
@@ -260,8 +285,7 @@ export class SceneController {
     nodeMesh.createInstancedMesh(nodes.length);
     this.nodeIdsByIndex.forEach((id, index) => {
       const pos = positions.get(id) ?? { x: 0, y: 0, z: 0 };
-      const node = this.nodesByIndex[index];
-      nodeMesh.updateInstance(index, pos, this.colorResolver.resolve(node));
+      nodeMesh.updateInstance(index, pos, this.baseColorsByIndex[index]);
     });
     this.renderer.addNodeMesh('__nodes__', nodeMesh);
     this.nodeMesh = nodeMesh;
@@ -378,6 +402,31 @@ export class SceneController {
     this.renderer.resize();
   }
 
+  /**
+   * Reconfigure the pulse animation at runtime. Pass `false` to disable,
+   * `true` (or `undefined`) to use defaults, or a partial config to tune
+   * period / amplitude / colour amplitude.
+   */
+  setPulse(option: PulseOption): void {
+    this.pulseController.setConfig(option);
+    if (!this.pulseController.isEnabled() && this.nodeMesh) {
+      // Snap every instance back to its resting position + colour so we
+      // don't leave nodes frozen mid-pulse.
+      const positions = this.layoutEngine.getPositions();
+      this.applyPositions(positions);
+    }
+  }
+
+  /** Toggle camera rotation gestures. Zoom + pan stay enabled. */
+  setRotationEnabled(enabled: boolean): void {
+    this.cameraController.setRotationEnabled(enabled);
+  }
+
+  /** Snap the camera back to the orientation captured at attach() time. */
+  resetRotation(): void {
+    this.cameraController.resetRotation();
+  }
+
   // --- internals ---
 
   private applyPositions(positions: Map<string, Vector3>): void {
@@ -388,7 +437,7 @@ export class SceneController {
         const isHover = this.hoveredIndex === index;
         const color = isHover
           ? this.colorResolver.resolveHover(node)
-          : this.colorResolver.resolve(node);
+          : this.baseColorsByIndex[index] ?? this.colorResolver.resolve(node);
         this.nodeMesh!.updateInstance(index, pos, color);
       });
     }
@@ -416,11 +465,40 @@ export class SceneController {
       this.applyPositions(positions);
     }
 
+    // Trackball damping needs to be pumped every frame; without this, the
+    // dynamic-damping smoothing never decays and the user feels a 1-frame
+    // lag on every rotation.
+    this.cameraController.update();
+
+    // Pulse the resting (non-hovered) nodes — runs after layout tick so the
+    // scale modulation is applied on top of the latest layout positions.
+    this.applyPulse();
+
     // Project labels.
     if (this.showLabels) this.projectLabels();
 
     // Update hover state if pointer is over the canvas.
     if (this.enableHover && this.pointerActive) this.updateHover();
+  }
+
+  /**
+   * Push pulse-driven scale + (optional) colour to every non-hovered node
+   * instance. Uses the most recent layout positions so the underlying
+   * physics tick + pulse stay in sync.
+   */
+  private applyPulse(): void {
+    if (!this.nodeMesh) return;
+    if (!this.pulseController.isEnabled()) return;
+    if (this.nodeIdsByIndex.length === 0) return;
+    this.pulseController.setExcludedIndex(this.hoveredIndex);
+    const positions = this.layoutEngine.getPositions();
+    if (positions.size === 0) return;
+    this.pulseController.apply(
+      this.nodeMesh,
+      this.nodeIdsByIndex,
+      positions,
+      this.baseColorsByIndex,
+    );
   }
 
   private projectLabels(): void {
@@ -520,10 +598,11 @@ export class SceneController {
 
     const color = hovered
       ? this.colorResolver.resolveHover(node)
-      : this.colorResolver.resolve(node);
+      : this.baseColorsByIndex[index] ?? this.colorResolver.resolve(node);
     // updateInstance writes both matrix + colour; keep matrix unchanged by
-    // re-using the current position.
-    this.nodeMesh.updateInstance(index, pos, color);
+    // re-using the current position. Reset scale to the resting radius so
+    // a hovered node doesn't inherit a mid-pulse size.
+    this.nodeMesh.updateInstance(index, pos, color, this.nodeMesh.getRadius());
   }
 
   private showTooltip(node: NodeData): void {

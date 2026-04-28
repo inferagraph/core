@@ -106,6 +106,8 @@ export { LabelRenderer } from './renderer/LabelRenderer.js';
 export { CustomNodeRenderer } from './renderer/CustomNodeRenderer.js';
 export { Raycaster } from './renderer/Raycaster.js';
 export { CameraController } from './renderer/CameraController.js';
+export { PulseController, DEFAULT_PULSE_CONFIG } from './renderer/PulseController.js';
+export type { PulseConfig, PulseOption } from './renderer/PulseController.js';
 export { InteractionManager } from './renderer/InteractionManager.js';
 export { ThemeManager } from './renderer/ThemeManager.js';
 

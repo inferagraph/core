@@ -1,160 +1,159 @@
 import * as THREE from 'three';
+import { TrackballControls } from 'three/examples/jsm/controls/TrackballControls.js';
 import type { Vector3 } from '../types.js';
 
+/**
+ * Wraps Three.js's `TrackballControls` so the rest of InferaGraph can use a
+ * stable, narrow API:
+ *
+ *   - `attach(container, camera)` / `detach()`
+ *   - `setTarget` / `getTarget`
+ *   - `setRadius` / `getRadius`
+ *   - `setRotationEnabled` / `resetRotation`
+ *   - `update()` (called from the SceneController's per-frame tick)
+ *
+ * Trackball gives the user full 3-axis rotation (pitch + yaw + roll) — a
+ * hard requirement for the graph view. The previous spherical-orbit
+ * implementation could not roll around the look axis.
+ */
 export class CameraController {
-  private container: HTMLElement | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
+  private controls: TrackballControls | null = null;
   private target: Vector3 = { x: 0, y: 0, z: 0 };
 
-  // Spherical coordinates for orbit
-  private spherical = { radius: 100, phi: Math.PI / 3, theta: 0 };
+  /** Default orbit distance — used until `setRadius` is called. */
+  private radius = 100;
 
-  // Interaction state
-  private isRotating = false;
-  private isPanning = false;
-  private lastMouseX = 0;
-  private lastMouseY = 0;
-
-  // Sensitivity settings
-  private rotateSpeed = 0.005;
-  private zoomSpeed = 0.1;
-  private panSpeed = 0.5;
-
-  // Bound event handlers (so we can remove them)
-  private onMouseDownBound = this.onMouseDown.bind(this);
-  private onMouseMoveBound = this.onMouseMove.bind(this);
-  private onMouseUpBound = this.onMouseUp.bind(this);
-  private onWheelBound = this.onWheel.bind(this);
-  private onContextMenuBound = this.onContextMenu.bind(this);
+  /** Captured initial camera state for `resetRotation()`. */
+  private initialPosition: THREE.Vector3 | null = null;
+  private initialUp: THREE.Vector3 | null = null;
+  private initialTarget: THREE.Vector3 | null = null;
 
   attach(container: HTMLElement, camera: THREE.PerspectiveCamera): void {
-    this.container = container;
     this.camera = camera;
 
-    container.addEventListener('mousedown', this.onMouseDownBound);
-    container.addEventListener('mousemove', this.onMouseMoveBound);
-    container.addEventListener('mouseup', this.onMouseUpBound);
-    container.addEventListener('wheel', this.onWheelBound, { passive: false });
-    container.addEventListener('contextmenu', this.onContextMenuBound);
+    // Position the camera at the configured radius along its current look
+    // direction (so the first frame frames the scene).
+    this.placeCameraAtRadius();
 
-    this.updateCameraPosition();
+    this.controls = new TrackballControls(camera, container);
+    this.controls.target.set(this.target.x, this.target.y, this.target.z);
+    this.controls.rotateSpeed = 3.0;   // a touch quicker than the default 1.0
+    this.controls.zoomSpeed = 1.2;
+    this.controls.panSpeed = 0.8;
+    this.controls.dynamicDampingFactor = 0.2;
+
+    // Capture the initial state so `resetRotation()` is meaningful.
+    this.initialPosition = camera.position.clone();
+    this.initialUp = camera.up.clone();
+    this.initialTarget = this.controls.target.clone();
   }
 
   detach(): void {
-    if (this.container) {
-      this.container.removeEventListener('mousedown', this.onMouseDownBound);
-      this.container.removeEventListener('mousemove', this.onMouseMoveBound);
-      this.container.removeEventListener('mouseup', this.onMouseUpBound);
-      this.container.removeEventListener('wheel', this.onWheelBound);
-      this.container.removeEventListener('contextmenu', this.onContextMenuBound);
+    if (this.controls) {
+      this.controls.dispose();
+      this.controls = null;
     }
-    this.container = null;
     this.camera = null;
-    this.isRotating = false;
-    this.isPanning = false;
+    this.initialPosition = null;
+    this.initialUp = null;
+    this.initialTarget = null;
   }
 
   setTarget(position: Vector3): void {
     this.target = { ...position };
-    this.updateCameraPosition();
+    if (this.controls) {
+      this.controls.target.set(position.x, position.y, position.z);
+    }
+    this.placeCameraAtRadius();
   }
 
   getTarget(): Vector3 {
+    if (this.controls) {
+      return {
+        x: this.controls.target.x,
+        y: this.controls.target.y,
+        z: this.controls.target.z,
+      };
+    }
     return { ...this.target };
   }
 
-  /** Override the orbit radius (distance from the target). Useful for fitting the camera to a freshly-computed graph. */
+  /** Override the orbit radius (distance from the target). */
   setRadius(radius: number): void {
-    this.spherical.radius = Math.max(1, radius);
-    this.updateCameraPosition();
+    this.radius = Math.max(1, radius);
+    this.placeCameraAtRadius();
   }
 
   getRadius(): number {
-    return this.spherical.radius;
+    if (this.camera && this.controls) {
+      return this.camera.position.distanceTo(this.controls.target);
+    }
+    return this.radius;
   }
 
+  /**
+   * Pump the underlying TrackballControls. SceneController calls this from
+   * its per-frame tick so damping continues to interpolate even when the
+   * pointer is idle.
+   */
   update(): void {
-    this.updateCameraPosition();
+    this.controls?.update();
   }
 
-  private updateCameraPosition(): void {
+  /**
+   * Toggle rotation gestures (pitch + yaw + roll). Zoom + pan stay live so
+   * users can still navigate while rotation is locked (e.g. during a
+   * scripted camera animation).
+   */
+  setRotationEnabled(enabled: boolean): void {
+    if (!this.controls) return;
+    this.controls.noRotate = !enabled;
+  }
+
+  /**
+   * Snap the camera back to the orientation captured at `attach()` time.
+   * Preserves the current orbit radius if `keepRadius` is true (default).
+   */
+  resetRotation(keepRadius = true): void {
+    if (!this.controls || !this.camera || !this.initialPosition || !this.initialUp || !this.initialTarget) {
+      return;
+    }
+    const previousRadius = this.getRadius();
+    this.controls.reset();
+    // `controls.reset()` drops the camera back at its initial position,
+    // which also resets the orbit distance. Re-apply the user's radius if
+    // requested.
+    if (keepRadius) {
+      this.setRadius(previousRadius);
+    }
+  }
+
+  /**
+   * Expose the underlying TrackballControls for advanced consumers / tests.
+   */
+  getControls(): TrackballControls | null {
+    return this.controls;
+  }
+
+  /**
+   * Position the camera at `this.radius` units from the target, along the
+   * current look direction. If the camera is currently coincident with the
+   * target, default to the +Z axis so we don't divide by zero.
+   */
+  private placeCameraAtRadius(): void {
     if (!this.camera) return;
-
-    // Clamp phi to avoid gimbal lock
-    this.spherical.phi = Math.max(0.01, Math.min(Math.PI - 0.01, this.spherical.phi));
-    this.spherical.radius = Math.max(1, this.spherical.radius);
-
-    // Convert spherical to Cartesian
-    const x = this.spherical.radius * Math.sin(this.spherical.phi) * Math.sin(this.spherical.theta);
-    const y = this.spherical.radius * Math.cos(this.spherical.phi);
-    const z = this.spherical.radius * Math.sin(this.spherical.phi) * Math.cos(this.spherical.theta);
-
-    this.camera.position.set(
-      this.target.x + x,
-      this.target.y + y,
-      this.target.z + z,
+    const t = this.target;
+    const eye = new THREE.Vector3(
+      this.camera.position.x - t.x,
+      this.camera.position.y - t.y,
+      this.camera.position.z - t.z,
     );
-
-    this.camera.lookAt(
-      new THREE.Vector3(this.target.x, this.target.y, this.target.z),
-    );
-  }
-
-  private onMouseDown(event: MouseEvent): void {
-    // Right-click or shift+click for pan
-    if (event.button === 2 || (event.button === 0 && event.shiftKey)) {
-      this.isPanning = true;
-    } else if (event.button === 0) {
-      this.isRotating = true;
+    if (eye.lengthSq() < 1e-6) {
+      eye.set(0, 0, 1);
     }
-    this.lastMouseX = event.clientX;
-    this.lastMouseY = event.clientY;
-  }
-
-  private onMouseMove(event: MouseEvent): void {
-    const deltaX = event.clientX - this.lastMouseX;
-    const deltaY = event.clientY - this.lastMouseY;
-    this.lastMouseX = event.clientX;
-    this.lastMouseY = event.clientY;
-
-    if (this.isRotating) {
-      this.spherical.theta -= deltaX * this.rotateSpeed;
-      this.spherical.phi -= deltaY * this.rotateSpeed;
-      this.updateCameraPosition();
-    } else if (this.isPanning) {
-      if (!this.camera) return;
-
-      // Pan in the camera's local plane
-      const right = new THREE.Vector3();
-      const up = new THREE.Vector3();
-      this.camera.getWorldDirection(new THREE.Vector3());
-      right.setFromMatrixColumn(this.camera.matrixWorld, 0);
-      up.setFromMatrixColumn(this.camera.matrixWorld, 1);
-
-      const panX = -deltaX * this.panSpeed * this.spherical.radius * 0.001;
-      const panY = deltaY * this.panSpeed * this.spherical.radius * 0.001;
-
-      this.target.x += right.x * panX + up.x * panY;
-      this.target.y += right.y * panX + up.y * panY;
-      this.target.z += right.z * panX + up.z * panY;
-
-      this.updateCameraPosition();
-    }
-  }
-
-  private onMouseUp(_event: MouseEvent): void {
-    this.isRotating = false;
-    this.isPanning = false;
-  }
-
-  private onWheel(event: WheelEvent): void {
-    event.preventDefault();
-    const delta = event.deltaY > 0 ? 1 + this.zoomSpeed : 1 - this.zoomSpeed;
-    this.spherical.radius *= delta;
-    this.updateCameraPosition();
-  }
-
-  private onContextMenu(event: Event): void {
-    event.preventDefault();
+    eye.setLength(this.radius);
+    this.camera.position.set(t.x + eye.x, t.y + eye.y, t.z + eye.z);
+    this.camera.lookAt(new THREE.Vector3(t.x, t.y, t.z));
   }
 }
