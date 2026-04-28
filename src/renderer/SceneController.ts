@@ -14,6 +14,8 @@ import { WebGLRenderer } from './WebGLRenderer.js';
 import { CameraController } from './CameraController.js';
 import { NodeMesh } from './NodeMesh.js';
 import { EdgeMesh } from './EdgeMesh.js';
+import { TreeNodeMesh } from './TreeNodeMesh.js';
+import { TreeEdgeMesh, type TreeEdgeSegment } from './TreeEdgeMesh.js';
 import { LabelRenderer } from './LabelRenderer.js';
 import { Raycaster } from './Raycaster.js';
 import { TooltipOverlay } from '../overlay/TooltipOverlay.js';
@@ -124,6 +126,27 @@ export class SceneController {
   private nodeMesh: NodeMesh | null = null;
   private edgeMesh: EdgeMesh | null = null;
 
+  /**
+   * Tree-mode meshes. Mounted only when {@link layoutMode} === 'tree'
+   * and torn down on the way back to the graph mode. Sphere/line meshes
+   * (`nodeMesh` / `edgeMesh`) are left in place but hidden so toggling is
+   * cheap.
+   */
+  private treeNodeMesh: TreeNodeMesh | null = null;
+  private treeEdgeMesh: TreeEdgeMesh | null = null;
+
+  /**
+   * The perspective camera created by WebGLRenderer at attach time.
+   * Stashed so we can restore it when toggling back to the graph view —
+   * tree mode swaps in an OrthographicCamera.
+   */
+  private perspectiveCamera: THREE.PerspectiveCamera | null = null;
+  /**
+   * Lazily-created orthographic camera used by the tree view. Built on
+   * first entry to tree mode.
+   */
+  private orthographicCamera: THREE.OrthographicCamera | null = null;
+
   private layoutMode: LayoutMode;
   private layoutEngine: LayoutEngine;
 
@@ -137,7 +160,7 @@ export class SceneController {
 
   private nodeIdsByIndex: string[] = [];
   private nodesByIndex: NodeData[] = [];
-  private edgeEndpoints: Array<{ sourceId: string; targetId: string }> = [];
+  private edgeEndpoints: Array<{ sourceId: string; targetId: string; type?: string }> = [];
   private baseColorsByIndex: string[] = [];
 
   /**
@@ -265,6 +288,12 @@ export class SceneController {
 
     const camera = this.renderer.getCamera();
     if (camera) {
+      // The renderer creates a PerspectiveCamera at attach time. Stash it
+      // so toggling between graph (perspective) and tree (orthographic)
+      // views can restore it later.
+      if (camera instanceof THREE.PerspectiveCamera) {
+        this.perspectiveCamera = camera;
+      }
       this.cameraController.attach(container, camera);
       this.raycaster.setCamera(camera);
     }
@@ -341,14 +370,8 @@ export class SceneController {
     if (!this.container) return;
 
     // Clear any previous meshes so we can rebuild from scratch.
-    if (this.nodeMesh) {
-      this.renderer.removeNodeMesh('__nodes__');
-      this.nodeMesh = null;
-    }
-    if (this.edgeMesh) {
-      this.renderer.removeEdgeMesh('__edges__');
-      this.edgeMesh = null;
-    }
+    this.teardownGraphMeshes();
+    this.teardownTreeMeshes();
     this.labelRenderer.clear();
     this.hoveredIndex = null;
 
@@ -357,7 +380,15 @@ export class SceneController {
 
     this.nodeIdsByIndex = nodes.map((n) => n.id);
     this.nodesByIndex = nodes.slice();
-    this.edgeEndpoints = edges.map((e) => ({ sourceId: e.sourceId, targetId: e.targetId }));
+    // Capture the edge `type` (e.g. `father_of`, `husband_of`) alongside the
+    // endpoints so the active layout can consult it. The tree layout uses
+    // the type to distinguish parent edges from spouse edges; force
+    // layouts ignore it.
+    this.edgeEndpoints = edges.map((e) => ({
+      sourceId: e.sourceId,
+      targetId: e.targetId,
+      type: typeof e.attributes?.type === 'string' ? e.attributes.type : undefined,
+    }));
     this.baseColorsByIndex = this.nodesByIndex.map((n) => this.colorResolver.resolve(n));
     this.pulseController.reset();
 
@@ -375,9 +406,28 @@ export class SceneController {
     // active code path.
     const positions = this.computeActiveLayout();
 
-    // Build the (single) instanced node mesh that holds every node.
+    // Build the right meshes for the active layout mode + frame the camera.
+    if (this.layoutMode === 'tree') {
+      this.applyTreeCamera();
+      this.buildTreeMeshes(positions);
+    } else {
+      this.applyGraphCamera();
+      this.buildGraphMeshes(edges, positions);
+    }
+    this.frameToFit(positions);
+  }
+
+  /**
+   * Build the graph-view meshes (instanced sphere + line segments per
+   * edge) and HTML labels. Called from {@link syncFromStore} and on entry
+   * to graph mode from {@link setLayout}.
+   */
+  private buildGraphMeshes(
+    edges: ReturnType<GraphStore['getAllEdges']>,
+    positions: Map<string, Vector3>,
+  ): void {
     const nodeMesh = new NodeMesh(this.nodeRender);
-    nodeMesh.createInstancedMesh(nodes.length);
+    nodeMesh.createInstancedMesh(this.nodesByIndex.length);
     this.nodeIdsByIndex.forEach((id, index) => {
       const pos = positions.get(id) ?? { x: 0, y: 0, z: 0 };
       nodeMesh.updateInstance(index, pos, this.baseColorsByIndex[index]);
@@ -423,9 +473,275 @@ export class SceneController {
       this.renderer.addEdgeMesh('__edges__', edgeMesh);
       this.edgeMesh = edgeMesh;
     }
+  }
 
-    // Frame the camera so the freshly-laid-out graph is visible.
-    this.frameToFit(positions);
+  /**
+   * Build the tree-view meshes:
+   *   - A {@link TreeNodeMesh} (one rounded-rect card per node, fill
+   *     translucent dark, outline = node colour).
+   *   - A {@link TreeEdgeMesh} containing the orthogonal connectors
+   *     (marriage line, parent-to-bar drop, sibling bar, drops to
+   *     children).
+   *
+   * Called from {@link syncFromStore} and on entry to tree mode from
+   * {@link setLayout}.
+   */
+  private buildTreeMeshes(positions: Map<string, Vector3>): void {
+    const treeNodeMesh = new TreeNodeMesh();
+    const entries = this.nodeIdsByIndex.map((id, index) => ({
+      id,
+      position: positions.get(id) ?? { x: 0, y: 0, z: 0 },
+      color: this.baseColorsByIndex[index],
+    }));
+    treeNodeMesh.build(entries);
+    const root = treeNodeMesh.getMesh();
+    if (root) this.renderer.addObject('__tree_nodes__', root);
+    this.treeNodeMesh = treeNodeMesh;
+
+    // HTML labels overlay the cards. Use the existing 'card' label style
+    // so the text sits centred inside the rectangle.
+    this.labelRenderer.setStyle('card');
+    if (this.showLabels) {
+      this.nodesByIndex.forEach((node) => {
+        const text = SceneController.getLabelText(node);
+        if (text) this.labelRenderer.addLabel(node.id, text);
+      });
+    }
+
+    // Raycast targets are the per-card groups (each carries
+    // `userData.nodeId`).
+    this.raycaster.setObjects(treeNodeMesh.getRaycastTargets());
+    this.raycaster.setNodeIds(this.nodeIdsByIndex);
+    const cam = this.renderer.getCamera();
+    if (cam) this.raycaster.setCamera(cam);
+
+    // Build the orthogonal connectors from the tree topology + positions.
+    const segments = this.computeTreeEdgeSegments(positions);
+    if (segments.length > 0) {
+      const treeEdgeMesh = new TreeEdgeMesh();
+      treeEdgeMesh.build(segments);
+      const mesh = treeEdgeMesh.getMesh();
+      if (mesh) this.renderer.addObject('__tree_edges__', mesh);
+      this.treeEdgeMesh = treeEdgeMesh;
+    }
+  }
+
+  private teardownGraphMeshes(): void {
+    if (this.nodeMesh) {
+      this.renderer.removeNodeMesh('__nodes__');
+      this.nodeMesh = null;
+    }
+    if (this.edgeMesh) {
+      this.renderer.removeEdgeMesh('__edges__');
+      this.edgeMesh = null;
+    }
+  }
+
+  private teardownTreeMeshes(): void {
+    if (this.treeNodeMesh) {
+      this.renderer.removeObject('__tree_nodes__');
+      this.treeNodeMesh.dispose();
+      this.treeNodeMesh = null;
+    }
+    if (this.treeEdgeMesh) {
+      this.renderer.removeObject('__tree_edges__');
+      this.treeEdgeMesh.dispose();
+      this.treeEdgeMesh = null;
+    }
+  }
+
+  /**
+   * Walk the typed edge list to derive parent→child and spouse
+   * relationships, then produce the orthogonal-connector line segments
+   * required by the tree view.
+   *
+   * Output composition for each parent or couple:
+   *   - 1 horizontal marriage line per couple.
+   *   - 1 vertical drop from the parent / couple-midpoint to a sibling-
+   *     bar y (`LEVEL_HEIGHT / 2` above the children).
+   *   - 1 horizontal sibling bar spanning all children at that y.
+   *   - 1 vertical drop from the bar to each child's top edge.
+   *
+   * For a single child the sibling bar collapses to a 0-length
+   * horizontal step (we still emit it so the connector reaches the bar
+   * y consistently).
+   */
+  private computeTreeEdgeSegments(
+    positions: Map<string, Vector3>,
+  ): TreeEdgeSegment[] {
+    const segments: TreeEdgeSegment[] = [];
+    const cardSize = this.treeNodeMesh?.getCardSize() ?? {
+      width: TreeNodeMesh.DEFAULT_WIDTH,
+      height: TreeNodeMesh.DEFAULT_HEIGHT,
+    };
+    const halfH = cardSize.height / 2;
+    const connectorColor = '#a1a1aa'; // matches the marketing-site spec.
+    const marriageColor = '#a1a1aa';
+
+    // Resolve type sets directly from the layout's source-of-truth.
+    const PARENT = new Set(['father_of', 'mother_of', 'parent_of']);
+    const SPOUSE = new Set(['husband_of', 'wife_of', 'married_to', 'spouse_of']);
+
+    // Build groupings: child -> parent ids; node -> spouse ids.
+    const parentsOfChild = new Map<string, Set<string>>();
+    const spousesOf = new Map<string, Set<string>>();
+    for (const e of this.edgeEndpoints) {
+      if (!e.type) continue;
+      if (PARENT.has(e.type)) {
+        const ps = parentsOfChild.get(e.targetId) ?? new Set<string>();
+        ps.add(e.sourceId);
+        parentsOfChild.set(e.targetId, ps);
+      } else if (SPOUSE.has(e.type)) {
+        const a = spousesOf.get(e.sourceId) ?? new Set<string>();
+        a.add(e.targetId);
+        spousesOf.set(e.sourceId, a);
+        const b = spousesOf.get(e.targetId) ?? new Set<string>();
+        b.add(e.sourceId);
+        spousesOf.set(e.targetId, b);
+      }
+    }
+
+    // ---- Marriage lines: emit one per pair (de-duplicated) ----
+    const seenPair = new Set<string>();
+    for (const [a, others] of spousesOf) {
+      for (const b of others) {
+        const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+        if (seenPair.has(key)) continue;
+        seenPair.add(key);
+        const pa = positions.get(a);
+        const pb = positions.get(b);
+        if (!pa || !pb) continue;
+        if (Math.abs(pa.y - pb.y) > 1) continue; // only horizontal pairs
+        // Inner edges of the cards.
+        const left = Math.min(pa.x, pb.x) + cardSize.width / 2;
+        const right = Math.max(pa.x, pb.x) - cardSize.width / 2;
+        segments.push({
+          a: { x: left, y: pa.y, z: 0 },
+          b: { x: right, y: pa.y, z: 0 },
+          color: marriageColor,
+        });
+      }
+    }
+
+    // ---- Parent → children: group children by their parent set ----
+    // Two children sharing the same parents (i.e. siblings) get a single
+    // sibling bar. We key by the sorted-unique parent-id tuple.
+    const sibGroups = new Map<string, { parents: string[]; children: string[] }>();
+    for (const [childId, parentIds] of parentsOfChild) {
+      const parentsArr = Array.from(parentIds).sort();
+      const key = parentsArr.join('|');
+      const group = sibGroups.get(key) ?? { parents: parentsArr, children: [] };
+      group.children.push(childId);
+      sibGroups.set(key, group);
+    }
+
+    for (const { parents, children } of sibGroups.values()) {
+      // Anchor x = midpoint of the parents that we have positions for.
+      const parentPositions = parents
+        .map((id) => positions.get(id))
+        .filter((p): p is Vector3 => !!p);
+      if (parentPositions.length === 0) continue;
+      const childPositions = children
+        .map((id) => positions.get(id))
+        .filter((p): p is Vector3 => !!p);
+      if (childPositions.length === 0) continue;
+
+      const parentX =
+        parentPositions.reduce((s, p) => s + p.x, 0) / parentPositions.length;
+      const parentBottomY =
+        Math.min(...parentPositions.map((p) => p.y)) - halfH;
+      const childTopY = Math.max(...childPositions.map((p) => p.y)) + halfH;
+      // Sibling bar y: midway between parents' bottom and children's top.
+      const barY = (parentBottomY + childTopY) / 2;
+
+      // 1) Vertical from parents-midpoint down to bar.
+      segments.push({
+        a: { x: parentX, y: parentBottomY, z: 0 },
+        b: { x: parentX, y: barY, z: 0 },
+        color: connectorColor,
+      });
+
+      // 2) Horizontal sibling bar across all children.
+      const minX = Math.min(parentX, ...childPositions.map((p) => p.x));
+      const maxX = Math.max(parentX, ...childPositions.map((p) => p.x));
+      if (Math.abs(maxX - minX) > 0.5) {
+        segments.push({
+          a: { x: minX, y: barY, z: 0 },
+          b: { x: maxX, y: barY, z: 0 },
+          color: connectorColor,
+        });
+      }
+
+      // 3) Drop from bar to each child's top edge.
+      for (const cp of childPositions) {
+        segments.push({
+          a: { x: cp.x, y: barY, z: 0 },
+          b: { x: cp.x, y: cp.y + halfH, z: 0 },
+          color: connectorColor,
+        });
+      }
+    }
+
+    return segments;
+  }
+
+  /**
+   * Switch to the orthographic camera + lock rotation. Lazily builds the
+   * camera on first call. Keeps zoom + pan enabled.
+   */
+  private applyTreeCamera(): void {
+    if (!this.container) return;
+    const width = this.container.clientWidth || 800;
+    const height = this.container.clientHeight || 600;
+
+    if (!this.orthographicCamera) {
+      // World-space height is set by `frameToFit` after the layout runs.
+      // Seed with sensible defaults so the camera object is valid before
+      // the first `frameToFit`.
+      const aspect = width / height;
+      const worldHeight = 600;
+      const worldWidth = worldHeight * aspect;
+      const ortho = new THREE.OrthographicCamera(
+        -worldWidth / 2,
+        worldWidth / 2,
+        worldHeight / 2,
+        -worldHeight / 2,
+        -10000,
+        10000,
+      );
+      ortho.position.set(0, 0, 500);
+      ortho.up.set(0, 1, 0);
+      ortho.lookAt(new THREE.Vector3(0, 0, 0));
+      this.orthographicCamera = ortho;
+    } else {
+      // Keep the projection matrix in sync with the current viewport.
+      const aspect = width / height;
+      const worldHeight =
+        this.orthographicCamera.top - this.orthographicCamera.bottom;
+      const worldWidth = worldHeight * aspect;
+      this.orthographicCamera.left = -worldWidth / 2;
+      this.orthographicCamera.right = worldWidth / 2;
+      this.orthographicCamera.updateProjectionMatrix();
+    }
+
+    this.renderer.setCamera(this.orthographicCamera);
+    this.cameraController.swapCamera(this.orthographicCamera);
+    // Rotation makes no sense in a planar tree view — lock it. Zoom + pan
+    // stay live so the user can navigate large family trees.
+    this.cameraController.setRotationEnabled(false);
+    this.raycaster.setCamera(this.orthographicCamera);
+  }
+
+  /**
+   * Restore the perspective camera + free rotation when entering graph
+   * mode.
+   */
+  private applyGraphCamera(): void {
+    if (!this.container || !this.perspectiveCamera) return;
+    this.renderer.setCamera(this.perspectiveCamera);
+    this.cameraController.swapCamera(this.perspectiveCamera);
+    this.cameraController.setRotationEnabled(true);
+    this.raycaster.setCamera(this.perspectiveCamera);
   }
 
   /**
@@ -444,7 +760,23 @@ export class SceneController {
     if (this.nodeIdsByIndex.length === 0) return;
 
     const positions = this.computeActiveLayout();
-    this.applyPositions(positions);
+
+    // The two render pipelines (sphere/line for graph, card/orthogonal
+    // for tree) cannot share meshes. Tear down the inactive set and
+    // build the active one. The label overlay is rebuilt by the build*
+    // helpers so the labels always match the active style.
+    if (mode === 'tree') {
+      this.teardownGraphMeshes();
+      this.labelRenderer.clear();
+      this.applyTreeCamera();
+      this.buildTreeMeshes(positions);
+    } else {
+      this.teardownTreeMeshes();
+      this.labelRenderer.clear();
+      this.applyGraphCamera();
+      const edges = this.store.getAllEdges();
+      this.buildGraphMeshes(edges, positions);
+    }
     this.frameToFit(positions);
   }
 
@@ -693,7 +1025,9 @@ export class SceneController {
   }
 
   private updateHover(): void {
-    if (!this.container || !this.nodeMesh) return;
+    if (!this.container) return;
+    // Either the graph (sphere) or tree (card) node mesh must be live.
+    if (!this.nodeMesh && !this.treeNodeMesh) return;
 
     const width = this.container.clientWidth || 1;
     const height = this.container.clientHeight || 1;
@@ -734,7 +1068,6 @@ export class SceneController {
   }
 
   private paintNode(index: number, hovered: boolean): void {
-    if (!this.nodeMesh) return;
     const node = this.nodesByIndex[index];
     if (!node) return;
 
@@ -745,10 +1078,18 @@ export class SceneController {
     const color = hovered
       ? this.colorResolver.resolveHover(node)
       : this.baseColorsByIndex[index] ?? this.colorResolver.resolve(node);
-    // updateInstance writes both matrix + colour; keep matrix unchanged by
-    // re-using the current position. Reset scale to the resting radius so
-    // a hovered node doesn't inherit a mid-pulse size.
-    this.nodeMesh.updateInstance(index, pos, color, this.nodeMesh.getRadius());
+
+    if (this.nodeMesh) {
+      // updateInstance writes both matrix + colour; keep matrix unchanged by
+      // re-using the current position. Reset scale to the resting radius so
+      // a hovered node doesn't inherit a mid-pulse size.
+      this.nodeMesh.updateInstance(index, pos, color, this.nodeMesh.getRadius());
+    }
+    if (this.treeNodeMesh) {
+      // Tree-view cards repaint by tinting the outline. Position is
+      // unchanged — the tree layout is static.
+      this.treeNodeMesh.updateCard(id, pos, color);
+    }
   }
 
   private showTooltip(node: NodeData): void {
@@ -864,9 +1205,14 @@ export class SceneController {
     // FOV equation: tan(fov/2) = radius / distance, and add a 1.25× factor
     // (== 1 / 0.8 fill) so the cluster sphere occupies ~80% of the viewport.
     const camera = this.renderer.getCamera();
+    // Only the perspective camera carries a FOV — orthographic cameras don't,
+    // so we fall back to a sensible default. The frame-to-fit math still
+    // produces a reasonable orbit distance for either projection because
+    // `cameraController.setRadius` ultimately controls the placement.
+    const persp = camera instanceof THREE.PerspectiveCamera ? camera : null;
     const fovDeg =
-      camera && typeof camera.fov === 'number' && Number.isFinite(camera.fov)
-        ? camera.fov
+      persp && typeof persp.fov === 'number' && Number.isFinite(persp.fov)
+        ? persp.fov
         : 60;
     const halfFov = ((fovDeg * Math.PI) / 180) / 2;
     const fillFactor = 0.8;

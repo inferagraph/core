@@ -13,13 +13,25 @@ export class WebGLRenderer {
   private animationFrameId: number | null = null;
 
   private scene: THREE.Scene | null = null;
-  private camera: THREE.PerspectiveCamera | null = null;
+  /**
+   * Active camera. Defaults to {@link THREE.PerspectiveCamera} (graph
+   * view) but the SceneController may swap in {@link THREE.OrthographicCamera}
+   * for the tree view via {@link setCamera}.
+   */
+  private camera: THREE.Camera | null = null;
   private threeRenderer: THREE.WebGLRenderer | null = null;
 
   private customNodeRenderer: CustomNodeRenderer | null = null;
 
   private nodeMeshes = new Map<string, NodeMesh>();
   private edgeMeshes = new Map<string, EdgeMesh>();
+  /**
+   * Free-form scene objects (e.g. the tree-mode card group, the tree-mode
+   * orthogonal-connector LineSegments) that don't fit the NodeMesh /
+   * EdgeMesh contract. The renderer just shuttles them in and out of the
+   * scene; the caller is responsible for disposing geometry/materials.
+   */
+  private extraObjects = new Map<string, THREE.Object3D>();
 
   private tickCallbacks = new Set<TickCallback>();
 
@@ -80,6 +92,9 @@ export class WebGLRenderer {
     for (const [id] of this.edgeMeshes) {
       this.removeEdgeMesh(id);
     }
+    for (const [id] of this.extraObjects) {
+      this.removeObject(id);
+    }
 
     // Dispose custom node renderer
     if (this.customNodeRenderer) {
@@ -124,8 +139,17 @@ export class WebGLRenderer {
     return this.scene;
   }
 
-  getCamera(): THREE.PerspectiveCamera | null {
+  getCamera(): THREE.Camera | null {
     return this.camera;
+  }
+
+  /**
+   * Replace the active camera (e.g. swap to an OrthographicCamera when
+   * entering tree view). The renderer doesn't take ownership — the
+   * caller is responsible for disposing the prior camera if needed.
+   */
+  setCamera(camera: THREE.Camera): void {
+    this.camera = camera;
   }
 
   render(): void {
@@ -212,6 +236,29 @@ export class WebGLRenderer {
     }
   }
 
+  /**
+   * Register a free-form Object3D (e.g. a tree-view card group or
+   * orthogonal-connector LineSegments) with the active scene. Returns
+   * the same id so callers can chain `removeObject(id)` later. Calling
+   * with the same id replaces the prior object.
+   */
+  addObject(id: string, obj: THREE.Object3D): void {
+    this.removeObject(id);
+    this.extraObjects.set(id, obj);
+    if (this.scene) this.scene.add(obj);
+  }
+
+  removeObject(id: string): void {
+    const obj = this.extraObjects.get(id);
+    if (!obj) return;
+    if (this.scene) this.scene.remove(obj);
+    this.extraObjects.delete(id);
+  }
+
+  getObject(id: string): THREE.Object3D | undefined {
+    return this.extraObjects.get(id);
+  }
+
   updateNodePositions(positions: Map<string, Vector3>): void {
     for (const [id, position] of positions) {
       const mesh = this.nodeMeshes.get(id);
@@ -233,8 +280,19 @@ export class WebGLRenderer {
     const width = this.container.clientWidth || 800;
     const height = this.container.clientHeight || 600;
 
-    if (this.camera) {
+    if (this.camera instanceof THREE.PerspectiveCamera) {
       this.camera.aspect = width / height;
+      this.camera.updateProjectionMatrix();
+    } else if (this.camera instanceof THREE.OrthographicCamera) {
+      // Preserve the world-space height so the user's zoom level holds
+      // through the resize, then derive a new width from the aspect ratio.
+      const worldHeight = this.camera.top - this.camera.bottom;
+      const aspect = width / height;
+      const worldWidth = worldHeight * aspect;
+      this.camera.left = -worldWidth / 2;
+      this.camera.right = worldWidth / 2;
+      this.camera.top = worldHeight / 2;
+      this.camera.bottom = -worldHeight / 2;
       this.camera.updateProjectionMatrix();
     }
 

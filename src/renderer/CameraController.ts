@@ -10,6 +10,8 @@ import type { Vector3 } from '../types.js';
  *   - `setTarget` / `getTarget`
  *   - `setRadius` / `getRadius`
  *   - `setRotationEnabled` / `resetRotation`
+ *   - `swapCamera(newCamera)` — used when toggling between graph
+ *     (perspective) and tree (orthographic) views.
  *   - `update()` (called from the SceneController's per-frame tick)
  *
  * Trackball gives the user full 3-axis rotation (pitch + yaw + roll) — a
@@ -17,7 +19,8 @@ import type { Vector3 } from '../types.js';
  * implementation could not roll around the look axis.
  */
 export class CameraController {
-  private camera: THREE.PerspectiveCamera | null = null;
+  private container: HTMLElement | null = null;
+  private camera: THREE.Camera | null = null;
   private controls: TrackballControls | null = null;
   private target: Vector3 = { x: 0, y: 0, z: 0 };
 
@@ -29,7 +32,8 @@ export class CameraController {
   private initialUp: THREE.Vector3 | null = null;
   private initialTarget: THREE.Vector3 | null = null;
 
-  attach(container: HTMLElement, camera: THREE.PerspectiveCamera): void {
+  attach(container: HTMLElement, camera: THREE.Camera): void {
+    this.container = container;
     this.camera = camera;
 
     // Position the camera at the configured radius along its current look
@@ -54,10 +58,51 @@ export class CameraController {
       this.controls.dispose();
       this.controls = null;
     }
+    this.container = null;
     this.camera = null;
     this.initialPosition = null;
     this.initialUp = null;
     this.initialTarget = null;
+  }
+
+  /**
+   * Swap in a new camera (e.g. switching from PerspectiveCamera in graph
+   * view to OrthographicCamera in tree view). Recreates the underlying
+   * TrackballControls so gestures bind to the new camera. The previous
+   * radius and target are preserved.
+   */
+  swapCamera(camera: THREE.Camera): void {
+    if (!this.container) {
+      this.camera = camera;
+      return;
+    }
+    const previousRadius = this.radius;
+    const previousTarget = { ...this.target };
+
+    if (this.controls) {
+      this.controls.dispose();
+      this.controls = null;
+    }
+
+    this.camera = camera;
+    this.placeCameraAtRadius();
+
+    this.controls = new TrackballControls(camera, this.container);
+    this.controls.target.set(previousTarget.x, previousTarget.y, previousTarget.z);
+    this.controls.rotateSpeed = 3.0;
+    this.controls.zoomSpeed = 1.2;
+    this.controls.panSpeed = 0.8;
+    this.controls.dynamicDampingFactor = 0.2;
+
+    this.initialPosition = camera.position.clone();
+    this.initialUp = camera.up.clone();
+    this.initialTarget = this.controls.target.clone();
+    this.radius = previousRadius;
+  }
+
+  /** The active camera. */
+  getCamera(): THREE.Camera | null {
+    return this.camera;
   }
 
   setTarget(position: Vector3): void {

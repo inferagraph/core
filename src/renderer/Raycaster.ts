@@ -2,7 +2,12 @@ import * as THREE from 'three';
 
 export class Raycaster {
   private enabled = true;
-  private camera: THREE.PerspectiveCamera | null = null;
+  /**
+   * The active camera. Accepts both perspective (graph view) and
+   * orthographic (tree view) cameras — `THREE.Camera` is the common
+   * supertype that `THREE.Raycaster.setFromCamera` accepts.
+   */
+  private camera: THREE.Camera | null = null;
   private objects: THREE.Object3D[] = [];
   private nodeIds: string[] = [];
   private threeRaycaster = new THREE.Raycaster();
@@ -19,7 +24,7 @@ export class Raycaster {
     return this.enabled;
   }
 
-  setCamera(camera: THREE.PerspectiveCamera): void {
+  setCamera(camera: THREE.Camera): void {
     this.camera = camera;
   }
 
@@ -43,14 +48,25 @@ export class Raycaster {
     const mouse = new THREE.Vector2(ndcX, ndcY);
     this.threeRaycaster.setFromCamera(mouse, this.camera);
 
-    const intersections = this.threeRaycaster.intersectObjects(this.objects, false);
+    // `recursive=true` so children of a Group (e.g. tree-mode card groups
+    // that bundle a fill plane + border line per node) are hit-tested.
+    const intersections = this.threeRaycaster.intersectObjects(this.objects, true);
 
     if (intersections.length === 0) return null;
 
     const hit = intersections[0];
-    // For InstancedMesh, instanceId maps to node index
+    // For InstancedMesh, instanceId maps to node index.
     if (hit.instanceId !== undefined && hit.instanceId < this.nodeIds.length) {
       return this.nodeIds[hit.instanceId];
+    }
+    // Walk up the parent chain to find a node id stamped in `userData`.
+    // Tree-mode card meshes use this path because they render one
+    // Object3D per node rather than instances of a shared geometry.
+    let cursor: THREE.Object3D | null = hit.object;
+    while (cursor) {
+      const id = cursor.userData?.nodeId;
+      if (typeof id === 'string') return id;
+      cursor = cursor.parent;
     }
 
     return null;

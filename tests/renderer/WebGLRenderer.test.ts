@@ -8,19 +8,45 @@ const mockSceneAdd = vi.fn();
 const mockSceneRemove = vi.fn();
 const mockUpdateProjectionMatrix = vi.fn();
 
-vi.mock('three', () => ({
+vi.mock('three', () => {
+  // Real classes (not arrow factories) so `instanceof THREE.PerspectiveCamera`
+  // / `instanceof THREE.OrthographicCamera` in source code can succeed against
+  // the mocked constructors.
+  class MockPerspectiveCamera {
+    position: { set: ReturnType<typeof vi.fn>; x: number; y: number; z: number };
+    aspect = 1;
+    updateProjectionMatrix = mockUpdateProjectionMatrix;
+    lookAt = vi.fn();
+    constructor() {
+      this.position = { set: vi.fn(), x: 0, y: 0, z: 0 };
+    }
+  }
+  class MockOrthographicCamera {
+    position: { set: ReturnType<typeof vi.fn>; x: number; y: number; z: number };
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+    zoom = 1;
+    updateProjectionMatrix = mockUpdateProjectionMatrix;
+    lookAt = vi.fn();
+    constructor(left = -1, right = 1, top = 1, bottom = -1) {
+      this.position = { set: vi.fn(), x: 0, y: 0, z: 0 };
+      this.left = left;
+      this.right = right;
+      this.top = top;
+      this.bottom = bottom;
+    }
+  }
+  return {
   Scene: vi.fn().mockImplementation(() => ({
     add: mockSceneAdd,
     remove: mockSceneRemove,
     background: null,
     children: [],
   })),
-  PerspectiveCamera: vi.fn().mockImplementation(() => ({
-    position: { set: vi.fn(), x: 0, y: 0, z: 0 },
-    aspect: 1,
-    updateProjectionMatrix: mockUpdateProjectionMatrix,
-    lookAt: vi.fn(),
-  })),
+  PerspectiveCamera: MockPerspectiveCamera,
+  OrthographicCamera: MockOrthographicCamera,
   WebGLRenderer: vi.fn().mockImplementation(() => ({
     setSize: mockSetSize,
     setPixelRatio: mockSetPixelRatio,
@@ -81,7 +107,8 @@ vi.mock('three', () => ({
     z: 0,
     w: 1,
   })),
-}));
+  };
+});
 
 import { WebGLRenderer } from '../../src/renderer/WebGLRenderer.js';
 import { NodeMesh } from '../../src/renderer/NodeMesh.js';

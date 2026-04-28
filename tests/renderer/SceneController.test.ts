@@ -48,24 +48,63 @@ vi.mock('three', () => {
       background: null,
       children: [],
     })),
-    PerspectiveCamera: vi.fn().mockImplementation(() => ({
-      position: {
-        set: vi.fn().mockImplementation(function (this: { x: number; y: number; z: number }, x: number, y: number, z: number) {
-          this.x = x; this.y = y; this.z = z;
-          return this;
-        }),
-        x: 0, y: 0, z: 0,
-        clone: vi.fn().mockReturnValue({ x: 0, y: 0, z: 0 }),
-        distanceTo: vi.fn().mockReturnValue(100),
-        copy: vi.fn().mockReturnThis(),
-      },
-      up: { x: 0, y: 1, z: 0, clone: vi.fn().mockReturnValue({ x: 0, y: 1, z: 0 }), copy: vi.fn().mockReturnThis() },
-      aspect: 1,
-      updateProjectionMatrix: vi.fn(),
-      lookAt: vi.fn(),
-      matrixWorld: { elements: new Array(16).fill(0) },
-      getWorldDirection: vi.fn().mockReturnValue({ x: 0, y: 0, z: -1 }),
-    })),
+    PerspectiveCamera: class MockPerspectiveCamera {
+      position: Record<string, unknown>;
+      up: Record<string, unknown>;
+      aspect = 1;
+      fov = 60;
+      updateProjectionMatrix = vi.fn();
+      lookAt = vi.fn();
+      matrixWorld = { elements: new Array(16).fill(0) };
+      getWorldDirection = vi.fn().mockReturnValue({ x: 0, y: 0, z: -1 });
+      constructor() {
+        this.position = {
+          set: vi.fn().mockImplementation(function (this: { x: number; y: number; z: number }, x: number, y: number, z: number) {
+            this.x = x; this.y = y; this.z = z;
+            return this;
+          }),
+          x: 0, y: 0, z: 0,
+          clone: vi.fn().mockReturnValue({ x: 0, y: 0, z: 0 }),
+          distanceTo: vi.fn().mockReturnValue(100),
+          copy: vi.fn().mockReturnThis(),
+        };
+        this.up = { x: 0, y: 1, z: 0, clone: vi.fn().mockReturnValue({ x: 0, y: 1, z: 0 }), copy: vi.fn().mockReturnThis() };
+      }
+    },
+    OrthographicCamera: class MockOrthographicCamera {
+      position: Record<string, unknown>;
+      up: Record<string, unknown>;
+      left: number;
+      right: number;
+      top: number;
+      bottom: number;
+      zoom = 1;
+      updateProjectionMatrix = vi.fn();
+      lookAt = vi.fn();
+      matrixWorld = { elements: new Array(16).fill(0) };
+      constructor(left = -1, right = 1, top = 1, bottom = -1) {
+        this.left = left;
+        this.right = right;
+        this.top = top;
+        this.bottom = bottom;
+        this.position = {
+          set: vi.fn().mockImplementation(function (this: { x: number; y: number; z: number }, x: number, y: number, z: number) {
+            this.x = x; this.y = y; this.z = z;
+            return this;
+          }),
+          x: 0, y: 0, z: 0,
+          clone: vi.fn().mockReturnValue({ x: 0, y: 0, z: 0 }),
+          distanceTo: vi.fn().mockReturnValue(100),
+          copy: vi.fn().mockReturnThis(),
+        };
+        this.up = {
+          x: 0, y: 1, z: 0,
+          set: vi.fn().mockReturnThis(),
+          clone: vi.fn().mockReturnValue({ x: 0, y: 1, z: 0 }),
+          copy: vi.fn().mockReturnThis(),
+        };
+      }
+    },
     WebGLRenderer: vi.fn().mockImplementation(() => ({
       setSize: vi.fn(),
       setPixelRatio: vi.fn(),
@@ -91,21 +130,64 @@ vi.mock('three', () => {
       moveTo: vi.fn(),
       lineTo: vi.fn(),
       quadraticCurveTo: vi.fn(),
+      getPoints: vi.fn().mockReturnValue([
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+        { x: 1, y: 1 },
+        { x: 0, y: 1 },
+      ]),
     })),
+    Group: vi.fn().mockImplementation(() => {
+      const children: unknown[] = [];
+      return {
+        name: '',
+        userData: {} as Record<string, unknown>,
+        position: {
+          set: vi.fn().mockImplementation(function (this: { x: number; y: number; z: number }, x: number, y: number, z: number) {
+            this.x = x; this.y = y; this.z = z;
+            return this;
+          }),
+          x: 0, y: 0, z: 0,
+        },
+        children,
+        add: vi.fn().mockImplementation((c: unknown) => { children.push(c); }),
+        remove: vi.fn(),
+      };
+    }),
+    Mesh: vi.fn().mockImplementation((geo, mat) => ({
+      geometry: geo,
+      material: mat,
+      renderOrder: 0,
+      position: { set: vi.fn(), x: 0, y: 0, z: 0 },
+    })),
+    LineLoop: vi.fn().mockImplementation((geo, mat) => ({
+      geometry: geo,
+      material: mat,
+      renderOrder: 0,
+    })),
+    MeshBasicMaterial: vi.fn().mockImplementation(() => ({
+      dispose: vi.fn(),
+      color: { set: vi.fn() },
+      transparent: false,
+      opacity: 1,
+    })),
+    DoubleSide: 2,
     MeshPhongMaterial: vi.fn().mockImplementation(() => ({
       dispose: vi.fn(),
       color: { set: vi.fn() },
     })),
     LineSegments: vi.fn().mockImplementation((geo, mat) => ({ geometry: geo, material: mat })),
-    BufferGeometry: vi.fn().mockImplementation(() => {
+    BufferGeometry: vi.fn().mockImplementation(function (this: object) {
       const positions = new Float32Array(1024);
       const positionAttr = { array: positions, itemSize: 3, needsUpdate: false };
-      return {
+      Object.assign(this, {
         setAttribute: vi.fn(),
         getAttribute: vi.fn(() => positionAttr),
         dispose: vi.fn(),
         setDrawRange: vi.fn(),
-      };
+        setFromPoints: vi.fn().mockReturnThis(),
+      });
+      return this;
     }),
     LineBasicMaterial: vi.fn().mockImplementation(() => ({
       dispose: vi.fn(),
@@ -358,6 +440,52 @@ describe('SceneController', () => {
       const before = ctrl.getLayoutEngine();
       ctrl.setLayout('graph');
       expect(ctrl.getLayoutEngine()).toBe(before);
+    });
+
+    it('mounts tree-view objects + an OrthographicCamera on toggle to tree, and restores the perspective camera on toggle back', async () => {
+      // A small bidirectional family with a marriage so the tree pipeline
+      // exercises both parent edges and spouse edges.
+      const family: GraphData = {
+        nodes: [
+          { id: 'adam', attributes: { name: 'Adam', type: 'person' } },
+          { id: 'eve', attributes: { name: 'Eve', type: 'person' } },
+          { id: 'cain', attributes: { name: 'Cain', type: 'person' } },
+        ],
+        edges: [
+          { id: 'm1', sourceId: 'adam', targetId: 'eve', attributes: { type: 'husband_of' } },
+          { id: 'm2', sourceId: 'eve', targetId: 'adam', attributes: { type: 'wife_of' } },
+          { id: 'p1', sourceId: 'adam', targetId: 'cain', attributes: { type: 'father_of' } },
+          { id: 'p2', sourceId: 'cain', targetId: 'adam', attributes: { type: 'son_of' } },
+        ],
+      };
+      seedStore(store, family);
+
+      const ctrl = new SceneController({ store });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      const renderer = ctrl.getRenderer();
+      const THREE = await import('three');
+
+      // Graph mode: no tree-mode objects are mounted.
+      expect(renderer.getObject('__tree_nodes__')).toBeUndefined();
+      expect(renderer.getCamera()).toBeInstanceOf(THREE.PerspectiveCamera);
+
+      ctrl.setLayout('tree');
+
+      // Tree mode: cards + connectors are mounted; camera is orthographic.
+      expect(renderer.getObject('__tree_nodes__')).toBeDefined();
+      expect(renderer.getCamera()).toBeInstanceOf(THREE.OrthographicCamera);
+
+      ctrl.setLayout('graph');
+
+      // Back to graph: tree-mode objects are torn down; perspective camera
+      // is restored.
+      expect(renderer.getObject('__tree_nodes__')).toBeUndefined();
+      expect(renderer.getObject('__tree_edges__')).toBeUndefined();
+      expect(renderer.getCamera()).toBeInstanceOf(THREE.PerspectiveCamera);
+
+      ctrl.detach();
     });
   });
 

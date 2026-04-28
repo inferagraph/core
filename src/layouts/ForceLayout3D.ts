@@ -1,5 +1,5 @@
 import type { NodeId, Vector3, LayoutOptions } from '../types.js';
-import { LayoutEngine } from './LayoutEngine.js';
+import { LayoutEngine, type LayoutEdgeInput } from './LayoutEngine.js';
 import { ForceSimulation } from '../physics/ForceSimulation.js';
 
 export class ForceLayout3D extends LayoutEngine {
@@ -13,10 +13,14 @@ export class ForceLayout3D extends LayoutEngine {
 
   compute(
     nodeIds: NodeId[],
-    edges: Array<{ sourceId: NodeId; targetId: NodeId }>,
+    edges: Array<LayoutEdgeInput>,
   ): Map<NodeId, Vector3> {
     this.simulation.setNodes(nodeIds);
-    this.simulation.setEdges(edges);
+    // Force layout doesn't care about edge types — strip the optional `type`
+    // before handing the edge list to the physics simulation.
+    this.simulation.setEdges(
+      edges.map((e) => ({ sourceId: e.sourceId, targetId: e.targetId })),
+    );
 
     // 250 settle ticks: with the 0.1.11 force tuning (softer spring, larger
     // rest length, stronger repulsion, gentle centering) the simulation
