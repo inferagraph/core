@@ -320,7 +320,7 @@ describe('TreeNodeMesh', () => {
       ).toBe(false);
     });
 
-    it('label font is no more than 40% of card height (so long names like Methuselah fit)', () => {
+    it('label font is no more than 30% of card height (so long names like Methuselah fit)', () => {
       // Capture the `ctx.font` string rather than the canvas pixel size.
       // The font is "{weight} {sizePx}px {family}", and `sizePx` is in
       // *canvas pixels*, which is `cardHeight * LABEL_PIXELS_PER_UNIT`.
@@ -365,10 +365,10 @@ describe('TreeNodeMesh', () => {
       expect(match).not.toBeNull();
       const fontPx = Number(match![1]);
       const ratio = fontPx / canvasH;
-      // ≥ ~25% so the text is still legible at typical zoom.
-      expect(ratio).toBeGreaterThanOrEqual(0.25);
-      // ≤ 40% so longer biblical names fit comfortably inside the card.
-      expect(ratio).toBeLessThanOrEqual(0.4);
+      // ≥ ~20% so the text is still legible at typical zoom.
+      expect(ratio).toBeGreaterThanOrEqual(0.2);
+      // ≤ 30% so longer biblical names fit comfortably inside the card.
+      expect(ratio).toBeLessThanOrEqual(0.3);
     });
 
     it('omits the label plane gracefully when 2D canvas context is unavailable', () => {

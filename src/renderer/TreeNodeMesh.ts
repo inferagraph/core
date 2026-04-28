@@ -263,11 +263,11 @@ export class TreeNodeMesh {
 
     // Transparent background — the rounded-rect fill mesh sits behind us.
     ctx.clearRect(0, 0, canvasW, canvasH);
-    // Font sized to ~35% of card height. 50% pushed long biblical names
+    // Font sized to ~25% of card height. 50% pushed long biblical names
     // (Methuselah, Mephibosheth, Mahalalel) right up against the card
-    // edges; 35% leaves comfortable horizontal padding while still being
+    // edges; 25% leaves comfortable horizontal padding while still being
     // legible at the orthographic camera's typical zoom.
-    const fontPx = Math.max(8, Math.round(this.height * ppu * 0.35));
+    const fontPx = Math.max(8, Math.round(this.height * ppu * 0.25));
     ctx.font = `bold ${fontPx}px system-ui, -apple-system, "Segoe UI", sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
