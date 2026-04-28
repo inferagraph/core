@@ -8,6 +8,8 @@ const syncFromStore = vi.fn();
 const setLayout = vi.fn();
 const setNodeRender = vi.fn();
 const setTooltip = vi.fn();
+const setIncomingEdgeLabels = vi.fn();
+const setOutgoingEdgeLabels = vi.fn();
 const resize = vi.fn();
 
 let lastConstructorArgs: unknown[] = [];
@@ -22,6 +24,8 @@ vi.mock('../../src/renderer/SceneController.js', () => ({
       setLayout,
       setNodeRender,
       setTooltip,
+      setIncomingEdgeLabels,
+      setOutgoingEdgeLabels,
       resize,
     };
   }),
@@ -49,6 +53,8 @@ describe('InferaGraph', () => {
     setLayout.mockReset();
     setNodeRender.mockReset();
     setTooltip.mockReset();
+    setIncomingEdgeLabels.mockReset();
+    setOutgoingEdgeLabels.mockReset();
     resize.mockReset();
     lastConstructorArgs = [];
   });
@@ -125,6 +131,43 @@ describe('InferaGraph', () => {
   it('forwards data to the GraphProvider so syncFromStore runs after isReady', async () => {
     render(<InferaGraph data={sampleData} />);
     await waitFor(() => expect(syncFromStore).toHaveBeenCalled());
+  });
+
+  it('passes incomingEdgeLabels / outgoingEdgeLabels to the SceneController', async () => {
+    const incomingEdgeLabels = { father_of: 'Son of', mother_of: 'Son of' };
+    const outgoingEdgeLabels = { father_of: 'Father of' };
+    render(
+      <InferaGraph
+        data={sampleData}
+        incomingEdgeLabels={incomingEdgeLabels}
+        outgoingEdgeLabels={outgoingEdgeLabels}
+      />,
+    );
+    await waitFor(() => expect(lastConstructorArgs.length).toBeGreaterThan(0));
+    const opts = lastConstructorArgs[0] as {
+      incomingEdgeLabels: unknown;
+      outgoingEdgeLabels: unknown;
+    };
+    expect(opts.incomingEdgeLabels).toBe(incomingEdgeLabels);
+    expect(opts.outgoingEdgeLabels).toBe(outgoingEdgeLabels);
+  });
+
+  it('pushes edge-label-map changes into the controller without remounting', async () => {
+    const initial = { father_of: 'Son of' };
+    const updated = { father_of: 'Child of' };
+    const { rerender } = render(
+      <InferaGraph data={sampleData} incomingEdgeLabels={initial} />,
+    );
+    await waitFor(() =>
+      expect(setIncomingEdgeLabels).toHaveBeenLastCalledWith(initial),
+    );
+    rerender(<InferaGraph data={sampleData} incomingEdgeLabels={updated} />);
+    await waitFor(() =>
+      expect(setIncomingEdgeLabels).toHaveBeenLastCalledWith(updated),
+    );
+    // Critically: the controller is *not* re-attached.
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(detach).not.toHaveBeenCalled();
   });
 
   it('still syncs when no data is provided so an empty store renders cleanly', async () => {

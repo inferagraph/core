@@ -64,6 +64,19 @@
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   pointer-events: none;
   z-index: 100;
+  font-size: 12px;
+  line-height: 1.4;
+  max-width: 280px;
+}
+
+.ig-tooltip-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.ig-tooltip-line {
+  opacity: 0.85;
 }
 
 .ig-detail-panel {

@@ -1,29 +1,63 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('three', () => ({
-  BufferGeometry: vi.fn().mockImplementation(() => ({
-    setAttribute: vi.fn(),
-    getAttribute: vi.fn().mockReturnValue({
-      array: new Float32Array(60),
-      needsUpdate: false,
-    }),
-    dispose: vi.fn(),
-    setDrawRange: vi.fn(),
-  })),
-  LineBasicMaterial: vi.fn().mockImplementation(() => ({
-    dispose: vi.fn(),
-    color: { set: vi.fn() },
-  })),
-  LineSegments: vi.fn().mockImplementation((geo, mat) => ({
-    geometry: geo,
-    material: mat,
-  })),
-  Float32BufferAttribute: vi.fn().mockImplementation((arr, size) => ({
-    array: arr,
-    itemSize: size,
+vi.mock('three', () => {
+  const Color = vi.fn().mockImplementation(function (this: { r: number; g: number; b: number; set: (s: string) => unknown }, hex?: string) {
+    this.r = 0;
+    this.g = 0;
+    this.b = 0;
+    this.set = vi.fn().mockImplementation((value: string) => {
+      // Parse simple #rrggbb hex strings into 0..1 RGB so test assertions
+      // can check that setSegmentColor wrote the right channels.
+      const m = /^#?([0-9a-f]{6})$/i.exec(String(value).trim());
+      if (m) {
+        const v = parseInt(m[1], 16);
+        this.r = ((v >> 16) & 0xff) / 255;
+        this.g = ((v >> 8) & 0xff) / 255;
+        this.b = (v & 0xff) / 255;
+      }
+      return this;
+    });
+    if (hex) (this.set as (s: string) => unknown)(hex);
+    return this;
+  });
+
+  const makeAttribute = (size: number) => ({
+    array: new Float32Array(size),
+    itemSize: 3,
     needsUpdate: false,
-  })),
-}));
+  });
+
+  return {
+    BufferGeometry: vi.fn().mockImplementation(() => {
+      const attributes: Record<string, ReturnType<typeof makeAttribute>> = {};
+      return {
+        setAttribute: vi.fn().mockImplementation((name: string, attr: ReturnType<typeof makeAttribute>) => {
+          attributes[name] = attr;
+        }),
+        getAttribute: vi.fn().mockImplementation((name: string) => attributes[name]),
+        dispose: vi.fn(),
+        setDrawRange: vi.fn(),
+      };
+    }),
+    LineBasicMaterial: vi.fn().mockImplementation((opts) => ({
+      dispose: vi.fn(),
+      color: { set: vi.fn() },
+      vertexColors: opts?.vertexColors,
+      transparent: opts?.transparent,
+      opacity: opts?.opacity,
+    })),
+    LineSegments: vi.fn().mockImplementation((geo, mat) => ({
+      geometry: geo,
+      material: mat,
+    })),
+    Float32BufferAttribute: vi.fn().mockImplementation((arr, size) => ({
+      array: arr,
+      itemSize: size,
+      needsUpdate: false,
+    })),
+    Color,
+  };
+});
 
 import { EdgeMesh } from '../../src/renderer/EdgeMesh.js';
 
@@ -66,6 +100,12 @@ describe('EdgeMesh', () => {
       expect(mesh.getMesh()).not.toBeNull();
     });
 
+    it('reports the segment count after creation', () => {
+      expect(mesh.getSegmentCount()).toBe(0);
+      mesh.createLineSegments(7);
+      expect(mesh.getSegmentCount()).toBe(7);
+    });
+
     it('should update segment positions', () => {
       mesh.createLineSegments(10);
       const source = { x: 1, y: 2, z: 3 };
@@ -87,6 +127,7 @@ describe('EdgeMesh', () => {
       mesh.createLineSegments(10);
       mesh.dispose();
       expect(mesh.getMesh()).toBeNull();
+      expect(mesh.getSegmentCount()).toBe(0);
     });
 
     it('should dispose previous mesh when creating new one', () => {
@@ -105,6 +146,42 @@ describe('EdgeMesh', () => {
       expect(threeMesh).not.toBeNull();
       // geometry.setAttribute should have been called with position attribute
       expect(threeMesh!.geometry.setAttribute).toHaveBeenCalled();
+    });
+
+    it('uses vertexColors so per-edge colours render through the shared mesh', () => {
+      mesh.createLineSegments(3);
+      const threeMesh = mesh.getMesh() as unknown as {
+        material: { vertexColors?: boolean };
+      } | null;
+      expect(threeMesh?.material?.vertexColors).toBe(true);
+    });
+
+    it('writes both endpoints of a segment when setSegmentColor is called', () => {
+      mesh.createLineSegments(2);
+      mesh.setSegmentColor(1, '#ff0000');
+
+      const threeMesh = mesh.getMesh()!;
+      const colorAttr = threeMesh.geometry.getAttribute('color') as unknown as {
+        array: Float32Array;
+        needsUpdate: boolean;
+      };
+      // Index 1 → offset 6..11. Both endpoints should be (1, 0, 0).
+      expect(colorAttr.array[6]).toBeCloseTo(1, 5);
+      expect(colorAttr.array[7]).toBeCloseTo(0, 5);
+      expect(colorAttr.array[8]).toBeCloseTo(0, 5);
+      expect(colorAttr.array[9]).toBeCloseTo(1, 5);
+      expect(colorAttr.array[10]).toBeCloseTo(0, 5);
+      expect(colorAttr.array[11]).toBeCloseTo(0, 5);
+      expect(colorAttr.needsUpdate).toBe(true);
+    });
+
+    it('setSegmentColor is a no-op when index is out of range', () => {
+      mesh.createLineSegments(2);
+      expect(() => mesh.setSegmentColor(5, '#ff0000')).not.toThrow();
+    });
+
+    it('setSegmentColor is a no-op before createLineSegments', () => {
+      expect(() => mesh.setSegmentColor(0, '#ff0000')).not.toThrow();
     });
   });
 });

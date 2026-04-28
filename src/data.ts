@@ -160,5 +160,10 @@ export { PluginInterface } from './plugins/PluginInterface.js';
 export { PluginManager } from './plugins/PluginManager.js';
 
 // Utils
-export { joinNatural, aggregateEdges } from './utils/index.js';
-export type { EdgeLabelMap, AggregatedEdge } from './utils/index.js';
+export { joinNatural, aggregateEdges, describeNode } from './utils/index.js';
+export type {
+  EdgeLabelMap,
+  AggregatedEdge,
+  DescribeNodeOptions,
+  NodeDescription,
+} from './utils/index.js';

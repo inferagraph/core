@@ -12,6 +12,7 @@ import { createReactNodeRenderFn, createReactTooltipRenderFn } from './ReactNode
 import { SceneController, type RendererBackend } from '../renderer/SceneController.js';
 import type { NodeColorFn } from '../renderer/NodeColorResolver.js';
 import type { EdgeColorFn } from '../renderer/EdgeColorMap.js';
+import type { EdgeLabelMap } from '../utils/aggregateEdges.js';
 
 export interface InferaGraphProps {
   data?: GraphData;
@@ -30,6 +31,17 @@ export interface InferaGraphProps {
   edgeColors?: Record<string, string>;
   /** Function override for edges. */
   edgeColorFn?: EdgeColorFn;
+  /**
+   * Incoming-edge label map for the default tooltip's natural-language
+   * description (e.g. `{ father_of: 'Son of', mother_of: 'Son of' }`).
+   * Ignored when `tooltip.renderTooltip` / `tooltip.component` is supplied.
+   */
+  incomingEdgeLabels?: EdgeLabelMap;
+  /**
+   * Outgoing-edge label map for the default tooltip's natural-language
+   * description (e.g. `{ father_of: 'Father of' }`).
+   */
+  outgoingEdgeLabels?: EdgeLabelMap;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -44,6 +56,8 @@ interface InferaGraphInnerProps {
   nodeColorFn?: NodeColorFn;
   edgeColors?: Record<string, string>;
   edgeColorFn?: EdgeColorFn;
+  incomingEdgeLabels?: EdgeLabelMap;
+  outgoingEdgeLabels?: EdgeLabelMap;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -58,6 +72,8 @@ function InferaGraphInner({
   nodeColorFn,
   edgeColors,
   edgeColorFn,
+  incomingEdgeLabels,
+  outgoingEdgeLabels,
   className,
   style,
 }: InferaGraphInnerProps): React.JSX.Element {
@@ -107,6 +123,8 @@ function InferaGraphInner({
       nodeColorFn,
       edgeColors,
       edgeColorFn,
+      incomingEdgeLabels,
+      outgoingEdgeLabels,
     });
     controller.attach(container);
     controllerRef.current = controller;
@@ -156,6 +174,20 @@ function InferaGraphInner({
     controller.setTooltip(resolvedTooltip);
   }, [resolvedTooltip]);
 
+  // Push edge-label map changes so consumers can swap relationship phrasing
+  // without a full remount. The defaults still apply when undefined.
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    controller.setIncomingEdgeLabels(incomingEdgeLabels);
+  }, [incomingEdgeLabels]);
+
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    controller.setOutgoingEdgeLabels(outgoingEdgeLabels);
+  }, [outgoingEdgeLabels]);
+
   return (
     <div
       ref={containerRef}
@@ -177,6 +209,8 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     nodeColorFn,
     edgeColors,
     edgeColorFn,
+    incomingEdgeLabels,
+    outgoingEdgeLabels,
     className,
     style,
   } = props;
@@ -192,6 +226,8 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
         nodeColorFn={nodeColorFn}
         edgeColors={edgeColors}
         edgeColorFn={edgeColorFn}
+        incomingEdgeLabels={incomingEdgeLabels}
+        outgoingEdgeLabels={outgoingEdgeLabels}
         className={className}
         style={style}
       />

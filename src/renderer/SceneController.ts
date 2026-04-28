@@ -28,9 +28,24 @@ import {
 } from './EdgeColorMap.js';
 import { SvgRenderer } from './SvgRenderer.js';
 import { PulseController, type PulseOption } from './PulseController.js';
+import { describeNode } from '../utils/describeNode.js';
+import type { EdgeLabelMap } from '../utils/aggregateEdges.js';
 
 /** Which rendering backend the controller should drive. */
 export type RendererBackend = 'webgl' | 'svg';
+
+/**
+ * Minimal HTML escape used to safely embed dynamic strings (node titles,
+ * relationship phrases) inside the rich-text tooltip body.
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 export interface SceneControllerOptions {
   store: GraphStore;
@@ -69,6 +84,20 @@ export interface SceneControllerOptions {
    * node feels stable while interacted with.
    */
   pulse?: PulseOption;
+  /**
+   * Optional incoming-edge label map for the default tooltip's natural-language
+   * description (e.g. `{ father_of: 'Son of', mother_of: 'Son of' }`). When
+   * the consumer supplies a custom `tooltip.renderTooltip` / `tooltip.component`
+   * this map is ignored. Keep raw edge types (no spaces); display names live
+   * in the values.
+   */
+  incomingEdgeLabels?: EdgeLabelMap;
+  /**
+   * Optional outgoing-edge label map for the default tooltip's natural-language
+   * description (e.g. `{ father_of: 'Father of' }`). Same caveats as
+   * {@link SceneControllerOptions.incomingEdgeLabels}.
+   */
+  outgoingEdgeLabels?: EdgeLabelMap;
 }
 
 /**
@@ -108,6 +137,8 @@ export class SceneController {
 
   private nodeRender: NodeRenderConfig | undefined;
   private tooltip: TooltipConfig | undefined;
+  private incomingEdgeLabels: EdgeLabelMap | undefined;
+  private outgoingEdgeLabels: EdgeLabelMap | undefined;
 
   private showLabels: boolean;
   private enableHover: boolean;
@@ -137,6 +168,8 @@ export class SceneController {
     this.layoutEngine = SceneController.createLayoutEngine(this.layoutMode);
     this.nodeRender = options.nodeRender;
     this.tooltip = options.tooltip;
+    this.incomingEdgeLabels = options.incomingEdgeLabels;
+    this.outgoingEdgeLabels = options.outgoingEdgeLabels;
     this.showLabels = options.showLabels ?? true;
     this.enableHover = options.enableHover ?? true;
 
@@ -399,10 +432,21 @@ export class SceneController {
     if (edges.length > 0) {
       const edgeMesh = new EdgeMesh();
       edgeMesh.createLineSegments(edges.length);
-      this.edgeEndpoints.forEach((endpoints, index) => {
+      edges.forEach((edge, index) => {
+        const endpoints = this.edgeEndpoints[index];
         const source = positions.get(endpoints.sourceId) ?? { x: 0, y: 0, z: 0 };
         const target = positions.get(endpoints.targetId) ?? { x: 0, y: 0, z: 0 };
         edgeMesh.updateSegment(index, source, target);
+        // Per-edge colour via the resolver — pushes a vertex-colour pair into
+        // the underlying buffer so each edge can carry its own hue without
+        // adding another draw call.
+        const data = {
+          id: edge.id,
+          sourceId: edge.sourceId,
+          targetId: edge.targetId,
+          attributes: edge.attributes,
+        };
+        edgeMesh.setSegmentColor(index, this.edgeColorMap.resolve(data));
       });
       this.renderer.addEdgeMesh('__edges__', edgeMesh);
       this.edgeMesh = edgeMesh;
@@ -718,7 +762,65 @@ export class SceneController {
 
   private showTooltip(node: NodeData): void {
     // Offset slightly so the tooltip doesn't sit under the cursor.
-    this.tooltipOverlay.showNode(node, this.pointerX + 12, this.pointerY + 12);
+    const x = this.pointerX + 12;
+    const y = this.pointerY + 12;
+
+    // If the consumer supplied a custom renderer we delegate to the overlay
+    // (which honours `tooltip.renderTooltip` / `tooltip.component`). Otherwise
+    // we fill the overlay element with a multi-line natural-language summary
+    // produced by `describeNode`, so the user sees prose like
+    // "Son of Abraham and Sarah" instead of just the node's title.
+    const hasCustomRenderer = !!this.tooltip?.renderTooltip;
+    if (hasCustomRenderer) {
+      this.tooltipOverlay.showNode(node, x, y);
+      return;
+    }
+
+    const description = describeNode(this.store, node.id, {
+      incomingLabels: this.incomingEdgeLabels,
+      outgoingLabels: this.outgoingEdgeLabels,
+    });
+
+    if (description.lines.length === 0) {
+      // Single-line tooltip — preserves the original behaviour for nodes
+      // without relationships.
+      this.tooltipOverlay.showNode(node, x, y);
+      return;
+    }
+
+    // Build the rich tooltip via the raw `show()` API. We escape the inputs
+    // to avoid HTML injection from attribute values.
+    const titleHtml = `<div class="ig-tooltip-title">${escapeHtml(description.title)}</div>`;
+    const lineHtml = description.lines
+      .map((line) => `<div class="ig-tooltip-line">${escapeHtml(line)}</div>`)
+      .join('');
+    this.tooltipOverlay.show(`${titleHtml}${lineHtml}`, x, y);
+  }
+
+  /**
+   * Update the incoming-edge label map used by the default tooltip's
+   * natural-language description. Pass `undefined` to clear.
+   */
+  setIncomingEdgeLabels(labels: EdgeLabelMap | undefined): void {
+    this.incomingEdgeLabels = labels;
+  }
+
+  /**
+   * Update the outgoing-edge label map used by the default tooltip's
+   * natural-language description. Pass `undefined` to clear.
+   */
+  setOutgoingEdgeLabels(labels: EdgeLabelMap | undefined): void {
+    this.outgoingEdgeLabels = labels;
+  }
+
+  /** Active incoming-edge label map (for tests + introspection). */
+  getIncomingEdgeLabels(): EdgeLabelMap | undefined {
+    return this.incomingEdgeLabels;
+  }
+
+  /** Active outgoing-edge label map (for tests + introspection). */
+  getOutgoingEdgeLabels(): EdgeLabelMap | undefined {
+    return this.outgoingEdgeLabels;
   }
 
   /**

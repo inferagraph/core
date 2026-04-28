@@ -551,6 +551,106 @@ describe('SceneController', () => {
       expect(removeSpy).toHaveBeenCalledWith('pointerleave', expect.any(Function));
       ctrl.detach();
     });
+
+    it('default tooltip shows the natural-language description for a hovered node', () => {
+      // Force a hit on instance 0 so the hover pipeline fires showTooltip.
+      const familyData: GraphData = {
+        nodes: [
+          { id: 'isaac', attributes: { title: 'Isaac', type: 'person' } },
+          { id: 'abraham', attributes: { title: 'Abraham', type: 'person' } },
+          { id: 'sarah', attributes: { title: 'Sarah', type: 'person' } },
+        ],
+        edges: [
+          { id: 'e1', sourceId: 'abraham', targetId: 'isaac', attributes: { type: 'father_of' } },
+          { id: 'e2', sourceId: 'sarah', targetId: 'isaac', attributes: { type: 'mother_of' } },
+        ],
+      };
+      seedStore(store, familyData);
+      const ctrl = new SceneController({
+        store,
+        incomingEdgeLabels: { father_of: 'Son of', mother_of: 'Son of' },
+      });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Stub the raycaster to return Isaac on the next hit-test so the
+      // hover pipeline exercises the rich-tooltip path without a real WebGL
+      // context.
+      const ray = ctrl.getRaycaster();
+      vi.spyOn(ray, 'hitTest').mockReturnValue('isaac');
+
+      // Synthesize a pointer move + drive one tick by calling the private
+      // tick handler indirectly via setEnableHover (re-entry is harmless).
+      const move = new Event('pointermove');
+      Object.assign(move, { clientX: 100, clientY: 100 });
+      container.dispatchEvent(move);
+      // @ts-expect-error — invoke private tick directly for the assertion
+      ctrl['updateHover']();
+
+      const tip = container.querySelector('.ig-tooltip') as HTMLElement;
+      expect(tip.style.display).toBe('block');
+      expect(tip.querySelector('.ig-tooltip-title')?.textContent).toBe('Isaac');
+      const lines = Array.from(tip.querySelectorAll('.ig-tooltip-line')).map(
+        (n) => n.textContent,
+      );
+      expect(lines).toContain('Son of Abraham and Sarah');
+
+      ctrl.detach();
+    });
+
+    it('default tooltip falls back to the node name when there are no relationships', () => {
+      seedStore(store, {
+        nodes: [{ id: 'lonely', attributes: { name: 'Lonely', type: 'person' } }],
+        edges: [],
+      });
+      const ctrl = new SceneController({ store });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      const ray = ctrl.getRaycaster();
+      vi.spyOn(ray, 'hitTest').mockReturnValue('lonely');
+
+      // @ts-expect-error — invoke private tick directly for the assertion
+      ctrl['updateHover']();
+
+      const tip = container.querySelector('.ig-tooltip') as HTMLElement;
+      expect(tip.style.display).toBe('block');
+      // No relationship lines means we fall back to the simple TooltipOverlay
+      // path which writes the bare name as text content.
+      expect(tip.textContent).toBe('Lonely');
+
+      ctrl.detach();
+    });
+
+    it('honors a custom tooltip.renderTooltip even when relationships exist', () => {
+      seedStore(store, sample);
+      const renderTooltip = vi.fn();
+      const ctrl = new SceneController({ store, tooltip: { renderTooltip } });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      const ray = ctrl.getRaycaster();
+      vi.spyOn(ray, 'hitTest').mockReturnValue('a');
+
+      // @ts-expect-error — invoke private tick directly for the assertion
+      ctrl['updateHover']();
+
+      expect(renderTooltip).toHaveBeenCalled();
+
+      ctrl.detach();
+    });
+
+    it('exposes setters for incoming/outgoing edge label maps', () => {
+      const ctrl = new SceneController({ store });
+      expect(ctrl.getIncomingEdgeLabels()).toBeUndefined();
+      expect(ctrl.getOutgoingEdgeLabels()).toBeUndefined();
+
+      ctrl.setIncomingEdgeLabels({ father_of: 'Son of' });
+      ctrl.setOutgoingEdgeLabels({ father_of: 'Father of' });
+
+      expect(ctrl.getIncomingEdgeLabels()).toEqual({ father_of: 'Son of' });
+      expect(ctrl.getOutgoingEdgeLabels()).toEqual({ father_of: 'Father of' });
+    });
   });
 
   describe('label toggling', () => {
