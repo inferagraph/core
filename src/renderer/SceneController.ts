@@ -45,6 +45,128 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * A frozen capture of a camera + its orbit target. Used by
+ * {@link SceneController} to preserve per-mode camera state across
+ * graph/tree toggles so user pan/zoom/rotate gestures in one view do not
+ * bleed into the other.
+ *
+ *   - `position`: world-space camera location.
+ *   - `quaternion`: orientation. (Tree mode is locked axis-aligned, so its
+ *     captured quaternion is just the identity by construction; graph mode
+ *     uses the live trackball orientation.)
+ *   - `zoom`: orthographic zoom factor. The perspective camera ignores
+ *     this on restore (its zoom is always 1) but we still capture it so
+ *     the snapshot type is uniform between modes.
+ *   - `target`: the trackball look-at point (== orbit centre).
+ */
+export interface CameraSnapshot {
+  position: { x: number; y: number; z: number };
+  quaternion: { x: number; y: number; z: number; w: number };
+  zoom: number;
+  target: { x: number; y: number; z: number };
+}
+
+/**
+ * Capture the live camera + controls target into a {@link CameraSnapshot}.
+ * Reads the orientation off the camera's quaternion (kept in sync by Three's
+ * `lookAt` and the trackball gestures) and the orbit centre from
+ * `CameraController.getTarget()`.
+ *
+ * Only public properties are touched; the camera is not mutated.
+ */
+function captureCameraState(
+  camera: THREE.Camera,
+  target: Vector3,
+): CameraSnapshot {
+  const cam = camera as THREE.Camera & {
+    position: { x: number; y: number; z: number };
+    quaternion?: { x: number; y: number; z: number; w: number };
+    zoom?: number;
+  };
+  const q = cam.quaternion;
+  return {
+    position: {
+      x: cam.position.x,
+      y: cam.position.y,
+      z: cam.position.z,
+    },
+    quaternion: q
+      ? { x: q.x, y: q.y, z: q.z, w: q.w }
+      : { x: 0, y: 0, z: 0, w: 1 },
+    zoom: typeof cam.zoom === 'number' ? cam.zoom : 1,
+    target: { x: target.x, y: target.y, z: target.z },
+  };
+}
+
+/**
+ * Restore a {@link CameraSnapshot} onto the live camera + controls. The
+ * snapshot's target is pushed through {@link CameraController.setTarget} so
+ * the underlying TrackballControls picks it up; the camera's position +
+ * orientation + zoom are written directly so the prior eye vector is
+ * preserved verbatim (we deliberately bypass `setTarget`'s side-effect of
+ * placing the camera at `radius` along the look direction — that would
+ * erase the saved position).
+ */
+function applyCameraState(
+  camera: THREE.Camera,
+  cameraController: CameraController,
+  snapshot: CameraSnapshot,
+): void {
+  const cam = camera as THREE.Camera & {
+    position: {
+      x: number;
+      y: number;
+      z: number;
+      set: (x: number, y: number, z: number) => unknown;
+    };
+    quaternion?: {
+      x: number;
+      y: number;
+      z: number;
+      w: number;
+      set?: (x: number, y: number, z: number, w: number) => unknown;
+    };
+    zoom?: number;
+    updateProjectionMatrix?: () => void;
+  };
+
+  // 1. Push the orbit centre into the trackball + the controller's cached
+  //    target. We do NOT use `setTarget` because its `placeCameraAtRadius`
+  //    side-effect would clobber the camera position we're about to restore.
+  const controls = cameraController.getControls();
+  if (controls) {
+    controls.target.set(
+      snapshot.target.x,
+      snapshot.target.y,
+      snapshot.target.z,
+    );
+  }
+  // Mirror the new target into the controller's private cache via the
+  // public setter, but immediately undo its position-placement side-effect
+  // by writing the saved camera position over the top.
+  cameraController.setTarget(snapshot.target);
+
+  // 2. Restore the camera transform.
+  cam.position.set(
+    snapshot.position.x,
+    snapshot.position.y,
+    snapshot.position.z,
+  );
+  if (cam.quaternion?.set) {
+    cam.quaternion.set(
+      snapshot.quaternion.x,
+      snapshot.quaternion.y,
+      snapshot.quaternion.z,
+      snapshot.quaternion.w,
+    );
+  }
+  if (typeof cam.zoom === 'number') {
+    cam.zoom = snapshot.zoom;
+    cam.updateProjectionMatrix?.();
+  }
+}
+
 export interface SceneControllerOptions {
   store: GraphStore;
   layout?: LayoutMode;
@@ -164,6 +286,22 @@ export class SceneController {
 
   private layoutMode: LayoutMode;
   private layoutEngine: LayoutEngine;
+
+  /**
+   * Per-mode camera snapshots. Captured on the way OUT of a mode so the
+   * next entry into that mode can restore the user's prior pan / zoom /
+   * (graph-mode) rotation. `null` means "no prior state — initialise via
+   * frameToFit on next entry".
+   *
+   * The two views are completely independent: mutating the live camera
+   * while in graph mode never touches `treeCameraSnapshot` and vice versa.
+   *
+   * Cleared by {@link syncFromStore} because new layout positions
+   * invalidate any saved frame (the saved target / radius reference the
+   * old coordinate space).
+   */
+  private graphCameraSnapshot: CameraSnapshot | null = null;
+  private treeCameraSnapshot: CameraSnapshot | null = null;
 
   private nodeRender: NodeRenderConfig | undefined;
   private tooltip: TooltipConfig | undefined;
@@ -376,6 +514,12 @@ export class SceneController {
     this.pointerActive = false;
     this.pulseController.reset();
 
+    // Detaching wipes the underlying TrackballControls and (potentially)
+    // the cameras themselves; saved snapshots reference state that no
+    // longer exists. Clear them so the next attach starts fresh.
+    this.graphCameraSnapshot = null;
+    this.treeCameraSnapshot = null;
+
     this.container = null;
   }
 
@@ -415,6 +559,13 @@ export class SceneController {
     // modes' caches: only the active layout runs on sync.
     this.layoutCache.clear();
 
+    // Saved per-mode camera snapshots reference the prior layout's
+    // coordinates and bounding radius. Drop them so the next entry into
+    // the inactive mode falls through to the first-entry default
+    // (frameToFit + tree axis-align) instead of restoring stale state.
+    this.graphCameraSnapshot = null;
+    this.treeCameraSnapshot = null;
+
     if (nodes.length === 0) return;
 
     // Compute positions for the ACTIVE layout only. Inactive layouts (e.g.
@@ -424,9 +575,13 @@ export class SceneController {
     const positions = this.computeActiveLayout();
 
     // Build the right meshes for the active layout mode + frame the camera.
+    // Both snapshots were just cleared above, so this is always a
+    // first-entry default for the active mode: frameToFit + (tree only)
+    // axis-align the orthographic camera.
     if (this.layoutMode === 'tree') {
       this.applyTreeCamera();
       this.buildTreeMeshes(positions);
+      this.cameraController.resetCameraOrientation();
     } else {
       this.applyGraphCamera();
       this.buildGraphMeshes(edges, positions);
@@ -805,13 +960,11 @@ export class SceneController {
     // Rotation makes no sense in a planar tree view — lock it. Zoom + pan
     // stay live so the user can navigate large family trees.
     this.cameraController.setRotationEnabled(false);
-    // Force the camera to a known axis-aligned orientation. Without this
-    // any prior trackball rotation (or an off-axis eye direction left over
-    // from the perspective camera's last position) would tilt the
-    // orthographic projection and skew every card. The follow-up
-    // `frameToFit` may move + scale the camera but must NOT rotate it; we
-    // re-assert the orientation there too.
-    this.cameraController.resetCameraOrientation();
+    // NOTE: axis-alignment is owned by the FIRST-ENTRY default path in
+    // `setLayout` / `syncFromStore`, not by this swap. On subsequent
+    // entries to tree mode the saved snapshot's transform is restored
+    // verbatim, so calling `resetCameraOrientation` here would clobber
+    // the user's pan/zoom from their previous tree-mode session.
     this.raycaster.setCamera(this.orthographicCamera);
   }
 
@@ -832,11 +985,45 @@ export class SceneController {
    * (via the active engine only — inactive layouts are never invoked) and
    * caches them so a later toggle back can short-circuit.
    *
+   * Per-mode camera state is preserved across toggles:
+   *   1. The OUTGOING mode's live camera (position / orientation / zoom /
+   *      target) is snapshotted into `graphCameraSnapshot` or
+   *      `treeCameraSnapshot`.
+   *   2. The cameras are swapped + rotation gates are applied (tree
+   *      locks rotation, graph re-enables it).
+   *   3. If the INCOMING mode has a prior snapshot, it is restored
+   *      verbatim — the user's pan / zoom / (graph) rotation from the
+   *      last visit to that mode survives the round-trip.
+   *   4. If no snapshot exists (first-ever entry to that mode in this
+   *      controller's lifetime, or a `syncFromStore` cleared them),
+   *      `frameToFit` initialises a sensible default. Tree's first-entry
+   *      default also calls `resetCameraOrientation` so the orthographic
+   *      projection is axis-aligned.
+   *
+   * Mutating the live camera in one mode never touches the other mode's
+   * snapshot — the two views are independent.
+   *
    * Existing meshes are reused; only the per-instance positions are
    * rewritten.
    */
   setLayout(mode: LayoutMode): void {
     if (mode === this.layoutMode) return;
+
+    // 1. Snapshot the OUTGOING mode's camera state (pan / zoom / rotation /
+    //    target) before we touch any cameras. This is the single point at
+    //    which user gestures in the soon-to-be-inactive mode are captured.
+    const outgoingMode = this.layoutMode;
+    const outgoingCamera = this.renderer.getCamera();
+    if (outgoingCamera) {
+      const outgoingTarget = this.cameraController.getTarget();
+      const snapshot = captureCameraState(outgoingCamera, outgoingTarget);
+      if (outgoingMode === 'graph') {
+        this.graphCameraSnapshot = snapshot;
+      } else {
+        this.treeCameraSnapshot = snapshot;
+      }
+    }
+
     this.layoutMode = mode;
     this.layoutEngine = SceneController.createLayoutEngine(mode);
 
@@ -853,16 +1040,40 @@ export class SceneController {
       this.labelRenderer.clear();
       this.applyTreeCamera();
       this.buildTreeMeshes(positions);
+
+      // 2. Restore the saved tree-mode camera if we have one; otherwise
+      //    fall through to the first-entry default (axis-align +
+      //    frameToFit on the visible subset).
+      if (this.treeCameraSnapshot && this.orthographicCamera) {
+        applyCameraState(
+          this.orthographicCamera,
+          this.cameraController,
+          this.treeCameraSnapshot,
+        );
+      } else {
+        this.cameraController.resetCameraOrientation();
+        this.frameToFit(this.framingPositions(positions));
+      }
     } else {
       this.teardownTreeMeshes();
       this.labelRenderer.clear();
       this.applyGraphCamera();
       const edges = this.store.getAllEdges();
       this.buildGraphMeshes(edges, positions);
+
+      // 2. Restore the saved graph-mode camera if we have one; otherwise
+      //    fall through to the first-entry default (frameToFit only —
+      //    graph mode owns its free-rotation eye vector).
+      if (this.graphCameraSnapshot && this.perspectiveCamera) {
+        applyCameraState(
+          this.perspectiveCamera,
+          this.cameraController,
+          this.graphCameraSnapshot,
+        );
+      } else {
+        this.frameToFit(this.framingPositions(positions));
+      }
     }
-    // Frame against the visible-only positions in tree mode so a heavily
-    // filtered subset still sits centred in the viewport.
-    this.frameToFit(this.framingPositions(positions));
   }
 
   /**
@@ -1339,17 +1550,12 @@ export class SceneController {
     this.cameraController.setTarget({ x: cx, y: cy, z: cz });
     this.cameraController.setRadius(radius);
 
-    // Tree mode uses an orthographic projection where any non-axis-aligned
-    // eye direction shows up as a visible rotation of every card. The
-    // calls above can leave the camera looking at the new target from an
-    // off-axis position (because `setTarget`/`setRadius` preserve the
-    // existing eye vector relative to the *previous* target). Snap the
-    // orthographic camera back to a front-facing, axis-aligned orientation
-    // here. Graph mode must keep its free-rotation eye vector, so the
-    // reset is gated on the active layout.
-    if (this.layoutMode === 'tree') {
-      this.cameraController.resetCameraOrientation();
-    }
+    // Axis-alignment for tree mode is owned by the FIRST-ENTRY default
+    // path in `setLayout` / `syncFromStore`, which calls
+    // `resetCameraOrientation` BEFORE this method. On subsequent entries
+    // to tree mode the saved snapshot's eye vector is restored without
+    // a frameToFit, so we never want this method to mutate orientation.
+    // Graph mode keeps its free-rotation eye vector untouched as well.
   }
 
   /**

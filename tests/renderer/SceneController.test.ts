@@ -50,6 +50,7 @@ vi.mock('three', () => {
     })),
     PerspectiveCamera: class MockPerspectiveCamera {
       position: Record<string, unknown>;
+      quaternion: Record<string, unknown>;
       up: Record<string, unknown>;
       aspect = 1;
       fov = 60;
@@ -68,11 +69,19 @@ vi.mock('three', () => {
           distanceTo: vi.fn().mockReturnValue(100),
           copy: vi.fn().mockReturnThis(),
         };
+        this.quaternion = {
+          set: vi.fn().mockImplementation(function (this: { x: number; y: number; z: number; w: number }, x: number, y: number, z: number, w: number) {
+            this.x = x; this.y = y; this.z = z; this.w = w;
+            return this;
+          }),
+          x: 0, y: 0, z: 0, w: 1,
+        };
         this.up = { x: 0, y: 1, z: 0, clone: vi.fn().mockReturnValue({ x: 0, y: 1, z: 0 }), copy: vi.fn().mockReturnThis() };
       }
     },
     OrthographicCamera: class MockOrthographicCamera {
       position: Record<string, unknown>;
+      quaternion: Record<string, unknown>;
       up: Record<string, unknown>;
       left: number;
       right: number;
@@ -96,6 +105,13 @@ vi.mock('three', () => {
           clone: vi.fn().mockReturnValue({ x: 0, y: 0, z: 0 }),
           distanceTo: vi.fn().mockReturnValue(100),
           copy: vi.fn().mockReturnThis(),
+        };
+        this.quaternion = {
+          set: vi.fn().mockImplementation(function (this: { x: number; y: number; z: number; w: number }, x: number, y: number, z: number, w: number) {
+            this.x = x; this.y = y; this.z = z; this.w = w;
+            return this;
+          }),
+          x: 0, y: 0, z: 0, w: 1,
         };
         this.up = {
           x: 0, y: 1, z: 0,
@@ -1102,29 +1118,58 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('resets orthographic camera to axis-aligned on entry to tree mode', () => {
+    it('resets orthographic camera to axis-aligned on FIRST entry to tree mode', () => {
       seedStore(store, family);
       const ctrl = new SceneController({ store });
       ctrl.attach(container);
       ctrl.syncFromStore();
 
       // Spy on the camera-controller orientation reset. SceneController
-      // must call it both on the entry path (applyTreeCamera) and after
-      // frameToFit has retargeted the camera.
+      // owns axis-alignment in the first-entry default path of
+      // setLayout — exactly one reset, before frameToFit. frameToFit
+      // itself no longer touches orientation.
       const resetSpy = vi.spyOn(
         ctrl.getCameraController(),
         'resetCameraOrientation',
       );
 
       ctrl.setLayout('tree');
-      // At least one reset on entry, plus one in frameToFit's tree branch.
-      expect(resetSpy).toHaveBeenCalledTimes(2);
+      // Exactly one reset on the first-entry default path.
+      expect(resetSpy).toHaveBeenCalledTimes(1);
 
       // Toggling back to graph must NOT reset the orientation — graph mode
       // owns the user's free-rotation eye vector.
       resetSpy.mockClear();
       ctrl.setLayout('graph');
       expect(resetSpy).not.toHaveBeenCalled();
+
+      ctrl.detach();
+    });
+
+    it('does NOT reset orthographic orientation on subsequent entries to tree mode', () => {
+      // Per-mode camera persistence: once a tree snapshot exists, the
+      // saved transform is restored verbatim. Re-asserting axis-alignment
+      // would clobber any pan/zoom the user did in their previous tree
+      // session.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      const resetSpy = vi.spyOn(
+        ctrl.getCameraController(),
+        'resetCameraOrientation',
+      );
+
+      // First entry — first-entry default fires (1 reset).
+      ctrl.setLayout('tree');
+      expect(resetSpy).toHaveBeenCalledTimes(1);
+
+      // Round-trip: graph then tree again. Second entry restores the
+      // saved tree snapshot — NO additional reset.
+      ctrl.setLayout('graph');
+      ctrl.setLayout('tree');
+      expect(resetSpy).toHaveBeenCalledTimes(1);
 
       ctrl.detach();
     });
@@ -1139,6 +1184,254 @@ describe('SceneController', () => {
       );
       ctrl.syncFromStore();
       expect(resetSpy).not.toHaveBeenCalled();
+      ctrl.detach();
+    });
+  });
+
+  describe('per-mode camera state persistence', () => {
+    // The two views must keep COMPLETELY independent camera state.
+    // Toggling graph→tree→graph must restore the user's prior graph
+    // pan/zoom/rotation; toggling tree→graph→tree must restore the
+    // user's prior tree pan/zoom. Mutations in one mode never bleed
+    // into the other mode's saved state.
+
+    const family: GraphData = {
+      nodes: [
+        { id: 'adam', attributes: { name: 'Adam', type: 'person' } },
+        { id: 'eve', attributes: { name: 'Eve', type: 'person' } },
+        { id: 'cain', attributes: { name: 'Cain', type: 'person' } },
+      ],
+      edges: [
+        { id: 'm1', sourceId: 'adam', targetId: 'eve', attributes: { type: 'husband_of' } },
+        { id: 'p1', sourceId: 'adam', targetId: 'cain', attributes: { type: 'father_of' } },
+      ],
+    };
+
+    type LiveCamera = {
+      position: {
+        set: (x: number, y: number, z: number) => unknown;
+        x: number;
+        y: number;
+        z: number;
+      };
+      zoom?: number;
+      updateProjectionMatrix?: () => void;
+    };
+
+    /**
+     * Mutate the live camera + controls target so a snapshot taken
+     * after this call is distinguishable from any default-framed state.
+     */
+    function poseLiveCamera(
+      ctrl: SceneController,
+      pose: { position: [number, number, number]; target: [number, number, number]; zoom?: number },
+    ): void {
+      const camera = ctrl.getRenderer().getCamera() as unknown as LiveCamera | null;
+      const controls = ctrl.getCameraController().getControls();
+      if (!camera || !controls) throw new Error('camera/controls not attached');
+      camera.position.set(pose.position[0], pose.position[1], pose.position[2]);
+      controls.target.set(pose.target[0], pose.target[1], pose.target[2]);
+      if (typeof pose.zoom === 'number' && typeof camera.zoom === 'number') {
+        camera.zoom = pose.zoom;
+        camera.updateProjectionMatrix?.();
+      }
+    }
+
+    function readLivePose(ctrl: SceneController): {
+      position: { x: number; y: number; z: number };
+      target: { x: number; y: number; z: number };
+      zoom: number;
+    } {
+      const camera = ctrl.getRenderer().getCamera() as unknown as LiveCamera | null;
+      const target = ctrl.getCameraController().getTarget();
+      if (!camera) throw new Error('camera not attached');
+      return {
+        position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+        target: { x: target.x, y: target.y, z: target.z },
+        zoom: typeof camera.zoom === 'number' ? camera.zoom : 1,
+      };
+    }
+
+    it('preserves graph camera state across a tree round-trip', () => {
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // 1. Pose the graph (perspective) camera somewhere distinctive.
+      poseLiveCamera(ctrl, {
+        position: [5, 6, 7],
+        target: [1, 2, 3],
+      });
+      const graphPose = readLivePose(ctrl);
+
+      // 2. Toggle into tree, mutate the tree camera differently, then
+      //    toggle back to graph.
+      ctrl.setLayout('tree');
+      poseLiveCamera(ctrl, {
+        position: [100, 200, 300],
+        target: [50, 60, 70],
+        zoom: 2.5,
+      });
+
+      ctrl.setLayout('graph');
+
+      // 3. Graph state must match the pre-toggle pose, NOT the tree pose.
+      const restored = readLivePose(ctrl);
+      expect(restored.position).toEqual(graphPose.position);
+      expect(restored.target).toEqual(graphPose.target);
+
+      ctrl.detach();
+    });
+
+    it('preserves tree camera state across a graph round-trip', () => {
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Enter tree first so the orthographic camera exists.
+      ctrl.setLayout('tree');
+
+      // Pose the tree camera distinctly.
+      poseLiveCamera(ctrl, {
+        position: [11, 22, 33],
+        target: [4, 5, 6],
+        zoom: 1.75,
+      });
+      const treePose = readLivePose(ctrl);
+
+      // Toggle out + mutate graph + toggle back.
+      ctrl.setLayout('graph');
+      poseLiveCamera(ctrl, {
+        position: [-1, -2, -3],
+        target: [-4, -5, -6],
+      });
+
+      ctrl.setLayout('tree');
+
+      const restored = readLivePose(ctrl);
+      expect(restored.position).toEqual(treePose.position);
+      expect(restored.target).toEqual(treePose.target);
+      expect(restored.zoom).toBe(treePose.zoom);
+
+      ctrl.detach();
+    });
+
+    it('initializes via frameToFit on FIRST entry to each mode', () => {
+      // First-ever entry to a mode (no prior snapshot) must call
+      // frameToFit. Subsequent entries must NOT — the saved snapshot
+      // takes over.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // syncFromStore framed graph mode once. Spy on the framer from now on.
+      // @ts-expect-error — accessing private for a behaviour assertion
+      const frameSpy = vi.spyOn(ctrl, 'frameToFit');
+
+      // First entry to tree — should call frameToFit (default path).
+      ctrl.setLayout('tree');
+      expect(frameSpy).toHaveBeenCalledTimes(1);
+
+      // Round-trip: graph already has a snapshot from before setLayout
+      // captured the outgoing graph state, so this is a RESTORE — no frame.
+      ctrl.setLayout('graph');
+      expect(frameSpy).toHaveBeenCalledTimes(1);
+
+      // Second entry to tree — restore from snapshot, no frame.
+      ctrl.setLayout('tree');
+      expect(frameSpy).toHaveBeenCalledTimes(1);
+
+      ctrl.detach();
+    });
+
+    it('keeps rotation locked in tree mode regardless of saved snapshot', () => {
+      // Restoring a saved tree snapshot must not re-enable rotation.
+      // Tree mode owns rotation = false unconditionally.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Visit tree once so a snapshot is captured on the way out.
+      ctrl.setLayout('tree');
+      expect(ctrl.getCameraController().isRotationEnabled()).toBe(false);
+      ctrl.setLayout('graph');
+
+      // Re-enter tree — restore path. Rotation must STILL be locked.
+      ctrl.setLayout('tree');
+      expect(ctrl.getCameraController().isRotationEnabled()).toBe(false);
+
+      // Round-trip back: graph rotation must come back live.
+      ctrl.setLayout('graph');
+      expect(ctrl.getCameraController().isRotationEnabled()).toBe(true);
+
+      ctrl.detach();
+    });
+
+    it('graph and tree snapshots are isolated — gestures in one mode do not bleed into the other', () => {
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Pose A in graph.
+      poseLiveCamera(ctrl, { position: [1, 1, 1], target: [0, 0, 0] });
+      const graphA = readLivePose(ctrl);
+
+      // Toggle to tree, pose B.
+      ctrl.setLayout('tree');
+      poseLiveCamera(ctrl, { position: [9, 9, 9], target: [8, 8, 8], zoom: 3 });
+      const treeB = readLivePose(ctrl);
+
+      // Back to graph — should see pose A, NOT pose B.
+      ctrl.setLayout('graph');
+      const graphRestored = readLivePose(ctrl);
+      expect(graphRestored.position).toEqual(graphA.position);
+      expect(graphRestored.target).toEqual(graphA.target);
+      expect(graphRestored.position).not.toEqual(treeB.position);
+
+      // Now mutate graph again to a third pose C — this must NOT leak
+      // into the tree snapshot.
+      poseLiveCamera(ctrl, { position: [42, 42, 42], target: [41, 41, 41] });
+
+      // Toggle to tree — should see pose B, NOT pose C.
+      ctrl.setLayout('tree');
+      const treeRestored = readLivePose(ctrl);
+      expect(treeRestored.position).toEqual(treeB.position);
+      expect(treeRestored.target).toEqual(treeB.target);
+      expect(treeRestored.zoom).toBe(treeB.zoom);
+
+      ctrl.detach();
+    });
+
+    it('clears snapshots on syncFromStore so stale frames do not leak across data changes', () => {
+      // syncFromStore invalidates layout positions; the saved snapshots
+      // reference the old coordinate space. After a sync, the next entry
+      // into a mode must re-initialise via frameToFit (first-entry path).
+      seedStore(store, family);
+      const ctrl = new SceneController({ store });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Visit tree once so both snapshots are populated.
+      ctrl.setLayout('tree');
+      ctrl.setLayout('graph');
+
+      // @ts-expect-error — internal access for the assertion
+      expect(ctrl['graphCameraSnapshot']).not.toBeNull();
+      // @ts-expect-error — internal access for the assertion
+      expect(ctrl['treeCameraSnapshot']).not.toBeNull();
+
+      // Re-sync (e.g. fresh data load) must wipe both snapshots.
+      ctrl.syncFromStore();
+      // @ts-expect-error — internal access for the assertion
+      expect(ctrl['graphCameraSnapshot']).toBeNull();
+      // @ts-expect-error — internal access for the assertion
+      expect(ctrl['treeCameraSnapshot']).toBeNull();
+
       ctrl.detach();
     });
   });

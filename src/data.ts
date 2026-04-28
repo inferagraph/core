@@ -88,7 +88,10 @@ export { LayoutRegistry } from './layouts/LayoutRegistry.js';
 export { WebGLRenderer } from './renderer/WebGLRenderer.js';
 export type { TickCallback } from './renderer/WebGLRenderer.js';
 export { SceneController } from './renderer/SceneController.js';
-export type { SceneControllerOptions } from './renderer/SceneController.js';
+export type {
+  SceneControllerOptions,
+  CameraSnapshot,
+} from './renderer/SceneController.js';
 export {
   NodeColorResolver,
   DEFAULT_NODE_COLOR,
