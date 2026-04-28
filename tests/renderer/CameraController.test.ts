@@ -271,4 +271,82 @@ describe('CameraController (TrackballControls-backed)', () => {
       expect(() => controller.update()).not.toThrow();
     });
   });
+
+  describe('syncFromCamera', () => {
+    // Used by SceneController#applyCameraState to flush stale internal
+    // state after restoring a per-mode camera snapshot. Without this,
+    // the underlying TrackballControls would keep applying residual
+    // damping (rotation / zoom / pan inertia) on the next update(),
+    // sliding the camera away from the just-restored snapshot.
+
+    it('updates the cached radius from the live camera + target', () => {
+      controller.attach(container, camera);
+
+      // Move the camera + target so the live distance no longer matches
+      // the controller's default radius (100).
+      const camAny = camera as unknown as { position: { x: number; y: number; z: number } };
+      camAny.position.x = 30;
+      camAny.position.y = 0;
+      camAny.position.z = 40; // distance from origin = 50
+      const t = lastTrackball!.target as { x: number; y: number; z: number };
+      t.x = 0; t.y = 0; t.z = 0;
+
+      controller.syncFromCamera();
+
+      // controller.getRadius() reads from camera.distanceTo(target), so
+      // we assert by reading the private cache (used by setTarget /
+      // resetCameraOrientation when controls aren't live).
+      expect((controller as unknown as { radius: number }).radius).toBeCloseTo(50, 6);
+    });
+
+    it('zeros TrackballControls damping accumulators so the next update() is a no-op', () => {
+      controller.attach(container, camera);
+      const c = lastTrackball as unknown as Record<string, unknown>;
+
+      // Seed residual damping state directly on the mock — these are
+      // exactly the slots TrackballControls' update() reads to apply
+      // rotation / pan / zoom inertia.
+      c._lastAngle = 0.42;
+      c._moveCurr = { x: 0.1, y: 0.05 };
+      c._movePrev = { x: 0, y: 0, copy(this: { x: number; y: number }, v: { x: number; y: number }) { this.x = v.x; this.y = v.y; return this; } };
+      c._panEnd = { x: 0.2, y: 0.0 };
+      c._panStart = { x: 0, y: 0, copy(this: { x: number; y: number }, v: { x: number; y: number }) { this.x = v.x; this.y = v.y; return this; } };
+      c._zoomEnd = { x: 0, y: 0.2 };
+      c._zoomStart = { x: 0, y: 0, copy(this: { x: number; y: number }, v: { x: number; y: number }) { this.x = v.x; this.y = v.y; return this; } };
+      c._touchZoomDistanceStart = 10;
+      c._touchZoomDistanceEnd = 25;
+
+      controller.syncFromCamera();
+
+      expect(c._lastAngle).toBe(0);
+      expect(c._movePrev).toEqual(expect.objectContaining({ x: 0.1, y: 0.05 }));
+      expect(c._panStart).toEqual(expect.objectContaining({ x: 0.2, y: 0 }));
+      expect(c._zoomStart).toEqual(expect.objectContaining({ x: 0, y: 0.2 }));
+      expect(c._touchZoomDistanceStart).toBe(25);
+    });
+
+    it('refreshes the change-detector slots so no spurious change events fire', () => {
+      controller.attach(container, camera);
+      const c = lastTrackball as unknown as Record<string, unknown>;
+
+      // Seed the detector with stale values different from the live camera.
+      c._lastPosition = { copy(this: { x: number; y: number; z: number }, v: { x: number; y: number; z: number }) { this.x = v.x; this.y = v.y; this.z = v.z; return this; }, x: -1, y: -1, z: -1 };
+      c._lastZoom = 0.5;
+      const camAny = camera as unknown as { position: { x: number; y: number; z: number }; zoom?: number };
+      camAny.position.x = 7; camAny.position.y = 8; camAny.position.z = 9;
+      camAny.zoom = 1.75;
+
+      controller.syncFromCamera();
+
+      expect(c._lastPosition).toEqual(expect.objectContaining({ x: 7, y: 8, z: 9 }));
+      // _lastZoom is only synced if both controls._lastZoom AND camera.zoom
+      // are numbers — both are here, so we expect the live value.
+      expect(c._lastZoom).toBe(1.75);
+    });
+
+    it('is a no-op when not attached', () => {
+      // Before attach, there are no controls + no camera. Must not throw.
+      expect(() => controller.syncFromCamera()).not.toThrow();
+    });
+  });
 });

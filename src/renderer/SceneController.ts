@@ -107,6 +107,15 @@ function captureCameraState(
  * preserved verbatim (we deliberately bypass `setTarget`'s side-effect of
  * placing the camera at `radius` along the look direction — that would
  * erase the saved position).
+ *
+ * After the live transform is restored we call
+ * {@link CameraController.syncFromCamera} so the controller's cached
+ * `radius` AND the underlying TrackballControls' damping accumulators are
+ * re-derived from the just-restored state. Without that sync, the
+ * trackball's per-frame `update()` would apply leftover rotation / zoom /
+ * pan inertia from the previous mode and visibly slide the camera off
+ * the snapshot during the first few ticks — the bug 0.1.18 was supposed
+ * to fix.
  */
 function applyCameraState(
   camera: THREE.Camera,
@@ -165,6 +174,13 @@ function applyCameraState(
     cam.zoom = snapshot.zoom;
     cam.updateProjectionMatrix?.();
   }
+
+  // 3. CRITICAL: re-derive the controller's cached radius AND zero out the
+  //    trackball's damping accumulators so the next per-frame `update()`
+  //    is a no-op. Without this, residual inertia from the OUTGOING mode
+  //    (e.g. a half-decayed rotation gesture) would slide the freshly
+  //    restored camera away from the snapshot over the next ~10 frames.
+  cameraController.syncFromCamera();
 }
 
 export interface SceneControllerOptions {
@@ -1373,7 +1389,20 @@ export class SceneController {
     const node = this.nodesByIndex[index];
     if (!node) return;
 
-    const positions = this.layoutEngine.getPositions();
+    // Read positions from the cache as the source of truth.
+    //
+    // Why not `this.layoutEngine.getPositions()`? On a round-trip into a
+    // static layout (graph → tree → graph → tree), `setLayout` constructs
+    // a NEW TreeLayout instance, then `computeActiveLayout` SHORT-CIRCUITS
+    // the recompute on cache hit. The new engine's internal `positions`
+    // map stays empty even though the cached map is fully populated. If we
+    // read from the engine here we'd miss every entry and fall through to
+    // {0,0,0} — making every hover slam the card to the origin (bug 0.1.19
+    // is fixing). The graph-mode (animated) engine always has live
+    // positions because its `compute()` runs on every entry, so the cache
+    // is equivalent there; we read from the same source for consistency.
+    const cached = this.layoutCache.get(this.layoutMode);
+    const positions = cached ?? this.layoutEngine.getPositions();
     const id = this.nodeIdsByIndex[index];
     const pos = positions.get(id) ?? { x: 0, y: 0, z: 0 };
 

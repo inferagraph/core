@@ -217,6 +217,88 @@ export class CameraController {
   }
 
   /**
+   * Re-derive the controller's internal state from whatever transform the
+   * camera + controls.target currently hold.
+   *
+   * Background: SceneController persists per-mode camera snapshots and
+   * restores them by writing directly onto `camera.position` /
+   * `camera.quaternion` / `controls.target`. That bypasses the controller's
+   * cached `radius` field AND any residual TrackballControls damping
+   * (`_lastAngle`, `_movePrev/_moveCurr`, `_panStart/_panEnd`,
+   * `_zoomStart/_zoomEnd`). On the next per-frame `update()` the
+   * trackball's own `_eye` is recomputed from the live transform — that
+   * part is fine — but residual damping then nudges the camera away from
+   * the just-restored snapshot, undoing the persistence.
+   *
+   * This method:
+   *   1. Recomputes `radius = camera.position.distanceTo(target)` so the
+   *      controller's stored radius matches the live state.
+   *   2. Zeros every TrackballControls damping accumulator so the next
+   *      `update()` is a no-op (no rotation, no zoom, no pan applied).
+   *   3. Resyncs the controls' `_lastPosition` / `_lastZoom` so the change
+   *      detector inside `update()` doesn't fire spurious change events.
+   *
+   * Safe to call when not attached (no-op).
+   */
+  syncFromCamera(): void {
+    if (!this.camera || !this.controls) return;
+
+    // 1. Refresh our cached target + radius from the live transform.
+    const cam = this.camera as THREE.Camera & {
+      position: { x: number; y: number; z: number };
+      zoom?: number;
+    };
+    this.target = {
+      x: this.controls.target.x,
+      y: this.controls.target.y,
+      z: this.controls.target.z,
+    };
+    const dx = cam.position.x - this.target.x;
+    const dy = cam.position.y - this.target.y;
+    const dz = cam.position.z - this.target.z;
+    const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (Number.isFinite(r) && r > 0) {
+      this.radius = r;
+    }
+
+    // 2. Zero any residual damping inside the underlying TrackballControls.
+    //    These fields are public properties of the JS implementation
+    //    (despite the leading underscore) — the trackball itself reads +
+    //    writes them as plain object slots, so we can do the same.
+    const c = this.controls as unknown as {
+      _lastAngle?: number;
+      _movePrev?: { x: number; y: number; copy?: (v: { x: number; y: number }) => unknown };
+      _moveCurr?: { x: number; y: number };
+      _panStart?: { x: number; y: number; copy?: (v: { x: number; y: number }) => unknown };
+      _panEnd?: { x: number; y: number };
+      _zoomStart?: { x: number; y: number; copy?: (v: { x: number; y: number }) => unknown };
+      _zoomEnd?: { x: number; y: number };
+      _touchZoomDistanceStart?: number;
+      _touchZoomDistanceEnd?: number;
+      _lastPosition?: {
+        copy?: (v: { x: number; y: number; z: number }) => unknown;
+      };
+      _lastZoom?: number;
+    };
+    if (typeof c._lastAngle === 'number') c._lastAngle = 0;
+    if (c._movePrev?.copy && c._moveCurr) c._movePrev.copy(c._moveCurr);
+    if (c._panStart?.copy && c._panEnd) c._panStart.copy(c._panEnd);
+    if (c._zoomStart?.copy && c._zoomEnd) c._zoomStart.copy(c._zoomEnd);
+    if (typeof c._touchZoomDistanceStart === 'number' &&
+        typeof c._touchZoomDistanceEnd === 'number') {
+      c._touchZoomDistanceStart = c._touchZoomDistanceEnd;
+    }
+
+    // 3. Sync the change-detector slots so the very next update() doesn't
+    //    fire a redundant `change` event from the position+zoom delta we
+    //    just introduced.
+    if (c._lastPosition?.copy) c._lastPosition.copy(cam.position);
+    if (typeof c._lastZoom === 'number' && typeof cam.zoom === 'number') {
+      c._lastZoom = cam.zoom;
+    }
+  }
+
+  /**
    * Position the camera at `this.radius` units from the target, along the
    * current look direction. If the camera is currently coincident with the
    * target, default to the +Z axis so we don't divide by zero.

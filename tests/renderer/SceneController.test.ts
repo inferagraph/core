@@ -1407,6 +1407,139 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
+    it('syncs CameraController internal state on every snapshot restore', () => {
+      // Regression for the 0.1.18 → 0.1.19 fix: writing camera.position /
+      // .quaternion / .zoom in `applyCameraState` is not enough.
+      // CameraController caches its own `radius` AND TrackballControls
+      // owns damping accumulators (`_lastAngle`, `_movePrev/_moveCurr`,
+      // `_panStart/_panEnd`, `_zoomStart/_zoomEnd`). Those would leak
+      // residual inertia from the outgoing mode's gestures into the
+      // freshly restored camera on the very next per-frame `update()`.
+      //
+      // `applyCameraState` must therefore call
+      // `cameraController.syncFromCamera()` AFTER writing the transform.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Pose graph + populate snapshots via a tree round-trip.
+      poseLiveCamera(ctrl, { position: [5, 6, 7], target: [1, 2, 3] });
+      ctrl.setLayout('tree');
+      poseLiveCamera(ctrl, {
+        position: [100, 200, 300],
+        target: [50, 60, 70],
+        zoom: 2.5,
+      });
+
+      // Watch syncFromCamera from now on. The next two restores
+      // (tree→graph and graph→tree) MUST each invoke it.
+      const syncSpy = vi.spyOn(ctrl.getCameraController(), 'syncFromCamera');
+
+      ctrl.setLayout('graph');
+      expect(syncSpy).toHaveBeenCalledTimes(1);
+
+      ctrl.setLayout('tree');
+      expect(syncSpy).toHaveBeenCalledTimes(2);
+
+      ctrl.detach();
+    });
+
+    it('preserves graph camera state across a tree round-trip even after CameraController.update() runs', () => {
+      // Same fix, behavioural angle: the user's pose must survive
+      // post-restore `update()` ticks. The mock controls don't simulate
+      // damping (so an accidentally-missing sync wouldn't drift the
+      // mock camera), but pumping update() at all exercises the path
+      // and keeps the assertion close to what the real render loop
+      // does.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      poseLiveCamera(ctrl, { position: [5, 6, 7], target: [1, 2, 3] });
+      ctrl.getCameraController().update();
+      const graphPose = readLivePose(ctrl);
+
+      ctrl.setLayout('tree');
+      poseLiveCamera(ctrl, {
+        position: [100, 200, 300],
+        target: [50, 60, 70],
+        zoom: 2.5,
+      });
+      ctrl.setLayout('graph');
+
+      // Pump several update() ticks AFTER restoration.
+      for (let i = 0; i < 5; i++) ctrl.getCameraController().update();
+
+      const restored = readLivePose(ctrl);
+      expect(restored.position).toEqual(graphPose.position);
+      expect(restored.target).toEqual(graphPose.target);
+
+      ctrl.detach();
+    });
+
+    it('hover does not displace tree-view cards after a graph→tree round-trip', () => {
+      // Regression for the 0.1.18 → 0.1.19 fix: on a SECOND entry into
+      // tree mode the cache short-circuits `engine.compute()`, so the
+      // (newly constructed) TreeLayout's internal positions map stays
+      // empty even though the cached map is populated. `paintNode` must
+      // therefore read from the layout cache, not the engine — otherwise
+      // every hover repaint shoves the card to the origin.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Visit tree once (populates the cache).
+      ctrl.setLayout('tree');
+      // Round-trip back through graph.
+      ctrl.setLayout('graph');
+      // Re-enter tree — cache HIT, engine.compute() is NOT called.
+      ctrl.setLayout('tree');
+
+      // The new TreeLayout instance's positions map must indeed be
+      // empty here (sanity check — exercises the precondition this test
+      // exists to defend against).
+      const liveEnginePositions = ctrl.getLayoutEngine().getPositions();
+      expect(liveEnginePositions.size).toBe(0);
+
+      // The tree node mesh built from the cache, however, has a card
+      // for every node. Capture the as-built position of the first card
+      // and assert that hovering it does NOT move it.
+      // @ts-expect-error — internal access for a behavioural assertion
+      const treeMesh = ctrl['treeNodeMesh'];
+      expect(treeMesh).toBeTruthy();
+
+      const targetId = 'adam';
+      // Read what the buildTreeMeshes step recorded for `adam`.
+      // @ts-expect-error — internal access
+      const cardEntry = treeMesh.cards.get(targetId);
+      expect(cardEntry).toBeTruthy();
+      const positionBefore = {
+        x: cardEntry.group.position.x,
+        y: cardEntry.group.position.y,
+        z: cardEntry.group.position.z,
+      };
+
+      // Trigger paintNode via the public hover path. We can't dispatch a
+      // real pointer event meaningfully through the jsdom stack, so we
+      // call paintNode directly through the index-based shortcut the
+      // hover loop uses internally.
+      const idx = 0; // 'adam' is the first node in `family`.
+      // @ts-expect-error — internal access for a behavioural assertion
+      ctrl['paintNode'](idx, true);
+
+      const positionAfter = {
+        x: cardEntry.group.position.x,
+        y: cardEntry.group.position.y,
+        z: cardEntry.group.position.z,
+      };
+      expect(positionAfter).toEqual(positionBefore);
+
+      ctrl.detach();
+    });
+
     it('clears snapshots on syncFromStore so stale frames do not leak across data changes', () => {
       // syncFromStore invalidates layout positions; the saved snapshots
       // reference the old coordinate space. After a sync, the next entry
