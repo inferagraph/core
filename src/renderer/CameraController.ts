@@ -157,6 +157,41 @@ export class CameraController {
   }
 
   /**
+   * Whether rotation gestures are currently active. Mirrors the underlying
+   * trackball's `noRotate` flag (inverted). Returns `true` when not yet
+   * attached so the default reflects the constructor state.
+   */
+  isRotationEnabled(): boolean {
+    if (!this.controls) return true;
+    return !this.controls.noRotate;
+  }
+
+  /**
+   * Snap the active camera back to an axis-aligned, front-facing
+   * orientation. Used by the tree view so any prior trackball rotation
+   * cannot carry over and skew the orthographic projection.
+   *
+   *   - position = target + (0, 0, radius)  (along +Z)
+   *   - up       = (0, 1, 0)
+   *   - lookAt(target)
+   *
+   * The radius is preserved (mid-tree zoom level survives the reset).
+   * Pan target also survives — only the orientation + camera location
+   * relative to the target are rewritten.
+   */
+  resetCameraOrientation(): void {
+    if (!this.camera) return;
+    const t = this.target;
+    const radius = this.radius;
+    this.camera.up.set(0, 1, 0);
+    this.camera.position.set(t.x, t.y, t.z + radius);
+    this.camera.lookAt(new THREE.Vector3(t.x, t.y, t.z));
+    if (this.controls) {
+      this.controls.target.set(t.x, t.y, t.z);
+    }
+  }
+
+  /**
    * Snap the camera back to the orientation captured at `attach()` time.
    * Preserves the current orbit radius if `keepRadius` is true (default).
    */

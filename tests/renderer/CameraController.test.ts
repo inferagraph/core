@@ -46,7 +46,15 @@ vi.mock('three', () => {
         distanceTo: vi.fn().mockReturnValue(100),
         copy: vi.fn().mockReturnThis(),
       },
-      up: { x: 0, y: 1, z: 0, clone: vi.fn().mockReturnValue({ x: 0, y: 1, z: 0 }), copy: vi.fn().mockReturnThis() },
+      up: {
+        x: 0, y: 1, z: 0,
+        set: vi.fn().mockImplementation(function (this: { x: number; y: number; z: number }, x: number, y: number, z: number) {
+          this.x = x; this.y = y; this.z = z;
+          return this;
+        }),
+        clone: vi.fn().mockReturnValue({ x: 0, y: 1, z: 0 }),
+        copy: vi.fn().mockReturnThis(),
+      },
       aspect: 1,
       updateProjectionMatrix: vi.fn(),
       lookAt: vi.fn(),
@@ -205,6 +213,48 @@ describe('CameraController (TrackballControls-backed)', () => {
 
     it('resetRotation is a no-op when not attached', () => {
       expect(() => controller.resetRotation()).not.toThrow();
+    });
+
+    it('isRotationEnabled reflects the underlying noRotate flag', () => {
+      controller.attach(container, camera);
+      expect(controller.isRotationEnabled()).toBe(true);
+      controller.setRotationEnabled(false);
+      expect(controller.isRotationEnabled()).toBe(false);
+      controller.setRotationEnabled(true);
+      expect(controller.isRotationEnabled()).toBe(true);
+    });
+
+    it('isRotationEnabled defaults to true before attach', () => {
+      expect(controller.isRotationEnabled()).toBe(true);
+    });
+  });
+
+  describe('resetCameraOrientation', () => {
+    it('snaps the camera to axis-aligned along +Z from the target', () => {
+      controller.attach(container, camera);
+      controller.setTarget({ x: 50, y: -20, z: 0 });
+      controller.setRadius(400);
+
+      // Pre-condition: arrange so we can detect the reset's writes.
+      const upSetSpy = (camera.up as unknown as { set: ReturnType<typeof vi.fn> }).set;
+      const posSetSpy = camera.position.set as ReturnType<typeof vi.fn>;
+      const lookAtSpy = camera.lookAt as ReturnType<typeof vi.fn>;
+      upSetSpy.mockClear();
+      posSetSpy.mockClear();
+      lookAtSpy.mockClear();
+
+      controller.resetCameraOrientation();
+
+      // up = (0, 1, 0)
+      expect(upSetSpy).toHaveBeenCalledWith(0, 1, 0);
+      // position = target + (0, 0, radius)
+      expect(posSetSpy).toHaveBeenCalledWith(50, -20, 400);
+      // lookAt(target) was called
+      expect(lookAtSpy).toHaveBeenCalled();
+    });
+
+    it('is a no-op when not attached', () => {
+      expect(() => controller.resetCameraOrientation()).not.toThrow();
     });
   });
 

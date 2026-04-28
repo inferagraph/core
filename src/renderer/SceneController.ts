@@ -805,6 +805,13 @@ export class SceneController {
     // Rotation makes no sense in a planar tree view — lock it. Zoom + pan
     // stay live so the user can navigate large family trees.
     this.cameraController.setRotationEnabled(false);
+    // Force the camera to a known axis-aligned orientation. Without this
+    // any prior trackball rotation (or an off-axis eye direction left over
+    // from the perspective camera's last position) would tilt the
+    // orthographic projection and skew every card. The follow-up
+    // `frameToFit` may move + scale the camera but must NOT rotate it; we
+    // re-assert the orientation there too.
+    this.cameraController.resetCameraOrientation();
     this.raycaster.setCamera(this.orthographicCamera);
   }
 
@@ -1331,6 +1338,18 @@ export class SceneController {
 
     this.cameraController.setTarget({ x: cx, y: cy, z: cz });
     this.cameraController.setRadius(radius);
+
+    // Tree mode uses an orthographic projection where any non-axis-aligned
+    // eye direction shows up as a visible rotation of every card. The
+    // calls above can leave the camera looking at the new target from an
+    // off-axis position (because `setTarget`/`setRadius` preserve the
+    // existing eye vector relative to the *previous* target). Snap the
+    // orthographic camera back to a front-facing, axis-aligned orientation
+    // here. Graph mode must keep its free-rotation eye vector, so the
+    // reset is gated on the active layout.
+    if (this.layoutMode === 'tree') {
+      this.cameraController.resetCameraOrientation();
+    }
   }
 
   /**

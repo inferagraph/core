@@ -1061,4 +1061,85 @@ describe('SceneController', () => {
       ctrl.detach();
     });
   });
+
+  describe('tree-mode camera lock + reset', () => {
+    // Regression: in 0.1.16 the orthographic camera could pick up an
+    // off-axis eye direction when frameToFit shifted the target away from
+    // origin, which rotated the projection and skewed every card. The
+    // SceneController now (a) keeps rotation gestures locked while in
+    // tree mode and (b) re-asserts an axis-aligned orientation on entry
+    // and after every framing pass.
+
+    const family: GraphData = {
+      nodes: [
+        { id: 'adam', attributes: { name: 'Adam', type: 'person' } },
+        { id: 'eve', attributes: { name: 'Eve', type: 'person' } },
+        { id: 'cain', attributes: { name: 'Cain', type: 'person' } },
+      ],
+      edges: [
+        { id: 'm1', sourceId: 'adam', targetId: 'eve', attributes: { type: 'husband_of' } },
+        { id: 'm2', sourceId: 'eve', targetId: 'adam', attributes: { type: 'wife_of' } },
+        { id: 'p1', sourceId: 'adam', targetId: 'cain', attributes: { type: 'father_of' } },
+        { id: 'p2', sourceId: 'cain', targetId: 'adam', attributes: { type: 'son_of' } },
+      ],
+    };
+
+    it('locks rotation in tree mode and restores it in graph mode', () => {
+      seedStore(store, family);
+      const ctrl = new SceneController({ store });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Default = graph mode → rotation enabled.
+      expect(ctrl.getCameraController().isRotationEnabled()).toBe(true);
+
+      ctrl.setLayout('tree');
+      expect(ctrl.getCameraController().isRotationEnabled()).toBe(false);
+
+      ctrl.setLayout('graph');
+      expect(ctrl.getCameraController().isRotationEnabled()).toBe(true);
+
+      ctrl.detach();
+    });
+
+    it('resets orthographic camera to axis-aligned on entry to tree mode', () => {
+      seedStore(store, family);
+      const ctrl = new SceneController({ store });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Spy on the camera-controller orientation reset. SceneController
+      // must call it both on the entry path (applyTreeCamera) and after
+      // frameToFit has retargeted the camera.
+      const resetSpy = vi.spyOn(
+        ctrl.getCameraController(),
+        'resetCameraOrientation',
+      );
+
+      ctrl.setLayout('tree');
+      // At least one reset on entry, plus one in frameToFit's tree branch.
+      expect(resetSpy).toHaveBeenCalledTimes(2);
+
+      // Toggling back to graph must NOT reset the orientation — graph mode
+      // owns the user's free-rotation eye vector.
+      resetSpy.mockClear();
+      ctrl.setLayout('graph');
+      expect(resetSpy).not.toHaveBeenCalled();
+
+      ctrl.detach();
+    });
+
+    it('does not reset orientation in graph mode framing', () => {
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      const resetSpy = vi.spyOn(
+        ctrl.getCameraController(),
+        'resetCameraOrientation',
+      );
+      ctrl.syncFromStore();
+      expect(resetSpy).not.toHaveBeenCalled();
+      ctrl.detach();
+    });
+  });
 });
