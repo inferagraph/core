@@ -320,6 +320,57 @@ describe('TreeNodeMesh', () => {
       ).toBe(false);
     });
 
+    it('label font is no more than 40% of card height (so long names like Methuselah fit)', () => {
+      // Capture the `ctx.font` string rather than the canvas pixel size.
+      // The font is "{weight} {sizePx}px {family}", and `sizePx` is in
+      // *canvas pixels*, which is `cardHeight * LABEL_PIXELS_PER_UNIT`.
+      // Therefore the ratio of fontPx to canvas height equals the
+      // designer-facing ratio of font height to card height.
+      const captured: { font?: string } = {};
+      getContextSpy?.mockRestore();
+      getContextSpy = vi
+        .spyOn(HTMLCanvasElement.prototype, 'getContext')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockImplementation(((type: string) => {
+          if (type !== '2d') return null;
+          const ctx = {
+            clearRect: vi.fn(),
+            fillText: vi.fn(),
+            measureText: vi.fn().mockReturnValue({ width: 50 }),
+            // Stash the most-recently-assigned `font` so the test can
+            // inspect it after `build`.
+            set font(value: string) {
+              captured.font = value;
+            },
+            get font() {
+              return captured.font ?? '';
+            },
+            textAlign: '',
+            textBaseline: '',
+            fillStyle: '',
+          } as unknown as CanvasRenderingContext2D;
+          return ctx;
+        }) as unknown as typeof HTMLCanvasElement.prototype.getContext);
+
+      const cardHeight = TreeNodeMesh.DEFAULT_HEIGHT;
+      const ppu = TreeNodeMesh.LABEL_PIXELS_PER_UNIT;
+      const canvasH = Math.round(cardHeight * ppu);
+
+      mesh.build([
+        { id: 'methuselah', position: { x: 0, y: 0, z: 0 }, color: '#fff', label: 'Methuselah' },
+      ]);
+
+      expect(captured.font).toBeDefined();
+      const match = captured.font!.match(/(\d+(?:\.\d+)?)px/);
+      expect(match).not.toBeNull();
+      const fontPx = Number(match![1]);
+      const ratio = fontPx / canvasH;
+      // ≥ ~25% so the text is still legible at typical zoom.
+      expect(ratio).toBeGreaterThanOrEqual(0.25);
+      // ≤ 40% so longer biblical names fit comfortably inside the card.
+      expect(ratio).toBeLessThanOrEqual(0.4);
+    });
+
     it('omits the label plane gracefully when 2D canvas context is unavailable', () => {
       // Restore the stub so getContext returns null again — mirrors a
       // pure SSR / Node-without-jsdom environment.

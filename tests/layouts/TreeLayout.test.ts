@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { TreeLayout } from '../../src/layouts/TreeLayout.js';
+import { buildTreeEdgeSegments } from '../../src/renderer/TreeEdgeMesh.js';
+import { TreeNodeMesh } from '../../src/renderer/TreeNodeMesh.js';
 
 describe('TreeLayout', () => {
   it('should have name tree', () => {
@@ -135,6 +137,95 @@ describe('TreeLayout', () => {
     expect(c2.y).toBe(c3.y);
     expect(c1.x).toBeLessThan(c2.x);
     expect(c2.x).toBeLessThan(c3.x);
+  });
+
+  it('parental drop line extends from the marriage-line Y to the sibling-bar Y with no gap', () => {
+    // Adam + Eve as a couple, Cain / Abel / Seth as their children. The
+    // marriage line is drawn at Adam's centre-y (= Eve's centre-y); the
+    // parent → children drop must start at the *same* y so the marriage
+    // line and the drop visually connect. Prior to this fix the drop
+    // started at the parents' card-bottom (`pa.y - halfH`), leaving a
+    // halfH-sized gap between the marriage line and the top of the drop.
+    const layout = new TreeLayout();
+    const positions = layout.compute(
+      ['adam', 'eve', 'cain', 'abel', 'seth'],
+      [
+        { sourceId: 'adam', targetId: 'eve', type: 'husband_of' },
+        { sourceId: 'eve', targetId: 'adam', type: 'wife_of' },
+        { sourceId: 'adam', targetId: 'cain', type: 'father_of' },
+        { sourceId: 'eve', targetId: 'cain', type: 'mother_of' },
+        { sourceId: 'adam', targetId: 'abel', type: 'father_of' },
+        { sourceId: 'eve', targetId: 'abel', type: 'mother_of' },
+        { sourceId: 'adam', targetId: 'seth', type: 'father_of' },
+        { sourceId: 'eve', targetId: 'seth', type: 'mother_of' },
+      ],
+    );
+
+    const cardSize = {
+      width: TreeNodeMesh.DEFAULT_WIDTH,
+      height: TreeNodeMesh.DEFAULT_HEIGHT,
+    };
+    const segments = buildTreeEdgeSegments(
+      positions,
+      [
+        { sourceId: 'adam', targetId: 'eve', type: 'husband_of' },
+        { sourceId: 'eve', targetId: 'adam', type: 'wife_of' },
+        { sourceId: 'adam', targetId: 'cain', type: 'father_of' },
+        { sourceId: 'eve', targetId: 'cain', type: 'mother_of' },
+        { sourceId: 'adam', targetId: 'abel', type: 'father_of' },
+        { sourceId: 'eve', targetId: 'abel', type: 'mother_of' },
+        { sourceId: 'adam', targetId: 'seth', type: 'father_of' },
+        { sourceId: 'eve', targetId: 'seth', type: 'mother_of' },
+      ],
+      cardSize,
+    );
+
+    const adam = positions.get('adam')!;
+    const eve = positions.get('eve')!;
+    const cain = positions.get('cain')!;
+    expect(adam.y).toBe(eve.y);
+    const marriageY = adam.y;
+    const halfH = cardSize.height / 2;
+
+    // Find the marriage line segment (horizontal, between adam & eve at y=marriageY).
+    const marriageSeg = segments.find(
+      (s) =>
+        Math.abs(s.a.y - marriageY) < 1e-6 &&
+        Math.abs(s.b.y - marriageY) < 1e-6 &&
+        Math.abs(s.a.x - s.b.x) > 1, // horizontal
+    );
+    expect(marriageSeg).toBeDefined();
+    // Marriage line endpoints share the same y as each other.
+    expect(marriageSeg!.a.y).toBeCloseTo(marriageSeg!.b.y, 6);
+    expect(marriageSeg!.a.y).toBeCloseTo(marriageY, 6);
+
+    // Identify the parent → bar vertical drop. It is the one vertical
+    // segment whose top y is at-or-near the marriage row and whose
+    // bottom y is the sibling-bar y (between the parents and children).
+    const childTopY = cain.y + halfH;
+    const parentBottomY = marriageY - halfH;
+    const expectedBarY = (parentBottomY + childTopY) / 2;
+
+    const verticalDrops = segments.filter(
+      (s) => Math.abs(s.a.x - s.b.x) < 1e-6 && Math.abs(s.a.y - s.b.y) > 1,
+    );
+    // The parental drop is the one whose bottom Y matches the bar Y and
+    // whose top Y is at or above the marriage line.
+    const parentalDrop = verticalDrops.find(
+      (s) => Math.abs(Math.min(s.a.y, s.b.y) - expectedBarY) < 1e-6 &&
+             Math.max(s.a.y, s.b.y) >= marriageY - 1e-6,
+    );
+    expect(parentalDrop).toBeDefined();
+
+    const dropTopY = Math.max(parentalDrop!.a.y, parentalDrop!.b.y);
+    const dropBottomY = Math.min(parentalDrop!.a.y, parentalDrop!.b.y);
+
+    // The drop's TOP must reach the marriage-line Y exactly — no gap.
+    expect(dropTopY).toBeCloseTo(marriageY, 6);
+    // ...and bottom must reach the sibling-bar Y.
+    expect(dropBottomY).toBeCloseTo(expectedBarY, 6);
+    // Marriage line and drop top share the same y (the visual join).
+    expect(dropTopY).toBeCloseTo(marriageSeg!.a.y, 6);
   });
 
   it('ignores edges whose type is not parent or spouse', () => {
