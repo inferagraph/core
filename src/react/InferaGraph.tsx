@@ -1,7 +1,15 @@
 import React, { useRef, useEffect, useMemo } from 'react';
-import type { GraphData, LayoutMode, NodeRenderConfig, NodeComponentProps, TooltipConfig, TooltipComponentProps } from '../types.js';
-import { GraphProvider } from './GraphProvider.js';
+import type {
+  GraphData,
+  LayoutMode,
+  NodeRenderConfig,
+  NodeComponentProps,
+  TooltipConfig,
+  TooltipComponentProps,
+} from '../types.js';
+import { GraphProvider, useGraphContext } from './GraphProvider.js';
 import { createReactNodeRenderFn, createReactTooltipRenderFn } from './ReactNodeRenderer.js';
+import { SceneController } from '../renderer/SceneController.js';
 
 export interface InferaGraphProps {
   data?: GraphData;
@@ -12,8 +20,24 @@ export interface InferaGraphProps {
   style?: React.CSSProperties;
 }
 
-function InferaGraphInner({ data: _data, layout: _layout, nodeRender, tooltip, className, style }: InferaGraphProps): React.JSX.Element {
+interface InferaGraphInnerProps {
+  layout?: LayoutMode;
+  nodeRender?: NodeRenderConfig;
+  tooltip?: TooltipConfig;
+  className?: string;
+  style?: React.CSSProperties;
+}
+
+function InferaGraphInner({
+  layout,
+  nodeRender,
+  tooltip,
+  className,
+  style,
+}: InferaGraphInnerProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
+  const controllerRef = useRef<SceneController | null>(null);
+  const { store, isReady } = useGraphContext();
 
   const resolvedNodeRender = useMemo(() => {
     if (!nodeRender) return undefined;
@@ -27,9 +51,6 @@ function InferaGraphInner({ data: _data, layout: _layout, nodeRender, tooltip, c
     return nodeRender;
   }, [nodeRender]);
 
-  const resolvedNodeRenderRef = useRef(resolvedNodeRender);
-  resolvedNodeRenderRef.current = resolvedNodeRender;
-
   const resolvedTooltip = useMemo(() => {
     if (!tooltip) return undefined;
     if (tooltip.renderTooltip) return tooltip; // renderTooltip takes priority
@@ -42,18 +63,64 @@ function InferaGraphInner({ data: _data, layout: _layout, nodeRender, tooltip, c
     return tooltip;
   }, [tooltip]);
 
-  const resolvedTooltipRef = useRef(resolvedTooltip);
-  resolvedTooltipRef.current = resolvedTooltip;
-
+  // Mount the scene controller once on first render. The controller
+  // owns the WebGLRenderer, layout engine, camera controls, and meshes.
   useEffect(() => {
-    // Initialize WebGL renderer and scene when container mounts
     const container = containerRef.current;
     if (!container) return;
 
+    const controller = new SceneController({
+      store,
+      layout: layout ?? 'graph',
+      nodeRender: resolvedNodeRender,
+      tooltip: resolvedTooltip,
+    });
+    controller.attach(container);
+    controllerRef.current = controller;
+
+    // Keep the canvas in sync with container size.
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => controller.resize());
+      resizeObserver.observe(container);
+    }
+
     return () => {
-      // Cleanup renderer
+      resizeObserver?.disconnect();
+      controller.detach();
+      controllerRef.current = null;
     };
-  }, []);
+    // The controller mounts exactly once per `store` instance. Layout /
+    // nodeRender / tooltip changes are pushed in via the effects below so
+    // prop changes don't tear down and rebuild the renderer.
+  }, [store]);
+
+  // When the store finishes loading initial data, build the meshes.
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller || !isReady) return;
+    controller.syncFromStore();
+  }, [isReady]);
+
+  // Push layout-mode changes into the controller without remounting.
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    controller.setLayout(layout ?? 'graph');
+  }, [layout]);
+
+  // Push node-render / tooltip changes.
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    controller.setNodeRender(resolvedNodeRender);
+  }, [resolvedNodeRender]);
+
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    controller.setTooltip(resolvedTooltip);
+  }, [resolvedTooltip]);
 
   return (
     <div
@@ -65,9 +132,16 @@ function InferaGraphInner({ data: _data, layout: _layout, nodeRender, tooltip, c
 }
 
 export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
+  const { data, layout, nodeRender, tooltip, className, style } = props;
   return (
-    <GraphProvider>
-      <InferaGraphInner {...props} />
+    <GraphProvider data={data}>
+      <InferaGraphInner
+        layout={layout}
+        nodeRender={nodeRender}
+        tooltip={tooltip}
+        className={className}
+        style={style}
+      />
     </GraphProvider>
   );
 }

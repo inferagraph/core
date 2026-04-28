@@ -86,6 +86,8 @@ export { LayoutRegistry } from './layouts/LayoutRegistry.js';
 
 // Renderer
 export { WebGLRenderer } from './renderer/WebGLRenderer.js';
+export { SceneController } from './renderer/SceneController.js';
+export type { SceneControllerOptions } from './renderer/SceneController.js';
 export { NodeMesh } from './renderer/NodeMesh.js';
 export { EdgeMesh } from './renderer/EdgeMesh.js';
 export { LabelRenderer } from './renderer/LabelRenderer.js';
