@@ -9,7 +9,7 @@ import type {
 } from '../types.js';
 import { GraphProvider, useGraphContext } from './GraphProvider.js';
 import { createReactNodeRenderFn, createReactTooltipRenderFn } from './ReactNodeRenderer.js';
-import { SceneController, type RendererBackend } from '../renderer/SceneController.js';
+import { SceneController } from '../renderer/SceneController.js';
 import type { NodeColorFn } from '../renderer/NodeColorResolver.js';
 import type { EdgeColorFn } from '../renderer/EdgeColorMap.js';
 import type { EdgeLabelMap } from '../utils/aggregateEdges.js';
@@ -17,8 +17,6 @@ import type { EdgeLabelMap } from '../utils/aggregateEdges.js';
 export interface InferaGraphProps {
   data?: GraphData;
   layout?: LayoutMode;
-  /** Which renderer to use. Default `'webgl'`. */
-  renderer?: RendererBackend;
   nodeRender?: NodeRenderConfig;
   tooltip?: TooltipConfig;
   /** Pool of colors for deterministic auto-assignment. */
@@ -48,7 +46,6 @@ export interface InferaGraphProps {
 
 interface InferaGraphInnerProps {
   layout?: LayoutMode;
-  renderer?: RendererBackend;
   nodeRender?: NodeRenderConfig;
   tooltip?: TooltipConfig;
   palette?: readonly string[];
@@ -64,7 +61,6 @@ interface InferaGraphInnerProps {
 
 function InferaGraphInner({
   layout,
-  renderer,
   nodeRender,
   tooltip,
   palette,
@@ -105,9 +101,8 @@ function InferaGraphInner({
     return tooltip;
   }, [tooltip]);
 
-  // Mount the scene controller once on first render. The controller
-  // owns the renderer (WebGL or SVG), layout engine, camera controls, and meshes.
-  // The renderer backend is fixed at mount; switching it requires remounting.
+  // Mount the scene controller once on first render. The controller owns the
+  // WebGL renderer, layout engine, camera controls, and meshes.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -115,7 +110,6 @@ function InferaGraphInner({
     const controller = new SceneController({
       store,
       layout: layout ?? 'graph',
-      renderer: renderer ?? 'webgl',
       nodeRender: resolvedNodeRender,
       tooltip: resolvedTooltip,
       palette,
@@ -141,11 +135,11 @@ function InferaGraphInner({
       controller.detach();
       controllerRef.current = null;
     };
-    // The controller mounts exactly once per (store, renderer) pair. Layout /
-    // nodeRender / tooltip changes are pushed in via the effects below so
-    // prop changes don't tear down and rebuild the renderer.
+    // The controller mounts exactly once per store. Layout / nodeRender /
+    // tooltip changes are pushed in via the effects below so prop changes
+    // don't tear down and rebuild the renderer.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store, renderer]);
+  }, [store]);
 
   // When the store finishes loading initial data, build the meshes.
   useEffect(() => {
@@ -201,7 +195,6 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
   const {
     data,
     layout,
-    renderer,
     nodeRender,
     tooltip,
     palette,
@@ -218,7 +211,6 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     <GraphProvider data={data}>
       <InferaGraphInner
         layout={layout}
-        renderer={renderer}
         nodeRender={nodeRender}
         tooltip={tooltip}
         palette={palette}

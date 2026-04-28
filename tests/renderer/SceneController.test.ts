@@ -490,40 +490,6 @@ describe('SceneController', () => {
     });
   });
 
-  describe('renderer backend', () => {
-    it('defaults to the WebGL backend', () => {
-      const ctrl = new SceneController({ store });
-      expect(ctrl.getBackend()).toBe('webgl');
-      expect(ctrl.getSvgRenderer()).toBeNull();
-    });
-
-    it('instantiates an SvgRenderer when renderer="svg"', () => {
-      const ctrl = new SceneController({ store, renderer: 'svg' });
-      expect(ctrl.getBackend()).toBe('svg');
-      expect(ctrl.getSvgRenderer()).not.toBeNull();
-    });
-
-    it('SVG backend attach mounts an SVG element instead of a canvas', () => {
-      const ctrl = new SceneController({ store, renderer: 'svg' });
-      ctrl.attach(container);
-      expect(container.querySelector('svg.ig-svg')).not.toBeNull();
-      // It also should not have created the WebGL canvas.
-      expect(container.querySelector('canvas')).toBeNull();
-      ctrl.detach();
-      expect(container.querySelector('svg')).toBeNull();
-    });
-
-    it('SVG backend syncFromStore renders graph elements', () => {
-      seedStore(store, sample);
-      const ctrl = new SceneController({ store, renderer: 'svg' });
-      ctrl.attach(container);
-      ctrl.syncFromStore();
-      expect(container.querySelectorAll('g.ig-node').length).toBe(3);
-      expect(container.querySelectorAll('g.ig-edge').length).toBe(2);
-      ctrl.detach();
-    });
-  });
-
   describe('hover wiring', () => {
     it('clears hovered state on pointerleave', () => {
       seedStore(store, sample);

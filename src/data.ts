@@ -88,12 +88,7 @@ export { LayoutRegistry } from './layouts/LayoutRegistry.js';
 export { WebGLRenderer } from './renderer/WebGLRenderer.js';
 export type { TickCallback } from './renderer/WebGLRenderer.js';
 export { SceneController } from './renderer/SceneController.js';
-export type {
-  SceneControllerOptions,
-  RendererBackend,
-} from './renderer/SceneController.js';
-export { SvgRenderer } from './renderer/SvgRenderer.js';
-export type { SvgRendererOptions } from './renderer/SvgRenderer.js';
+export type { SceneControllerOptions } from './renderer/SceneController.js';
 export {
   NodeColorResolver,
   DEFAULT_NODE_COLOR,

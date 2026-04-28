@@ -82,20 +82,6 @@ describe('InferaGraph', () => {
     expect(opts.layout).toBe('tree');
   });
 
-  it('defaults to the webgl renderer', async () => {
-    render(<InferaGraph data={sampleData} />);
-    await waitFor(() => expect(lastConstructorArgs.length).toBeGreaterThan(0));
-    const opts = lastConstructorArgs[0] as { renderer: string };
-    expect(opts.renderer).toBe('webgl');
-  });
-
-  it('passes the renderer prop ("svg") to the SceneController', async () => {
-    render(<InferaGraph data={sampleData} renderer="svg" />);
-    await waitFor(() => expect(lastConstructorArgs.length).toBeGreaterThan(0));
-    const opts = lastConstructorArgs[0] as { renderer: string };
-    expect(opts.renderer).toBe('svg');
-  });
-
   it('passes nodeColors / edgeColors / palette / colorFns to the SceneController', async () => {
     const nodeColors = { person: '#3b82f6' };
     const edgeColors = { father_of: '#06b6d4' };
@@ -105,7 +91,6 @@ describe('InferaGraph', () => {
     render(
       <InferaGraph
         data={sampleData}
-        renderer="svg"
         nodeColors={nodeColors}
         edgeColors={edgeColors}
         palette={palette}
