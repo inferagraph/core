@@ -22,17 +22,42 @@ import {
   type NodeColorFn,
   type NodeColorResolverOptions,
 } from './NodeColorResolver.js';
+import {
+  EdgeColorMap,
+  type EdgeColorFn,
+} from './EdgeColorMap.js';
+import { SvgRenderer } from './SvgRenderer.js';
 import { PulseController, type PulseOption } from './PulseController.js';
+
+/** Which rendering backend the controller should drive. */
+export type RendererBackend = 'webgl' | 'svg';
 
 export interface SceneControllerOptions {
   store: GraphStore;
   layout?: LayoutMode;
   nodeRender?: NodeRenderConfig;
   tooltip?: TooltipConfig;
-  /** Custom resolver for per-node colours. */
+  /** Which renderer to use. Default `'webgl'`. */
+  renderer?: RendererBackend;
+  /**
+   * Custom resolver for per-node colours. Wins over `nodeColors` /
+   * auto-assignment. Domain-specific logic lives here.
+   */
   nodeColorFn?: NodeColorFn;
-  /** Override the resting + hover palettes used by the default resolver. */
-  nodeColors?: NodeColorResolverOptions;
+  /** Explicit type→color map for nodes. */
+  nodeColors?: Record<string, string>;
+  /**
+   * Legacy / advanced form: full {@link NodeColorResolverOptions} bag. The
+   * shorter-form fields above are merged on top of this. Retained for
+   * back-compat with consumers that build resolver options programmatically.
+   */
+  nodeColorOptions?: NodeColorResolverOptions;
+  /** Custom resolver for per-edge colours. */
+  edgeColorFn?: EdgeColorFn;
+  /** Explicit type→color map for edges. */
+  edgeColors?: Record<string, string>;
+  /** Pool used for deterministic auto-assignment of node + edge colors. */
+  palette?: readonly string[];
   /** Toggle visible labels per node. Default: true. */
   showLabels?: boolean;
   /** Toggle hover tooltip + colour change. Default: true. */
@@ -61,12 +86,15 @@ export interface SceneControllerOptions {
  */
 export class SceneController {
   private readonly store: GraphStore;
+  private readonly backend: RendererBackend;
   private readonly renderer = new WebGLRenderer();
   private readonly cameraController = new CameraController();
   private readonly labelRenderer = new LabelRenderer();
   private readonly raycaster = new Raycaster();
   private readonly tooltipOverlay = new TooltipOverlay();
   private readonly colorResolver: NodeColorResolver;
+  private readonly edgeColorMap: EdgeColorMap;
+  private readonly svgRenderer: SvgRenderer | null;
   private readonly pulseController: PulseController;
 
   private container: HTMLElement | null = null;
@@ -104,17 +132,48 @@ export class SceneController {
 
   constructor(options: SceneControllerOptions) {
     this.store = options.store;
+    this.backend = options.renderer ?? 'webgl';
     this.layoutMode = options.layout ?? 'graph';
     this.layoutEngine = SceneController.createLayoutEngine(this.layoutMode);
     this.nodeRender = options.nodeRender;
     this.tooltip = options.tooltip;
     this.showLabels = options.showLabels ?? true;
     this.enableHover = options.enableHover ?? true;
+
+    // Color resolution — applies to both backends. Short-form fields win
+    // over the legacy `nodeColorOptions` bag where they overlap.
+    const baseNodeOptions: NodeColorResolverOptions =
+      options.nodeColorOptions ?? {};
     this.colorResolver = new NodeColorResolver({
-      ...(options.nodeColors ?? {}),
-      colorFn: options.nodeColorFn ?? options.nodeColors?.colorFn,
+      ...baseNodeOptions,
+      palette: options.palette ?? baseNodeOptions.palette,
+      nodeColors: options.nodeColors ?? baseNodeOptions.nodeColors,
+      colorFn: options.nodeColorFn ?? baseNodeOptions.colorFn,
     });
+    this.edgeColorMap = new EdgeColorMap({
+      palette: options.palette,
+      edgeColors: options.edgeColors,
+      colorFn: options.edgeColorFn,
+    });
+
     this.pulseController = new PulseController(options.pulse);
+
+    if (this.backend === 'svg') {
+      this.svgRenderer = new SvgRenderer({
+        store: this.store,
+        layout: this.layoutMode,
+        nodeRender: this.nodeRender,
+        tooltip: this.tooltip,
+        showLabels: this.showLabels,
+        palette: options.palette,
+        nodeColors: options.nodeColors,
+        nodeColorFn: options.nodeColorFn,
+        edgeColors: options.edgeColors,
+        edgeColorFn: options.edgeColorFn,
+      });
+    } else {
+      this.svgRenderer = null;
+    }
   }
 
   /** The WebGLRenderer this controller drives. Exposed for advanced consumers. */
@@ -152,6 +211,21 @@ export class SceneController {
     return this.colorResolver;
   }
 
+  /** The edge colour map (exposed for tests + advanced consumers). */
+  getEdgeColorMap(): EdgeColorMap {
+    return this.edgeColorMap;
+  }
+
+  /** Active rendering backend ('webgl' or 'svg'). */
+  getBackend(): RendererBackend {
+    return this.backend;
+  }
+
+  /** The SvgRenderer instance, when `renderer='svg'`. */
+  getSvgRenderer(): SvgRenderer | null {
+    return this.svgRenderer;
+  }
+
   /** The pulse controller (exposed for tests + advanced consumers). */
   getPulseController(): PulseController {
     return this.pulseController;
@@ -174,6 +248,11 @@ export class SceneController {
   attach(container: HTMLElement): void {
     if (this.container) return;
     this.container = container;
+
+    if (this.svgRenderer) {
+      this.svgRenderer.attach(container);
+      return;
+    }
 
     this.renderer.attach(container);
 
@@ -217,6 +296,12 @@ export class SceneController {
   detach(): void {
     if (!this.container) return;
 
+    if (this.svgRenderer) {
+      this.svgRenderer.detach();
+      this.container = null;
+      return;
+    }
+
     if (this.enableHover) {
       this.container.removeEventListener('pointermove', this.onPointerMoveBound);
       this.container.removeEventListener('pointerleave', this.onPointerLeaveBound);
@@ -253,6 +338,11 @@ export class SceneController {
    */
   syncFromStore(): void {
     if (!this.container) return;
+
+    if (this.svgRenderer) {
+      this.svgRenderer.syncFromStore();
+      return;
+    }
 
     // Clear any previous meshes so we can rebuild from scratch.
     if (this.nodeMesh) {
@@ -331,6 +421,11 @@ export class SceneController {
     this.layoutMode = mode;
     this.layoutEngine = SceneController.createLayoutEngine(mode);
 
+    if (this.svgRenderer) {
+      this.svgRenderer.setLayout(mode);
+      return;
+    }
+
     if (this.nodeIdsByIndex.length === 0) return;
 
     const positions = this.layoutEngine.compute(this.nodeIdsByIndex, this.edgeEndpoints);
@@ -344,6 +439,10 @@ export class SceneController {
    */
   setNodeRender(config: NodeRenderConfig | undefined): void {
     this.nodeRender = config;
+    if (this.svgRenderer) {
+      this.svgRenderer.setNodeRender(config);
+      return;
+    }
     if (this.container && this.nodeMesh) {
       this.syncFromStore();
     }
@@ -355,6 +454,10 @@ export class SceneController {
    */
   setTooltip(config: TooltipConfig | undefined): void {
     this.tooltip = config;
+    if (this.svgRenderer) {
+      this.svgRenderer.setTooltip(config);
+      return;
+    }
     if (config) this.tooltipOverlay.setRenderConfig(config);
   }
 
@@ -372,6 +475,10 @@ export class SceneController {
   setShowLabels(show: boolean): void {
     if (this.showLabels === show) return;
     this.showLabels = show;
+    if (this.svgRenderer) {
+      this.svgRenderer.setShowLabels(show);
+      return;
+    }
     this.labelRenderer.clear();
     if (show) {
       this.nodesByIndex.forEach((node) => {
@@ -399,6 +506,10 @@ export class SceneController {
 
   /** Resize the renderer to match the container. */
   resize(): void {
+    if (this.svgRenderer) {
+      this.svgRenderer.resize();
+      return;
+    }
     this.renderer.resize();
   }
 

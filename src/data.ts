@@ -88,18 +88,34 @@ export { LayoutRegistry } from './layouts/LayoutRegistry.js';
 export { WebGLRenderer } from './renderer/WebGLRenderer.js';
 export type { TickCallback } from './renderer/WebGLRenderer.js';
 export { SceneController } from './renderer/SceneController.js';
-export type { SceneControllerOptions } from './renderer/SceneController.js';
+export type {
+  SceneControllerOptions,
+  RendererBackend,
+} from './renderer/SceneController.js';
+export { SvgRenderer } from './renderer/SvgRenderer.js';
+export type { SvgRendererOptions } from './renderer/SvgRenderer.js';
 export {
   NodeColorResolver,
   DEFAULT_NODE_COLOR,
-  DEFAULT_NODE_COLOR_PALETTE,
-  DEFAULT_NODE_HOVER_PALETTE,
-  DEFAULT_NODE_HOVER_COLOR,
 } from './renderer/NodeColorResolver.js';
 export type {
   NodeColorFn,
   NodeColorResolverOptions,
 } from './renderer/NodeColorResolver.js';
+export {
+  EdgeColorMap,
+  DEFAULT_EDGE_COLOR,
+} from './renderer/EdgeColorMap.js';
+export type {
+  EdgeColorFn,
+  EdgeColorMapOptions,
+} from './renderer/EdgeColorMap.js';
+export {
+  DEFAULT_PALETTE_32,
+  hashStringToIndex,
+  autoColor,
+  brighten,
+} from './renderer/palette.js';
 export { NodeMesh } from './renderer/NodeMesh.js';
 export { EdgeMesh } from './renderer/EdgeMesh.js';
 export { LabelRenderer } from './renderer/LabelRenderer.js';

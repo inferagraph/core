@@ -156,12 +156,16 @@ import { GraphStore } from '../../src/store/GraphStore.js';
 import { SceneController } from '../../src/renderer/SceneController.js';
 import { ForceLayout3D } from '../../src/layouts/ForceLayout3D.js';
 import { TreeLayout } from '../../src/layouts/TreeLayout.js';
+import { DEFAULT_NODE_COLOR } from '../../src/renderer/NodeColorResolver.js';
 import {
-  DEFAULT_NODE_COLOR,
-  DEFAULT_NODE_COLOR_PALETTE,
-  DEFAULT_NODE_HOVER_PALETTE,
-} from '../../src/renderer/NodeColorResolver.js';
+  DEFAULT_PALETTE_32,
+  hashStringToIndex,
+  brighten,
+} from '../../src/renderer/palette.js';
 import type { GraphData } from '../../src/types.js';
+
+const autoFor = (type: string) =>
+  DEFAULT_PALETTE_32[hashStringToIndex(type, DEFAULT_PALETTE_32.length)];
 
 function makeContainer(width = 800, height = 600): HTMLElement {
   const el = document.createElement('div');
@@ -399,23 +403,20 @@ describe('SceneController', () => {
   });
 
   describe('per-type colours', () => {
-    it('exposes the default palette via the colour resolver', () => {
+    it('auto-assigns deterministic palette colors via the resolver', () => {
       const ctrl = new SceneController({ store });
       const resolver = ctrl.getColorResolver();
       expect(resolver.resolve({ id: 'p', attributes: { type: 'person' } }))
-        .toBe(DEFAULT_NODE_COLOR_PALETTE.person);
+        .toBe(autoFor('person'));
       expect(resolver.resolve({ id: 'q', attributes: { type: 'place' } }))
-        .toBe(DEFAULT_NODE_COLOR_PALETTE.place);
-      expect(resolver.resolve({ id: 'r', attributes: { type: 'clan' } }))
-        .toBe(DEFAULT_NODE_COLOR_PALETTE.clan);
-      expect(resolver.resolve({ id: 's', attributes: { type: 'group' } }))
-        .toBe(DEFAULT_NODE_COLOR_PALETTE.group);
-      expect(resolver.resolve({ id: 't', attributes: { type: 'event' } }))
-        .toBe(DEFAULT_NODE_COLOR_PALETTE.event);
+        .toBe(autoFor('place'));
     });
 
-    it('falls back to the default colour for unknown types', () => {
-      const ctrl = new SceneController({ store });
+    it('falls back to the default colour when palette is empty AND nothing matches', () => {
+      const ctrl = new SceneController({
+        store,
+        palette: [],
+      });
       const resolver = ctrl.getColorResolver();
       expect(resolver.resolve({ id: 'x', attributes: { type: 'unknown-type' } }))
         .toBe(DEFAULT_NODE_COLOR);
@@ -429,6 +430,15 @@ describe('SceneController', () => {
       const resolver = ctrl.getColorResolver();
       expect(resolver.resolve({ id: 'p', attributes: { type: 'person' } })).toBe('#000000');
       expect(resolver.resolve({ id: 'q', attributes: { type: 'place' } })).toBe('#ffffff');
+    });
+
+    it('honors an explicit nodeColors map', () => {
+      const ctrl = new SceneController({
+        store,
+        nodeColors: { person: '#deadbe' },
+      });
+      const resolver = ctrl.getColorResolver();
+      expect(resolver.resolve({ id: 'p', attributes: { type: 'person' } })).toBe('#deadbe');
     });
 
     it('writes per-instance colours when building the node mesh', () => {
@@ -445,11 +455,72 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('exposes per-type hover colours', () => {
+    it('exposes hover colours via brightness lift', () => {
       const ctrl = new SceneController({ store });
       const resolver = ctrl.getColorResolver();
-      expect(resolver.resolveHover({ id: 'p', attributes: { type: 'person' } }))
-        .toBe(DEFAULT_NODE_HOVER_PALETTE.person);
+      const node = { id: 'p', attributes: { type: 'person' } };
+      expect(resolver.resolveHover(node)).toBe(brighten(resolver.resolve(node), 0.25));
+    });
+
+    it('exposes an EdgeColorMap with auto-assignment', () => {
+      const ctrl = new SceneController({ store });
+      const map = ctrl.getEdgeColorMap();
+      expect(map.resolve({
+        id: 'e', sourceId: 'a', targetId: 'b', attributes: { type: 'father_of' },
+      })).toBe(autoFor('father_of'));
+    });
+
+    it('honors an explicit edgeColors map + edgeColorFn', () => {
+      const ctrl = new SceneController({
+        store,
+        edgeColors: { father_of: '#abc123' },
+      });
+      const map = ctrl.getEdgeColorMap();
+      expect(map.resolve({
+        id: 'e', sourceId: 'a', targetId: 'b', attributes: { type: 'father_of' },
+      })).toBe('#abc123');
+
+      const ctrl2 = new SceneController({
+        store,
+        edgeColorFn: () => '#000000',
+      });
+      expect(ctrl2.getEdgeColorMap().resolve({
+        id: 'e', sourceId: 'a', targetId: 'b', attributes: { type: 'father_of' },
+      })).toBe('#000000');
+    });
+  });
+
+  describe('renderer backend', () => {
+    it('defaults to the WebGL backend', () => {
+      const ctrl = new SceneController({ store });
+      expect(ctrl.getBackend()).toBe('webgl');
+      expect(ctrl.getSvgRenderer()).toBeNull();
+    });
+
+    it('instantiates an SvgRenderer when renderer="svg"', () => {
+      const ctrl = new SceneController({ store, renderer: 'svg' });
+      expect(ctrl.getBackend()).toBe('svg');
+      expect(ctrl.getSvgRenderer()).not.toBeNull();
+    });
+
+    it('SVG backend attach mounts an SVG element instead of a canvas', () => {
+      const ctrl = new SceneController({ store, renderer: 'svg' });
+      ctrl.attach(container);
+      expect(container.querySelector('svg.ig-svg')).not.toBeNull();
+      // It also should not have created the WebGL canvas.
+      expect(container.querySelector('canvas')).toBeNull();
+      ctrl.detach();
+      expect(container.querySelector('svg')).toBeNull();
+    });
+
+    it('SVG backend syncFromStore renders graph elements', () => {
+      seedStore(store, sample);
+      const ctrl = new SceneController({ store, renderer: 'svg' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+      expect(container.querySelectorAll('g.ig-node').length).toBe(3);
+      expect(container.querySelectorAll('g.ig-edge').length).toBe(2);
+      ctrl.detach();
     });
   });
 

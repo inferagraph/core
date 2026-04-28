@@ -9,29 +9,55 @@ import type {
 } from '../types.js';
 import { GraphProvider, useGraphContext } from './GraphProvider.js';
 import { createReactNodeRenderFn, createReactTooltipRenderFn } from './ReactNodeRenderer.js';
-import { SceneController } from '../renderer/SceneController.js';
+import { SceneController, type RendererBackend } from '../renderer/SceneController.js';
+import type { NodeColorFn } from '../renderer/NodeColorResolver.js';
+import type { EdgeColorFn } from '../renderer/EdgeColorMap.js';
 
 export interface InferaGraphProps {
   data?: GraphData;
   layout?: LayoutMode;
+  /** Which renderer to use. Default `'webgl'`. */
+  renderer?: RendererBackend;
   nodeRender?: NodeRenderConfig;
   tooltip?: TooltipConfig;
+  /** Pool of colors for deterministic auto-assignment. */
+  palette?: readonly string[];
+  /** Explicit type → color map for nodes. */
+  nodeColors?: Record<string, string>;
+  /** Function override for nodes. */
+  nodeColorFn?: NodeColorFn;
+  /** Explicit relationship-type → color map for edges. */
+  edgeColors?: Record<string, string>;
+  /** Function override for edges. */
+  edgeColorFn?: EdgeColorFn;
   className?: string;
   style?: React.CSSProperties;
 }
 
 interface InferaGraphInnerProps {
   layout?: LayoutMode;
+  renderer?: RendererBackend;
   nodeRender?: NodeRenderConfig;
   tooltip?: TooltipConfig;
+  palette?: readonly string[];
+  nodeColors?: Record<string, string>;
+  nodeColorFn?: NodeColorFn;
+  edgeColors?: Record<string, string>;
+  edgeColorFn?: EdgeColorFn;
   className?: string;
   style?: React.CSSProperties;
 }
 
 function InferaGraphInner({
   layout,
+  renderer,
   nodeRender,
   tooltip,
+  palette,
+  nodeColors,
+  nodeColorFn,
+  edgeColors,
+  edgeColorFn,
   className,
   style,
 }: InferaGraphInnerProps): React.JSX.Element {
@@ -64,7 +90,8 @@ function InferaGraphInner({
   }, [tooltip]);
 
   // Mount the scene controller once on first render. The controller
-  // owns the WebGLRenderer, layout engine, camera controls, and meshes.
+  // owns the renderer (WebGL or SVG), layout engine, camera controls, and meshes.
+  // The renderer backend is fixed at mount; switching it requires remounting.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -72,8 +99,14 @@ function InferaGraphInner({
     const controller = new SceneController({
       store,
       layout: layout ?? 'graph',
+      renderer: renderer ?? 'webgl',
       nodeRender: resolvedNodeRender,
       tooltip: resolvedTooltip,
+      palette,
+      nodeColors,
+      nodeColorFn,
+      edgeColors,
+      edgeColorFn,
     });
     controller.attach(container);
     controllerRef.current = controller;
@@ -90,10 +123,11 @@ function InferaGraphInner({
       controller.detach();
       controllerRef.current = null;
     };
-    // The controller mounts exactly once per `store` instance. Layout /
+    // The controller mounts exactly once per (store, renderer) pair. Layout /
     // nodeRender / tooltip changes are pushed in via the effects below so
     // prop changes don't tear down and rebuild the renderer.
-  }, [store]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store, renderer]);
 
   // When the store finishes loading initial data, build the meshes.
   useEffect(() => {
@@ -132,13 +166,32 @@ function InferaGraphInner({
 }
 
 export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
-  const { data, layout, nodeRender, tooltip, className, style } = props;
+  const {
+    data,
+    layout,
+    renderer,
+    nodeRender,
+    tooltip,
+    palette,
+    nodeColors,
+    nodeColorFn,
+    edgeColors,
+    edgeColorFn,
+    className,
+    style,
+  } = props;
   return (
     <GraphProvider data={data}>
       <InferaGraphInner
         layout={layout}
+        renderer={renderer}
         nodeRender={nodeRender}
         tooltip={tooltip}
+        palette={palette}
+        nodeColors={nodeColors}
+        nodeColorFn={nodeColorFn}
+        edgeColors={edgeColors}
+        edgeColorFn={edgeColorFn}
         className={className}
         style={style}
       />
