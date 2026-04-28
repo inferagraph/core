@@ -18,7 +18,12 @@ export class ForceLayout3D extends LayoutEngine {
     this.simulation.setNodes(nodeIds);
     this.simulation.setEdges(edges);
 
-    for (let i = 0; i < 100; i++) {
+    // 250 settle ticks: with the 0.1.11 force tuning (softer spring, larger
+    // rest length, stronger repulsion, gentle centering) the simulation
+    // takes ~150 ticks to reach a near-stable equilibrium for ~20-node
+    // graphs. 250 leaves headroom so the user sees a settled cluster on
+    // first paint instead of mid-flight oscillation.
+    for (let i = 0; i < 250; i++) {
       this.simulation.tick();
     }
 

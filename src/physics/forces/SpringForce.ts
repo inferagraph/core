@@ -2,8 +2,23 @@ import type { Vector3 } from '../../types.js';
 
 export class SpringForce {
   constructor(
-    private stiffness: number = 0.1,
-    private restLength: number = 50,
+    /**
+     * Hooke's-law stiffness applied to the (dist - restLength) displacement.
+     * Lowered from 0.1 → 0.05 in 0.1.11 because real-world graphs have many
+     * bidirectional edges (A→B and B→A), so each connected pair was getting
+     * two springs and effectively double the attractive force, crushing the
+     * cluster into a tight ball. ForceSimulation now also dedupes
+     * bidirectional pairs before handing edges to the spring, but a softer
+     * spring still produces a more readable spread for densely-connected
+     * subgraphs.
+     */
+    private stiffness: number = 0.05,
+    /**
+     * Equilibrium distance between connected nodes. 50 was too tight for the
+     * default node radius + label sizing; bumped to 80 in 0.1.11 so labels
+     * can breathe.
+     */
+    private restLength: number = 80,
   ) {}
 
   compute(posA: Vector3, posB: Vector3): Vector3 {

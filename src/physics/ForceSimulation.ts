@@ -25,12 +25,15 @@ export class ForceSimulation {
   private running = false;
 
   setNodes(nodeIds: NodeId[]): void {
+    // Spread initial positions across a 400-unit cube. The previous 200-unit
+    // spread combined with 0.1.10's tight spring rest length crushed even
+    // small graphs into a single pile during the first dozen ticks.
     this.nodes = nodeIds.map((id) => ({
       id,
       position: {
-        x: (Math.random() - 0.5) * 200,
-        y: (Math.random() - 0.5) * 200,
-        z: (Math.random() - 0.5) * 200,
+        x: (Math.random() - 0.5) * 400,
+        y: (Math.random() - 0.5) * 400,
+        z: (Math.random() - 0.5) * 400,
       },
       velocity: { x: 0, y: 0, z: 0 },
     }));
@@ -40,12 +43,24 @@ export class ForceSimulation {
     const nodeIndex = new Map<NodeId, number>();
     this.nodes.forEach((n, i) => nodeIndex.set(n.id, i));
 
-    this.edges = edges
-      .map((e) => ({
-        sourceIndex: nodeIndex.get(e.sourceId) ?? -1,
-        targetIndex: nodeIndex.get(e.targetId) ?? -1,
-      }))
-      .filter((e) => e.sourceIndex >= 0 && e.targetIndex >= 0);
+    // Real-world graphs frequently encode relationships as TWO directional
+    // edges (e.g. `father_of` and `son_of` between the same pair). Treating
+    // both as independent springs doubles the attractive force on the pair
+    // and crushes the cluster. Dedupe by unordered (min, max) index pair so
+    // the simulation sees one spring per connected pair regardless of how
+    // many directional edges the host stored.
+    const seen = new Set<string>();
+    const deduped: SimulationEdge[] = [];
+    for (const e of edges) {
+      const s = nodeIndex.get(e.sourceId) ?? -1;
+      const t = nodeIndex.get(e.targetId) ?? -1;
+      if (s < 0 || t < 0 || s === t) continue;
+      const key = s < t ? `${s}-${t}` : `${t}-${s}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push({ sourceIndex: s, targetIndex: t });
+    }
+    this.edges = deduped;
   }
 
   tick(): void {
@@ -53,8 +68,16 @@ export class ForceSimulation {
     const masses = this.nodes.map(() => 1);
     const tree = this.barnesHut.buildTree(positions, masses);
 
+    // Repulsion strength bumped from 100 → 800. With the larger spring rest
+    // length (80) and softer spring (0.05), the previous 100-strength
+    // repulsion couldn't keep nodes from collapsing into a single pile —
+    // every pair-wise spring was outweighing the inverse-square repulsion.
+    // 800 lets nodes maintain a comfortable 60–120u personal-space radius
+    // while still letting connected springs win at long range.
+    const REPULSION = 800;
+
     for (let i = 0; i < this.nodes.length; i++) {
-      const repulsion = this.barnesHut.computeForce(tree, positions[i], 100);
+      const repulsion = this.barnesHut.computeForce(tree, positions[i], REPULSION);
       const centering = this.centering.compute(positions[i]);
 
       this.nodes[i].velocity.x += repulsion.x + centering.x;

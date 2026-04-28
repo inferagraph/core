@@ -815,35 +815,80 @@ export class SceneController {
   }
 
   /**
-   * Push the camera back so the entire graph is visible. Best-effort —
-   * computes the bounding sphere of the laid-out positions and sets the
-   * orbit radius accordingly.
+   * Push the camera back so the freshly-laid-out graph fills the viewport.
+   *
+   * The previous implementation used the absolute max distance from the
+   * centroid as the bounding radius. That made one drifting outlier (e.g.
+   * an orphan node with no edges, or a loosely-connected leaf) define the
+   * frame, leaving the actual cluster occupying ~10% of the canvas.
+   *
+   * 0.1.11 algorithm:
+   *   1. Compute the centroid using the 5th–95th percentile of each axis
+   *      so a single outlier can't drag the centroid off the cluster.
+   *   2. Compute the bounding radius as the 95th-percentile distance from
+   *      the trimmed centroid (not the max). Outliers beyond that radius
+   *      may still sit in the camera's view but they don't define the
+   *      frame.
+   *   3. Convert that radius to an orbit distance assuming the camera's
+   *      vertical FOV (Three.js default 50°) and a 0.8 fill factor — i.e.
+   *      the cluster sphere should subtend ~80% of the viewport height.
    */
   private frameToFit(positions: Map<string, Vector3>): void {
     if (positions.size === 0) return;
 
-    let cx = 0, cy = 0, cz = 0;
+    const xs: number[] = [];
+    const ys: number[] = [];
+    const zs: number[] = [];
     for (const p of positions.values()) {
-      cx += p.x;
-      cy += p.y;
-      cz += p.z;
+      xs.push(p.x);
+      ys.push(p.y);
+      zs.push(p.z);
     }
-    cx /= positions.size;
-    cy /= positions.size;
-    cz /= positions.size;
+    const cx = SceneController.percentileMidpoint(xs);
+    const cy = SceneController.percentileMidpoint(ys);
+    const cz = SceneController.percentileMidpoint(zs);
 
-    let maxDistSq = 0;
+    // Distance-from-centroid distribution. Use the 95th percentile so a
+    // single drifting outlier doesn't define the frame.
+    const dists: number[] = [];
     for (const p of positions.values()) {
       const dx = p.x - cx;
       const dy = p.y - cy;
       const dz = p.z - cz;
-      const d = dx * dx + dy * dy + dz * dz;
-      if (d > maxDistSq) maxDistSq = d;
+      dists.push(Math.sqrt(dx * dx + dy * dy + dz * dz));
     }
-    const radius = Math.max(50, Math.sqrt(maxDistSq) * 2.5);
+    dists.sort((a, b) => a - b);
+    const p95 = dists[Math.min(dists.length - 1, Math.floor(dists.length * 0.95))] ?? 0;
+
+    // Convert the framed radius to an orbit distance. We solve the standard
+    // FOV equation: tan(fov/2) = radius / distance, and add a 1.25× factor
+    // (== 1 / 0.8 fill) so the cluster sphere occupies ~80% of the viewport.
+    const camera = this.renderer.getCamera();
+    const fovDeg =
+      camera && typeof camera.fov === 'number' && Number.isFinite(camera.fov)
+        ? camera.fov
+        : 60;
+    const halfFov = ((fovDeg * Math.PI) / 180) / 2;
+    const fillFactor = 0.8;
+    const framedRadius = Math.max(p95, 1);
+    const distance = (framedRadius / Math.tan(halfFov)) / fillFactor;
+    const radius = Math.max(80, distance);
 
     this.cameraController.setTarget({ x: cx, y: cy, z: cz });
     this.cameraController.setRadius(radius);
+  }
+
+  /**
+   * Mean of the 5th and 95th percentiles of a sorted-or-unsorted numeric
+   * array. Used by {@link frameToFit} to compute an outlier-resistant
+   * centroid.
+   */
+  private static percentileMidpoint(values: number[]): number {
+    if (values.length === 0) return 0;
+    const sorted = values.slice().sort((a, b) => a - b);
+    const lo = sorted[Math.floor(sorted.length * 0.05)];
+    const hi = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+    return (lo + hi) / 2;
   }
 
   private static createLayoutEngine(mode: LayoutMode): LayoutEngine {
