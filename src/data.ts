@@ -106,8 +106,13 @@ export {
 } from './renderer/EdgeColorMap.js';
 export type {
   EdgeColorFn,
+  EdgeColorContext,
   EdgeColorMapOptions,
 } from './renderer/EdgeColorMap.js';
+export {
+  blendEdgeColors,
+  mixHexColors,
+} from './renderer/blendEdgeColors.js';
 export {
   DEFAULT_PALETTE_32,
   hashStringToIndex,

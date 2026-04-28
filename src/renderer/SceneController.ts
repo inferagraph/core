@@ -30,6 +30,7 @@ import {
 } from './NodeColorResolver.js';
 import {
   EdgeColorMap,
+  DEFAULT_EDGE_COLOR,
   type EdgeColorFn,
 } from './EdgeColorMap.js';
 import { PulseController, type PulseOption } from './PulseController.js';
@@ -674,6 +675,13 @@ export class SceneController {
     if (edges.length > 0) {
       const edgeMesh = new EdgeMesh();
       edgeMesh.createLineSegments(edges.length);
+      // Index endpoint nodes by id so we can hand the resolver the
+      // already-resolved source / target colours from `baseColorsByIndex`
+      // — picking the same hex {@link NodeColorResolver.resolve} returned
+      // for those nodes. This keeps `edgeColorFn` consumers (notably
+      // {@link blendEdgeColors}) consistent with the rendered node hues.
+      const indexById = new Map<string, number>();
+      this.nodeIdsByIndex.forEach((id, i) => indexById.set(id, i));
       edges.forEach((edge, index) => {
         const endpoints = this.edgeEndpoints[index];
         const source = positions.get(endpoints.sourceId) ?? { x: 0, y: 0, z: 0 };
@@ -688,7 +696,17 @@ export class SceneController {
           targetId: edge.targetId,
           attributes: edge.attributes,
         };
-        edgeMesh.setSegmentColor(index, this.edgeColorMap.resolve(data));
+        const sIdx = indexById.get(endpoints.sourceId);
+        const tIdx = indexById.get(endpoints.targetId);
+        const ctx = {
+          sourceColor:
+            (typeof sIdx === 'number' ? this.baseColorsByIndex[sIdx] : undefined) ??
+            DEFAULT_EDGE_COLOR,
+          targetColor:
+            (typeof tIdx === 'number' ? this.baseColorsByIndex[tIdx] : undefined) ??
+            DEFAULT_EDGE_COLOR,
+        };
+        edgeMesh.setSegmentColor(index, this.edgeColorMap.resolve(data, ctx));
       });
       this.renderer.addEdgeMesh('__edges__', edgeMesh);
       this.edgeMesh = edgeMesh;

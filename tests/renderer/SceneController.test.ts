@@ -806,6 +806,38 @@ describe('SceneController', () => {
         id: 'e', sourceId: 'a', targetId: 'b', attributes: { type: 'father_of' },
       })).toBe('#000000');
     });
+
+    it('passes resolved source + target node colors as ctx to edgeColorFn during syncFromStore', () => {
+      // Capture every (sourceColor, targetColor) tuple the edge resolver
+      // sees while building the edge mesh. The resolver is wired up in
+      // `buildGraphMeshes` so the call happens during `syncFromStore`.
+      const seen: Array<{ sourceColor: string; targetColor: string }> = [];
+      seedStore(store, sample);
+      const ctrl = new SceneController({
+        store,
+        // Person → red, place → green, clan → blue. The sample fixture
+        // wires Abraham (person) → Beersheba (place) and Beersheba (place)
+        // → Canaanites (clan), so the two edges should report
+        // (#ff0000,#00ff00) and (#00ff00,#0000ff) respectively.
+        nodeColors: {
+          person: '#ff0000',
+          place: '#00ff00',
+          clan: '#0000ff',
+        },
+        edgeColorFn: (_e, { sourceColor, targetColor }) => {
+          seen.push({ sourceColor, targetColor });
+          return undefined; // fall through; we only care about ctx
+        },
+      });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      expect(seen).toEqual([
+        { sourceColor: '#ff0000', targetColor: '#00ff00' },
+        { sourceColor: '#00ff00', targetColor: '#0000ff' },
+      ]);
+      ctrl.detach();
+    });
   });
 
   describe('hover wiring', () => {
