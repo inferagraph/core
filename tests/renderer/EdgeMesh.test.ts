@@ -51,8 +51,8 @@ describe('EdgeMesh', () => {
       expect(mesh.getColor()).toBe('#ff0000');
     });
 
-    it('should default color to #666666', () => {
-      expect(mesh.getColor()).toBe('#666666');
+    it('should default color to #8a92b2', () => {
+      expect(mesh.getColor()).toBe('#8a92b2');
     });
   });
 

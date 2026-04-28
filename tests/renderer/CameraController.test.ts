@@ -104,6 +104,28 @@ describe('CameraController', () => {
     });
   });
 
+  describe('radius', () => {
+    it('exposes a default radius', () => {
+      expect(controller.getRadius()).toBeGreaterThan(0);
+    });
+
+    it('setRadius updates the orbit distance and recomputes camera', () => {
+      controller.attach(container, camera);
+      vi.clearAllMocks();
+      controller.setRadius(500);
+      expect(controller.getRadius()).toBe(500);
+      expect(camera.position.set).toHaveBeenCalled();
+    });
+
+    it('setRadius clamps to a minimum of 1', () => {
+      controller.attach(container, camera);
+      controller.setRadius(0);
+      expect(controller.getRadius()).toBe(1);
+      controller.setRadius(-10);
+      expect(controller.getRadius()).toBe(1);
+    });
+  });
+
   describe('mouse interactions', () => {
     it('should handle orbit rotation on left mouse drag', () => {
       controller.attach(container, camera);

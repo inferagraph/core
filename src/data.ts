@@ -86,8 +86,20 @@ export { LayoutRegistry } from './layouts/LayoutRegistry.js';
 
 // Renderer
 export { WebGLRenderer } from './renderer/WebGLRenderer.js';
+export type { TickCallback } from './renderer/WebGLRenderer.js';
 export { SceneController } from './renderer/SceneController.js';
 export type { SceneControllerOptions } from './renderer/SceneController.js';
+export {
+  NodeColorResolver,
+  DEFAULT_NODE_COLOR,
+  DEFAULT_NODE_COLOR_PALETTE,
+  DEFAULT_NODE_HOVER_PALETTE,
+  DEFAULT_NODE_HOVER_COLOR,
+} from './renderer/NodeColorResolver.js';
+export type {
+  NodeColorFn,
+  NodeColorResolverOptions,
+} from './renderer/NodeColorResolver.js';
 export { NodeMesh } from './renderer/NodeMesh.js';
 export { EdgeMesh } from './renderer/EdgeMesh.js';
 export { LabelRenderer } from './renderer/LabelRenderer.js';

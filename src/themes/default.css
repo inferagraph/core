@@ -16,16 +16,31 @@
   --ig-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
+.ig-label-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 5;
+}
+
 .ig-label {
   position: absolute;
+  top: 0;
+  left: 0;
   font: var(--ig-label-font);
   color: var(--ig-label-color);
   white-space: nowrap;
   user-select: none;
+  will-change: transform;
 }
 
 .ig-label-dot {
   pointer-events: none;
+  padding: 2px 6px;
+  background: color-mix(in srgb, var(--ig-bg-color) 70%, transparent);
+  border-radius: 4px;
+  transform-origin: 0 0;
 }
 
 .ig-label-card {

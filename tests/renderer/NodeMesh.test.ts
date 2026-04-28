@@ -130,7 +130,7 @@ describe('NodeMesh', () => {
 
     it('should use SphereGeometry for dot style', () => {
       mesh.createInstancedMesh(10);
-      expect(THREE.SphereGeometry).toHaveBeenCalledWith(1, 16, 16);
+      expect(THREE.SphereGeometry).toHaveBeenCalledWith(1, 24, 24);
     });
 
     it('should update instance position via setMatrixAt', () => {

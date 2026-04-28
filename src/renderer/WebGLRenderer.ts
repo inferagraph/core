@@ -5,6 +5,8 @@ import { EdgeMesh } from './EdgeMesh.js';
 import { CustomNodeRenderer } from './CustomNodeRenderer.js';
 import type { Vector3 } from '../types.js';
 
+export type TickCallback = () => void;
+
 export class WebGLRenderer {
   private container: HTMLElement | null = null;
   private readonly themeManager = new ThemeManager();
@@ -18,6 +20,8 @@ export class WebGLRenderer {
 
   private nodeMeshes = new Map<string, NodeMesh>();
   private edgeMeshes = new Map<string, EdgeMesh>();
+
+  private tickCallbacks = new Set<TickCallback>();
 
   attach(container: HTMLElement): void {
     this.container = container;
@@ -35,13 +39,19 @@ export class WebGLRenderer {
     this.camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 10000);
     this.camera.position.set(0, 0, 200);
 
-    // Add lights
-    const ambientLight = new THREE.AmbientLight(0x404040);
+    // Add lights — softer ambient with a brighter key + subtle fill so
+    // spheres show clear shading variation across their surface (avoids the
+    // "flat 2D circle" look of the previous render pipeline).
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.55);
     this.scene.add(ambientLight);
 
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-    directionalLight.position.set(100, 100, 100);
-    this.scene.add(directionalLight);
+    const keyLight = new THREE.DirectionalLight(0xffffff, 0.9);
+    keyLight.position.set(100, 200, 100);
+    this.scene.add(keyLight);
+
+    const fillLight = new THREE.DirectionalLight(0x88a0d0, 0.35);
+    fillLight.position.set(-150, -50, -100);
+    this.scene.add(fillLight);
 
     // Try to create Three.js WebGL renderer (may fail in jsdom/SSR)
     try {
@@ -127,6 +137,15 @@ export class WebGLRenderer {
     if (this.animationFrameId !== null) return;
 
     const loop = (): void => {
+      // Run per-frame ticks (layout simulation, label projection, hover state)
+      // before pushing the frame to the GPU.
+      for (const cb of this.tickCallbacks) {
+        try {
+          cb();
+        } catch {
+          // A faulty tick must not kill the render loop.
+        }
+      }
       this.render();
       this.animationFrameId = requestAnimationFrame(loop);
     };
@@ -138,6 +157,19 @@ export class WebGLRenderer {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
     }
+  }
+
+  /**
+   * Register a callback fired on every animation frame, just before the GPU
+   * draw. Use for things like physics ticks, label projection, or hover
+   * raycasting that need to run in lockstep with rendering.
+   */
+  addTickCallback(cb: TickCallback): void {
+    this.tickCallbacks.add(cb);
+  }
+
+  removeTickCallback(cb: TickCallback): void {
+    this.tickCallbacks.delete(cb);
   }
 
   addNodeMesh(id: string, mesh: NodeMesh): void {

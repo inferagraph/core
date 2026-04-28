@@ -63,6 +63,16 @@ export class CameraController {
     return { ...this.target };
   }
 
+  /** Override the orbit radius (distance from the target). Useful for fitting the camera to a freshly-computed graph. */
+  setRadius(radius: number): void {
+    this.spherical.radius = Math.max(1, radius);
+    this.updateCameraPosition();
+  }
+
+  getRadius(): number {
+    return this.spherical.radius;
+  }
+
   update(): void {
     this.updateCameraPosition();
   }

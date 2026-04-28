@@ -4,7 +4,8 @@ import type { Vector3 } from '../types.js';
 export class EdgeMesh {
   private source: Vector3 = { x: 0, y: 0, z: 0 };
   private target: Vector3 = { x: 0, y: 0, z: 0 };
-  private color: string = '#666666';
+  private color: string = '#8a92b2';
+  private opacity: number = 0.55;
   private lineSegments: THREE.LineSegments | null = null;
   private geometry: THREE.BufferGeometry | null = null;
   private material: THREE.LineBasicMaterial | null = null;
@@ -40,8 +41,22 @@ export class EdgeMesh {
       new THREE.Float32BufferAttribute(positions, 3),
     );
     this.geometry.setDrawRange(0, count * 2);
-    this.material = new THREE.LineBasicMaterial({ color: this.color });
+    this.material = new THREE.LineBasicMaterial({
+      color: this.color,
+      transparent: true,
+      opacity: this.opacity,
+    });
     this.lineSegments = new THREE.LineSegments(this.geometry, this.material);
+  }
+
+  /** Override the edge colour. Must be called before `createLineSegments`. */
+  setColorOverride(color: string): void {
+    this.color = color;
+  }
+
+  /** Override the edge opacity. Must be called before `createLineSegments`. */
+  setOpacity(opacity: number): void {
+    this.opacity = opacity;
   }
 
   updateSegment(index: number, source: Vector3, target: Vector3): void {

@@ -141,8 +141,10 @@ describe('WebGLRenderer', () => {
 
     it('should add lights to scene', () => {
       renderer.attach(container);
-      // AmbientLight + DirectionalLight = 2 calls to scene.add
-      expect(mockSceneAdd).toHaveBeenCalledTimes(2);
+      // AmbientLight + key DirectionalLight + fill DirectionalLight = 3 calls
+      // to scene.add. The 3-light rig gives the spheres clear shading
+      // variation across their surface.
+      expect(mockSceneAdd).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -327,6 +329,73 @@ describe('WebGLRenderer', () => {
       expect(cafSpy).toHaveBeenCalledWith(42);
       rafSpy.mockRestore();
       cafSpy.mockRestore();
+    });
+  });
+
+  describe('tick callbacks', () => {
+    it('invokes registered callbacks on each animation frame', () => {
+      // Drive the loop synchronously by stubbing rAF to invoke once.
+      let frameCb: FrameRequestCallback | null = null;
+      const rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
+        .mockImplementation((cb: FrameRequestCallback) => {
+          if (!frameCb) frameCb = cb;
+          return 1;
+        });
+
+      renderer.attach(container);
+      const tick = vi.fn();
+      renderer.addTickCallback(tick);
+      renderer.startRenderLoop();
+      // Run one frame.
+      frameCb?.(0);
+      expect(tick).toHaveBeenCalledTimes(1);
+
+      renderer.stopRenderLoop();
+      rafSpy.mockRestore();
+    });
+
+    it('removeTickCallback prevents future invocations', () => {
+      let frameCb: FrameRequestCallback | null = null;
+      const rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
+        .mockImplementation((cb: FrameRequestCallback) => {
+          frameCb = cb;
+          return 1;
+        });
+
+      renderer.attach(container);
+      const tick = vi.fn();
+      renderer.addTickCallback(tick);
+      renderer.removeTickCallback(tick);
+      renderer.startRenderLoop();
+      frameCb?.(0);
+      expect(tick).not.toHaveBeenCalled();
+
+      renderer.stopRenderLoop();
+      rafSpy.mockRestore();
+    });
+
+    it('a throwing tick callback does not break the render loop', () => {
+      let frameCb: FrameRequestCallback | null = null;
+      const rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
+        .mockImplementation((cb: FrameRequestCallback) => {
+          frameCb = cb;
+          return 1;
+        });
+
+      renderer.attach(container);
+      renderer.addTickCallback(() => {
+        throw new Error('boom');
+      });
+      const ok = vi.fn();
+      renderer.addTickCallback(ok);
+      renderer.startRenderLoop();
+      expect(() => frameCb?.(0)).not.toThrow();
+      expect(ok).toHaveBeenCalled();
+      // render itself still runs.
+      expect(mockRender).toHaveBeenCalled();
+
+      renderer.stopRenderLoop();
+      rafSpy.mockRestore();
     });
   });
 });

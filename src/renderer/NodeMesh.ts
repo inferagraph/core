@@ -73,7 +73,11 @@ export class NodeMesh {
     switch (this.style) {
       case 'card':
         this.geometry = this.createRoundedRectGeometry(this.cardWidth, this.cardHeight, 6);
-        this.material = new THREE.MeshPhongMaterial({ color: this.color });
+        this.material = new THREE.MeshPhongMaterial({
+          color: this.color,
+          shininess: 30,
+          specular: 0x111111,
+        });
         break;
       case 'custom': {
         this.geometry = new THREE.SphereGeometry(1, 8, 8);
@@ -85,8 +89,14 @@ export class NodeMesh {
         break;
       }
       default:
-        this.geometry = new THREE.SphereGeometry(1, 16, 16);
-        this.material = new THREE.MeshPhongMaterial({ color: this.color });
+        // Higher segment count + slight specular highlight gives the spheres a
+        // depth-aware look instead of a flat-shaded disc.
+        this.geometry = new THREE.SphereGeometry(1, 24, 24);
+        this.material = new THREE.MeshPhongMaterial({
+          color: this.color,
+          shininess: 40,
+          specular: 0x222233,
+        });
         break;
     }
     this.instancedMesh = new THREE.InstancedMesh(this.geometry, this.material, count);
