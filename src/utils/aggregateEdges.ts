@@ -51,30 +51,38 @@ export function aggregateEdges(
   incomingLabels?: EdgeLabelMap,
   outgoingLabels?: EdgeLabelMap,
 ): AggregatedEdge[] {
-  const groups = new Map<string, string[]>();
+  // Each bucket dedupes by related node ID so that a consumer mapping both
+  // directions of a bidirectional edge to the same display label (e.g.,
+  // father_of and son_of both → 'Son of') does not emit duplicate names.
+  const groups = new Map<string, { seen: Set<NodeId>; names: string[] }>();
+
+  const addToGroup = (label: string, relatedId: NodeId): void => {
+    let bucket = groups.get(label);
+    if (!bucket) {
+      bucket = { seen: new Set<NodeId>(), names: [] };
+      groups.set(label, bucket);
+    }
+    if (bucket.seen.has(relatedId)) return;
+    bucket.seen.add(relatedId);
+    bucket.names.push(getNodeName(relatedId));
+  };
 
   for (const edge of edges) {
     const edgeType = (edge.attributes.type as string) ?? '';
 
     if (edge.targetId === nodeId && incomingLabels?.[edgeType]) {
       // This edge points TO our node
-      const label = incomingLabels[edgeType];
-      const sourceName = getNodeName(edge.sourceId);
-      if (!groups.has(label)) groups.set(label, []);
-      groups.get(label)!.push(sourceName);
+      addToGroup(incomingLabels[edgeType], edge.sourceId);
     }
 
     if (edge.sourceId === nodeId && outgoingLabels?.[edgeType]) {
       // This edge points FROM our node
-      const label = outgoingLabels[edgeType];
-      const targetName = getNodeName(edge.targetId);
-      if (!groups.has(label)) groups.set(label, []);
-      groups.get(label)!.push(targetName);
+      addToGroup(outgoingLabels[edgeType], edge.targetId);
     }
   }
 
   const result: AggregatedEdge[] = [];
-  for (const [label, names] of groups) {
+  for (const [label, { names }] of groups) {
     result.push({
       label,
       names,
