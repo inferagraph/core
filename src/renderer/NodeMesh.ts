@@ -1,13 +1,35 @@
 import * as THREE from 'three';
 import type { Vector3, NodeStyle, NodeRenderConfig, NodeRenderFn } from '../types.js';
+import type { VisibilityHost } from './types.js';
 
-export class NodeMesh {
+/**
+ * @implements {VisibilityHost}
+ *
+ * Per-instance visibility is encoded as a custom `instanceAlpha`
+ * `InstancedBufferAttribute` (itemSize=1) attached to the underlying
+ * geometry. The material's fragment shader is patched via
+ * `onBeforeCompile` so the final fragment alpha is multiplied by the
+ * varying. Hidden nodes therefore disappear without any teardown,
+ * rebuild, or layout recompute — `setVisibility` only writes to the
+ * existing GPU buffer and flags it for upload on the next frame.
+ */
+export class NodeMesh implements VisibilityHost {
   private position: Vector3 = { x: 0, y: 0, z: 0 };
   private color: string = '#4a9eff';
   private radius: number = 5;
   private instancedMesh: THREE.InstancedMesh | null = null;
   private geometry: THREE.BufferGeometry | null = null;
   private material: THREE.MeshPhongMaterial | null = null;
+  /**
+   * Per-instance alpha buffer. Length === instance count, itemSize=1.
+   * Built alongside the InstancedMesh so the visibility predicate has
+   * something to write into without reallocating geometry. The default
+   * value (1.0) is set when `createInstancedMesh` runs so a freshly
+   * built mesh shows every instance.
+   */
+  private instanceAlpha: THREE.InstancedBufferAttribute | null = null;
+  /** Index → node-id mapping. Populated by SceneController via {@link setNodeIds}. */
+  private nodeIds: string[] = [];
 
   private readonly style: NodeStyle;
   private readonly cardWidth: number;
@@ -77,6 +99,8 @@ export class NodeMesh {
           color: 0xffffff, // white base — instance colors render directly via setColorAt
           shininess: 30,
           specular: 0x111111,
+          transparent: true,
+          depthWrite: false,
         });
         break;
       case 'custom': {
@@ -96,11 +120,55 @@ export class NodeMesh {
           color: 0xffffff, // white base — instance colors render directly via setColorAt
           shininess: 40,
           specular: 0x222233,
+          // `transparent:true` + `depthWrite:false` so the per-instance
+          // alpha buffer (built below) can hide instances by driving their
+          // fragment alpha to 0. Without `transparent` the GPU's alpha
+          // test would still rasterise them; without `depthWrite:false`
+          // the depth buffer would punch a hole the size of every
+          // (invisible) sphere into the scene.
+          transparent: true,
+          depthWrite: false,
         });
         break;
     }
     this.instancedMesh = new THREE.InstancedMesh(this.geometry, this.material, count);
     this.instancedMesh.count = count;
+
+    // Per-instance alpha buffer. Default 1.0 (everyone visible). The
+    // geometry holds it as `instanceAlpha`, mirroring Three.js's
+    // built-in `instanceColor` naming. Read by the fragment-shader
+    // patch installed below.
+    const alphaArr = new Float32Array(count);
+    for (let i = 0; i < count; i++) alphaArr[i] = 1;
+    this.instanceAlpha = new THREE.InstancedBufferAttribute(alphaArr, 1);
+    this.geometry.setAttribute('instanceAlpha', this.instanceAlpha);
+
+    // Patch the material's shader so the final fragment alpha is
+    // multiplied by the instance's alpha. We do this via
+    // `onBeforeCompile` rather than a custom material so the existing
+    // MeshPhongMaterial lighting path keeps working — we just pre-pend
+    // an attribute declaration and a varying, then multiply in the
+    // tail of the fragment shader.
+    //
+    // This patch is a no-op in environments where `onBeforeCompile`
+    // isn't called (e.g. the headless test mock for `three`); the
+    // visibility buffer still ends up correct on the geometry, so
+    // tests can assert on the buffer contents directly without
+    // exercising the shader.
+    this.material.onBeforeCompile = (shader) => {
+      shader.vertexShader =
+        `attribute float instanceAlpha;\nvarying float vInstanceAlpha;\n` +
+        shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\nvInstanceAlpha = instanceAlpha;',
+        );
+      shader.fragmentShader =
+        `varying float vInstanceAlpha;\n` +
+        shader.fragmentShader.replace(
+          '#include <output_fragment>',
+          '#include <output_fragment>\ngl_FragColor.a *= vInstanceAlpha;',
+        );
+    };
   }
 
   updateInstance(index: number, position: Vector3, color?: string, scale?: number): void {
@@ -141,6 +209,47 @@ export class NodeMesh {
     return this.instancedMesh;
   }
 
+  /**
+   * Register the index → node-id mapping so {@link setVisibility} can
+   * resolve instance indices from the predicate's id set. The
+   * SceneController owns the canonical mapping; the mesh just keeps a
+   * reference.
+   */
+  setNodeIds(ids: readonly string[]): void {
+    this.nodeIds = ids.slice();
+  }
+
+  /**
+   * Read-only access to the per-instance alpha buffer (for tests +
+   * advanced consumers). `null` before {@link createInstancedMesh}.
+   */
+  getInstanceAlpha(): THREE.InstancedBufferAttribute | null {
+    return this.instanceAlpha;
+  }
+
+  /**
+   * Toggle per-instance visibility WITHOUT rebuild. For each instance
+   * index, if the corresponding node id is in `visibleIds` we set alpha
+   * to 1.0; otherwise 0.0. The shader patch installed in
+   * {@link createInstancedMesh} multiplies the fragment alpha by this
+   * value, so alpha=0 instances are completely transparent (and
+   * `depthWrite:false` keeps them from punching a hole in the depth
+   * buffer).
+   *
+   * No-op if the mesh hasn't been built yet, or if the node id mapping
+   * hasn't been registered via {@link setNodeIds}.
+   */
+  setVisibility(visibleIds: ReadonlySet<string>): void {
+    if (!this.instanceAlpha) return;
+    if (this.nodeIds.length === 0) return;
+    const arr = this.instanceAlpha.array as Float32Array;
+    const n = Math.min(arr.length, this.nodeIds.length);
+    for (let i = 0; i < n; i++) {
+      arr[i] = visibleIds.has(this.nodeIds[i]) ? 1 : 0;
+    }
+    this.instanceAlpha.needsUpdate = true;
+  }
+
   getRenderNode(): NodeRenderFn | undefined {
     return this.renderNode;
   }
@@ -163,6 +272,8 @@ export class NodeMesh {
       this.material = null;
     }
     this.instancedMesh = null;
+    this.instanceAlpha = null;
+    this.nodeIds = [];
   }
 
   /** Create a rounded rectangle geometry using THREE.Shape */

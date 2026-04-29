@@ -92,6 +92,7 @@ export type {
   SceneControllerOptions,
   CameraSnapshot,
 } from './renderer/SceneController.js';
+export type { VisibilityHost } from './renderer/types.js';
 export {
   NodeColorResolver,
   DEFAULT_NODE_COLOR,

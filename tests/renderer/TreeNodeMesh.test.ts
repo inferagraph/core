@@ -388,6 +388,40 @@ describe('TreeNodeMesh', () => {
     });
   });
 
+  describe('setVisibility', () => {
+    it('flips group.visible per card based on the predicate set', () => {
+      mesh.build(sampleEntries);
+      mesh.setVisibility(new Set(['adam', 'cain'])); // hide eve
+
+      const targets = mesh.getRaycastTargets() as Array<{
+        userData: { nodeId: string };
+        visible?: boolean;
+      }>;
+      const byId = new Map(targets.map((t) => [t.userData.nodeId, t.visible]));
+      expect(byId.get('adam')).toBe(true);
+      expect(byId.get('eve')).toBe(false);
+      expect(byId.get('cain')).toBe(true);
+    });
+
+    it('clearing the predicate restores all cards', () => {
+      mesh.build(sampleEntries);
+      mesh.setVisibility(new Set()); // hide everyone
+      mesh.setVisibility(new Set(['adam', 'eve', 'cain'])); // restore everyone
+
+      const targets = mesh.getRaycastTargets() as Array<{
+        userData: { nodeId: string };
+        visible?: boolean;
+      }>;
+      for (const t of targets) {
+        expect(t.visible).toBe(true);
+      }
+    });
+
+    it('is a no-op before build', () => {
+      expect(() => mesh.setVisibility(new Set(['adam']))).not.toThrow();
+    });
+  });
+
   describe('dispose', () => {
     it('clears the root and disposes geometry/materials', () => {
       mesh.build(sampleEntries);

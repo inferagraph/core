@@ -10,7 +10,7 @@ const setNodeRender = vi.fn();
 const setTooltip = vi.fn();
 const setIncomingEdgeLabels = vi.fn();
 const setOutgoingEdgeLabels = vi.fn();
-const setTreeFilter = vi.fn();
+const setFilter = vi.fn();
 const resize = vi.fn();
 
 let lastConstructorArgs: unknown[] = [];
@@ -27,7 +27,7 @@ vi.mock('../../src/renderer/SceneController.js', () => ({
       setTooltip,
       setIncomingEdgeLabels,
       setOutgoingEdgeLabels,
-      setTreeFilter,
+      setFilter,
       resize,
     };
   }),
@@ -57,7 +57,7 @@ describe('InferaGraph', () => {
     setTooltip.mockReset();
     setIncomingEdgeLabels.mockReset();
     setOutgoingEdgeLabels.mockReset();
-    setTreeFilter.mockReset();
+    setFilter.mockReset();
     resize.mockReset();
     lastConstructorArgs = [];
   });
@@ -225,6 +225,24 @@ describe('InferaGraph', () => {
       );
     }
 
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(detach).not.toHaveBeenCalled();
+  });
+
+  it('forwards filter prop to the controller via setFilter', async () => {
+    const personOnly = (n: { attributes: { type?: unknown } }) =>
+      n.attributes.type === 'person';
+    const { rerender } = render(
+      <InferaGraph data={sampleData} filter={personOnly} />,
+    );
+    await waitFor(() => expect(setFilter).toHaveBeenLastCalledWith(personOnly));
+
+    // Swap to a different predicate; controller must be updated without
+    // a remount.
+    const placeOnly = (n: { attributes: { type?: unknown } }) =>
+      n.attributes.type === 'place';
+    rerender(<InferaGraph data={sampleData} filter={placeOnly} />);
+    await waitFor(() => expect(setFilter).toHaveBeenLastCalledWith(placeOnly));
     expect(attach).toHaveBeenCalledTimes(1);
     expect(detach).not.toHaveBeenCalled();
   });

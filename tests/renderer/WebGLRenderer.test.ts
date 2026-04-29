@@ -68,7 +68,22 @@ vi.mock('three', () => {
     geometry: { dispose: vi.fn() },
     material: { dispose: vi.fn() },
   })),
-  SphereGeometry: vi.fn().mockImplementation(() => ({ dispose: vi.fn() })),
+  SphereGeometry: vi.fn().mockImplementation(() => {
+    const attributes: Record<string, unknown> = {};
+    return {
+      attributes,
+      setAttribute: vi.fn().mockImplementation((name: string, attr: unknown) => {
+        attributes[name] = attr;
+      }),
+      getAttribute: vi.fn().mockImplementation((name: string) => attributes[name]),
+      dispose: vi.fn(),
+    };
+  }),
+  InstancedBufferAttribute: vi.fn().mockImplementation((arr: Float32Array, size: number) => ({
+    array: arr,
+    itemSize: size,
+    needsUpdate: false,
+  })),
   MeshPhongMaterial: vi.fn().mockImplementation(() => ({
     dispose: vi.fn(),
     color: { set: vi.fn() },

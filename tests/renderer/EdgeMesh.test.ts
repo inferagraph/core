@@ -21,17 +21,16 @@ vi.mock('three', () => {
     return this;
   });
 
-  const makeAttribute = (size: number) => ({
-    array: new Float32Array(size),
-    itemSize: 3,
-    needsUpdate: false,
-  });
+  // Buffer attribute mock — itemSize is whatever the caller passes
+  // through `Float32BufferAttribute(arr, size)`, so position (3) and
+  // colour (4) attributes can coexist in the same fake geometry.
+  type Attr = { array: Float32Array; itemSize: number; needsUpdate: boolean };
 
   return {
     BufferGeometry: vi.fn().mockImplementation(() => {
-      const attributes: Record<string, ReturnType<typeof makeAttribute>> = {};
+      const attributes: Record<string, Attr> = {};
       return {
-        setAttribute: vi.fn().mockImplementation((name: string, attr: ReturnType<typeof makeAttribute>) => {
+        setAttribute: vi.fn().mockImplementation((name: string, attr: Attr) => {
           attributes[name] = attr;
         }),
         getAttribute: vi.fn().mockImplementation((name: string) => attributes[name]),
@@ -50,7 +49,7 @@ vi.mock('three', () => {
       geometry: geo,
       material: mat,
     })),
-    Float32BufferAttribute: vi.fn().mockImplementation((arr, size) => ({
+    Float32BufferAttribute: vi.fn().mockImplementation((arr: Float32Array, size: number) => ({
       array: arr,
       itemSize: size,
       needsUpdate: false,
@@ -164,14 +163,20 @@ describe('EdgeMesh', () => {
       const colorAttr = threeMesh.geometry.getAttribute('color') as unknown as {
         array: Float32Array;
         needsUpdate: boolean;
+        itemSize: number;
       };
-      // Index 1 → offset 6..11. Both endpoints should be (1, 0, 0).
-      expect(colorAttr.array[6]).toBeCloseTo(1, 5);
-      expect(colorAttr.array[7]).toBeCloseTo(0, 5);
-      expect(colorAttr.array[8]).toBeCloseTo(0, 5);
-      expect(colorAttr.array[9]).toBeCloseTo(1, 5);
+      // Layout: 4 components per vertex (rgba), 2 vertices per segment.
+      // Segment index 1 → offset 8..15. Both endpoints should be
+      // (r=1, g=0, b=0, a=preserved). Pre-fill leaves alpha at 1.
+      expect(colorAttr.itemSize).toBe(4);
+      expect(colorAttr.array[8]).toBeCloseTo(1, 5);
+      expect(colorAttr.array[9]).toBeCloseTo(0, 5);
       expect(colorAttr.array[10]).toBeCloseTo(0, 5);
-      expect(colorAttr.array[11]).toBeCloseTo(0, 5);
+      expect(colorAttr.array[11]).toBeCloseTo(1, 5); // alpha preserved
+      expect(colorAttr.array[12]).toBeCloseTo(1, 5);
+      expect(colorAttr.array[13]).toBeCloseTo(0, 5);
+      expect(colorAttr.array[14]).toBeCloseTo(0, 5);
+      expect(colorAttr.array[15]).toBeCloseTo(1, 5); // alpha preserved
       expect(colorAttr.needsUpdate).toBe(true);
     });
 
@@ -182,6 +187,51 @@ describe('EdgeMesh', () => {
 
     it('setSegmentColor is a no-op before createLineSegments', () => {
       expect(() => mesh.setSegmentColor(0, '#ff0000')).not.toThrow();
+    });
+
+    it('setSegmentAlpha writes alpha to both endpoints of a segment', () => {
+      mesh.createLineSegments(3);
+      mesh.setSegmentAlpha(2, 0);
+      const threeMesh = mesh.getMesh()!;
+      const colorAttr = threeMesh.geometry.getAttribute('color') as unknown as {
+        array: Float32Array;
+        needsUpdate: boolean;
+      };
+      // Segment index 2 → offset 16..23. Alpha lives at offsets 19, 23.
+      expect(colorAttr.array[19]).toBeCloseTo(0, 5);
+      expect(colorAttr.array[23]).toBeCloseTo(0, 5);
+      expect(colorAttr.needsUpdate).toBe(true);
+    });
+
+    it('setVisibility hides edges whose ids are not in the visible set', () => {
+      mesh.createLineSegments(3);
+      mesh.setEdgeIds(['e0', 'e1', 'e2']);
+      mesh.setVisibility(new Set(['e0', 'e2']));
+      const threeMesh = mesh.getMesh()!;
+      const colorAttr = threeMesh.geometry.getAttribute('color') as unknown as {
+        array: Float32Array;
+      };
+      // e0 visible: alpha=1 at offsets 3 + 7
+      expect(colorAttr.array[3]).toBeCloseTo(1, 5);
+      expect(colorAttr.array[7]).toBeCloseTo(1, 5);
+      // e1 hidden: alpha=0 at offsets 11 + 15
+      expect(colorAttr.array[11]).toBeCloseTo(0, 5);
+      expect(colorAttr.array[15]).toBeCloseTo(0, 5);
+      // e2 visible: alpha=1 at offsets 19 + 23
+      expect(colorAttr.array[19]).toBeCloseTo(1, 5);
+      expect(colorAttr.array[23]).toBeCloseTo(1, 5);
+    });
+
+    it('setVisibility is a no-op when edge ids have not been registered', () => {
+      mesh.createLineSegments(2);
+      // No setEdgeIds — should not throw and should leave alpha at 1.
+      expect(() => mesh.setVisibility(new Set(['e0']))).not.toThrow();
+      const threeMesh = mesh.getMesh()!;
+      const colorAttr = threeMesh.geometry.getAttribute('color') as unknown as {
+        array: Float32Array;
+      };
+      expect(colorAttr.array[3]).toBeCloseTo(1, 5);
+      expect(colorAttr.array[7]).toBeCloseTo(1, 5);
     });
   });
 });

@@ -1,15 +1,26 @@
 import * as THREE from 'three';
 import type { Vector3 } from '../types.js';
+import type { VisibilityHost } from './types.js';
 
 /**
  * Single straight line segment fed to {@link TreeEdgeMesh.build}. Each
  * segment carries its own colour so different connector kinds (marriage
  * line, sibling bar, parent-to-child drop) can be tinted independently.
+ *
+ * Optional `sourceNodeId` / `targetNodeId` annotate which graph nodes
+ * the segment connects so {@link TreeEdgeMesh.setVisibility} can hide
+ * connectors whose endpoint nodes are filtered out. Connectors that
+ * don't correspond to a single pair of nodes (e.g. a sibling-bar that
+ * spans multiple children) typically pass the parent + the bar's
+ * "anchor" child here; if either endpoint is hidden the bar disappears,
+ * which is the correct behaviour for the standard family-tree view.
  */
 export interface TreeEdgeSegment {
   a: Vector3;
   b: Vector3;
   color: string;
+  sourceNodeId?: string;
+  targetNodeId?: string;
 }
 
 /**
@@ -97,6 +108,8 @@ export function buildTreeEdgeSegments(
         a: { x: left, y: pa.y, z: 0 },
         b: { x: right, y: pa.y, z: 0 },
         color: marriageColor,
+        sourceNodeId: a,
+        targetNodeId: b,
       });
     }
   }
@@ -115,12 +128,14 @@ export function buildTreeEdgeSegments(
 
   for (const { parents, children } of sibGroups.values()) {
     // Anchor x = midpoint of the parents that we have positions for.
-    const parentPositions = parents
-      .map((id) => positions.get(id))
+    const presentParents = parents.filter((id) => positions.has(id));
+    const parentPositions = presentParents
+      .map((id) => positions.get(id)!)
       .filter((p): p is Vector3 => !!p);
     if (parentPositions.length === 0) continue;
-    const childPositions = children
-      .map((id) => positions.get(id))
+    const presentChildren = children.filter((id) => positions.has(id));
+    const childPositions = presentChildren
+      .map((id) => positions.get(id)!)
       .filter((p): p is Vector3 => !!p);
     if (childPositions.length === 0) continue;
 
@@ -131,6 +146,12 @@ export function buildTreeEdgeSegments(
     const childTopY = Math.max(...childPositions.map((p) => p.y)) + halfH;
     // Sibling bar y: midway between parents' bottom and children's top.
     const barY = (parentBottomY + childTopY) / 2;
+
+    // Anchor ids for visibility resolution. The "parent drop" + sibling
+    // bar are tied to the first parent + first child — if either is
+    // hidden by the filter, those connectors disappear too. Per-child
+    // drops carry that specific child's id.
+    const anchorParentId = presentParents[0];
 
     // 1) Vertical from the parents down to the sibling bar.
     //    For a couple (≥2 parents at the same y) the marriage line is
@@ -143,6 +164,8 @@ export function buildTreeEdgeSegments(
       a: { x: parentX, y: dropTopY, z: 0 },
       b: { x: parentX, y: barY, z: 0 },
       color: connectorColor,
+      sourceNodeId: anchorParentId,
+      targetNodeId: presentChildren[0],
     });
 
     // 2) Horizontal sibling bar across all children.
@@ -153,15 +176,20 @@ export function buildTreeEdgeSegments(
         a: { x: minX, y: barY, z: 0 },
         b: { x: maxX, y: barY, z: 0 },
         color: connectorColor,
+        sourceNodeId: anchorParentId,
+        targetNodeId: presentChildren[0],
       });
     }
 
     // 3) Drop from bar to each child's top edge.
-    for (const cp of childPositions) {
+    for (let ci = 0; ci < presentChildren.length; ci++) {
+      const cp = childPositions[ci];
       segments.push({
         a: { x: cp.x, y: barY, z: 0 },
         b: { x: cp.x, y: cp.y + halfH, z: 0 },
         color: connectorColor,
+        sourceNodeId: anchorParentId,
+        targetNodeId: presentChildren[ci],
       });
     }
   }
@@ -169,11 +197,24 @@ export function buildTreeEdgeSegments(
   return segments;
 }
 
-export class TreeEdgeMesh {
+/**
+ * @implements {VisibilityHost}
+ */
+export class TreeEdgeMesh implements VisibilityHost {
   private lineSegments: THREE.LineSegments | null = null;
   private geometry: THREE.BufferGeometry | null = null;
   private material: THREE.LineBasicMaterial | null = null;
   private segmentCount = 0;
+  /**
+   * Per-segment endpoint node ids. Built alongside the mesh by
+   * {@link build} from each {@link TreeEdgeSegment}'s
+   * `sourceNodeId` / `targetNodeId`. Used by {@link setVisibility} to
+   * decide which segments to hide.
+   */
+  private segmentEndpoints: Array<{
+    sourceNodeId?: string;
+    targetNodeId?: string;
+  }> = [];
   /**
    * Connector opacity. The SVG mockup uses 0.3-0.4 — we land at 0.35 so
    * connectors recede from the cards without disappearing on dark themes.
@@ -184,32 +225,39 @@ export class TreeEdgeMesh {
    * (Re)build the line geometry from `segments`. Replaces any previous
    * mesh — caller is responsible for removing the previous instance from
    * the scene before calling `build` again.
+   *
+   * Colour buffer layout is RGBA (4 components per vertex, 2 vertices
+   * per segment) so {@link setVisibility} can drive alpha to 0 to hide
+   * connectors without rebuilding the mesh.
    */
   build(segments: TreeEdgeSegment[]): void {
     this.dispose();
     this.segmentCount = segments.length;
 
     const positions = new Float32Array(segments.length * 2 * 3);
-    const colors = new Float32Array(segments.length * 2 * 3);
+    const colors = new Float32Array(segments.length * 2 * 4);
     const scratch = new THREE.Color();
 
     for (let i = 0; i < segments.length; i++) {
       const s = segments[i];
-      const offset = i * 6;
-      positions[offset + 0] = s.a.x;
-      positions[offset + 1] = s.a.y;
-      positions[offset + 2] = s.a.z;
-      positions[offset + 3] = s.b.x;
-      positions[offset + 4] = s.b.y;
-      positions[offset + 5] = s.b.z;
+      const posOffset = i * 6;
+      positions[posOffset + 0] = s.a.x;
+      positions[posOffset + 1] = s.a.y;
+      positions[posOffset + 2] = s.a.z;
+      positions[posOffset + 3] = s.b.x;
+      positions[posOffset + 4] = s.b.y;
+      positions[posOffset + 5] = s.b.z;
 
+      const colOffset = i * 8;
       scratch.set(s.color);
-      colors[offset + 0] = scratch.r;
-      colors[offset + 1] = scratch.g;
-      colors[offset + 2] = scratch.b;
-      colors[offset + 3] = scratch.r;
-      colors[offset + 4] = scratch.g;
-      colors[offset + 5] = scratch.b;
+      colors[colOffset + 0] = scratch.r;
+      colors[colOffset + 1] = scratch.g;
+      colors[colOffset + 2] = scratch.b;
+      colors[colOffset + 3] = 1;
+      colors[colOffset + 4] = scratch.r;
+      colors[colOffset + 5] = scratch.g;
+      colors[colOffset + 6] = scratch.b;
+      colors[colOffset + 7] = 1;
     }
 
     this.geometry = new THREE.BufferGeometry();
@@ -219,7 +267,7 @@ export class TreeEdgeMesh {
     );
     this.geometry.setAttribute(
       'color',
-      new THREE.Float32BufferAttribute(colors, 3),
+      new THREE.Float32BufferAttribute(colors, 4),
     );
     this.geometry.setDrawRange(0, segments.length * 2);
 
@@ -229,6 +277,52 @@ export class TreeEdgeMesh {
       opacity: this.opacity,
     });
     this.lineSegments = new THREE.LineSegments(this.geometry, this.material);
+
+    // Stash the endpoint mapping so `setVisibility` can resolve which
+    // segments to hide. Segments without endpoint ids (e.g. a custom
+    // overlay segment built outside the standard pipeline) are kept
+    // visible regardless of the predicate.
+    this.segmentEndpoints = segments.map((s) => ({
+      sourceNodeId: s.sourceNodeId,
+      targetNodeId: s.targetNodeId,
+    }));
+  }
+
+  /**
+   * Toggle per-segment visibility WITHOUT rebuild. Tree edges are
+   * derived from node visibility — a connector's source-node OR
+   * target-node being hidden hides the connector — so this method
+   * accepts a set of NODE ids (not segment ids) for symmetry with the
+   * other `VisibilityHost` implementations.
+   *
+   * Segments whose endpoints were not annotated (the optional
+   * `sourceNodeId` / `targetNodeId` on {@link TreeEdgeSegment}) are
+   * always visible — the host opted out of the visibility predicate
+   * for them.
+   *
+   * No-op if the mesh hasn't been built yet.
+   */
+  setVisibility(visibleNodeIds: ReadonlySet<string>): void {
+    if (!this.geometry) return;
+    if (this.segmentCount === 0) return;
+    const colorAttr = this.geometry.getAttribute('color');
+    if (!colorAttr) return;
+    const array = colorAttr.array as Float32Array;
+    for (let i = 0; i < this.segmentCount; i++) {
+      const ep = this.segmentEndpoints[i];
+      let alpha = 1;
+      if (ep && (ep.sourceNodeId !== undefined || ep.targetNodeId !== undefined)) {
+        const sourceVisible =
+          ep.sourceNodeId === undefined || visibleNodeIds.has(ep.sourceNodeId);
+        const targetVisible =
+          ep.targetNodeId === undefined || visibleNodeIds.has(ep.targetNodeId);
+        alpha = sourceVisible && targetVisible ? 1 : 0;
+      }
+      const offset = i * 8;
+      array[offset + 3] = alpha;
+      array[offset + 7] = alpha;
+    }
+    colorAttr.needsUpdate = true;
   }
 
   /** Override the connector opacity. Must be called before `build`. */
@@ -255,5 +349,6 @@ export class TreeEdgeMesh {
     }
     this.lineSegments = null;
     this.segmentCount = 0;
+    this.segmentEndpoints = [];
   }
 }

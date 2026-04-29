@@ -1,42 +1,67 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('three', () => ({
-  SphereGeometry: vi.fn().mockImplementation(() => ({ dispose: vi.fn() })),
-  ShapeGeometry: vi.fn().mockImplementation(() => ({ dispose: vi.fn() })),
-  Shape: vi.fn().mockImplementation(() => ({
-    moveTo: vi.fn(),
-    lineTo: vi.fn(),
-    quadraticCurveTo: vi.fn(),
-  })),
-  MeshPhongMaterial: vi.fn().mockImplementation(() => ({
-    dispose: vi.fn(),
-    color: { set: vi.fn() },
-  })),
-  InstancedMesh: vi.fn().mockImplementation((_geo, _mat, count) => ({
-    count,
-    instanceMatrix: { needsUpdate: false },
-    instanceColor: { needsUpdate: false },
-    setMatrixAt: vi.fn(),
-    setColorAt: vi.fn(),
-    geometry: { dispose: vi.fn() },
-    material: { dispose: vi.fn() },
-  })),
-  Matrix4: vi.fn().mockImplementation(() => ({
-    compose: vi.fn().mockReturnThis(),
-  })),
-  Vector3: vi.fn().mockImplementation((x, y, z) => ({
-    x: x ?? 0,
-    y: y ?? 0,
-    z: z ?? 0,
-  })),
-  Quaternion: vi.fn().mockImplementation(() => ({
-    x: 0,
-    y: 0,
-    z: 0,
-    w: 1,
-  })),
-  Color: vi.fn().mockImplementation(() => ({ r: 0, g: 0, b: 0 })),
-}));
+vi.mock('three', () => {
+  // Geometries used by NodeMesh — both Sphere and Shape variants need to
+  // accept `setAttribute` calls now that NodeMesh attaches a per-instance
+  // alpha buffer for visibility hiding.
+  const makeGeometry = () => {
+    const attributes: Record<string, unknown> = {};
+    return {
+      attributes,
+      setAttribute: vi.fn().mockImplementation((name: string, attr: unknown) => {
+        attributes[name] = attr;
+      }),
+      getAttribute: vi.fn().mockImplementation((name: string) => attributes[name]),
+      dispose: vi.fn(),
+    };
+  };
+  return {
+    SphereGeometry: vi.fn().mockImplementation(() => makeGeometry()),
+    ShapeGeometry: vi.fn().mockImplementation(() => makeGeometry()),
+    Shape: vi.fn().mockImplementation(() => ({
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      quadraticCurveTo: vi.fn(),
+    })),
+    MeshPhongMaterial: vi.fn().mockImplementation((opts: Record<string, unknown> = {}) => ({
+      dispose: vi.fn(),
+      color: { set: vi.fn() },
+      transparent: opts.transparent ?? false,
+      opacity: opts.opacity ?? 1,
+      depthWrite: opts.depthWrite ?? true,
+      onBeforeCompile: undefined as ((shader: unknown) => void) | undefined,
+    })),
+    InstancedMesh: vi.fn().mockImplementation((_geo, _mat, count) => ({
+      count,
+      instanceMatrix: { needsUpdate: false },
+      instanceColor: { needsUpdate: false },
+      setMatrixAt: vi.fn(),
+      setColorAt: vi.fn(),
+      geometry: { dispose: vi.fn() },
+      material: { dispose: vi.fn() },
+    })),
+    InstancedBufferAttribute: vi.fn().mockImplementation((arr: Float32Array, size: number) => ({
+      array: arr,
+      itemSize: size,
+      needsUpdate: false,
+    })),
+    Matrix4: vi.fn().mockImplementation(() => ({
+      compose: vi.fn().mockReturnThis(),
+    })),
+    Vector3: vi.fn().mockImplementation((x, y, z) => ({
+      x: x ?? 0,
+      y: y ?? 0,
+      z: z ?? 0,
+    })),
+    Quaternion: vi.fn().mockImplementation(() => ({
+      x: 0,
+      y: 0,
+      z: 0,
+      w: 1,
+    })),
+    Color: vi.fn().mockImplementation(() => ({ r: 0, g: 0, b: 0 })),
+  };
+});
 
 import * as THREE from 'three';
 import { NodeMesh } from '../../src/renderer/NodeMesh.js';
@@ -292,6 +317,52 @@ describe('NodeMesh', () => {
         (call: number[]) => call[0] === 30 && call[1] === 30 && call[2] === 30,
       );
       expect(scaleCalls.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('VisibilityHost (per-instance alpha)', () => {
+    it('createInstancedMesh seeds the instanceAlpha buffer with 1.0 per instance', () => {
+      mesh.createInstancedMesh(4);
+      const alpha = mesh.getInstanceAlpha();
+      expect(alpha).not.toBeNull();
+      expect(alpha!.array.length).toBe(4);
+      for (let i = 0; i < 4; i++) {
+        expect(alpha!.array[i]).toBeCloseTo(1, 5);
+      }
+    });
+
+    it('default style material is transparent + depthWrite=false so alpha=0 hides cleanly', () => {
+      mesh.createInstancedMesh(2);
+      // The most recent MeshPhongMaterial constructor call should have
+      // transparent:true and depthWrite:false in its options.
+      const calls = (THREE.MeshPhongMaterial as unknown as ReturnType<typeof vi.fn>).mock.calls;
+      const last = calls[calls.length - 1][0];
+      expect(last.transparent).toBe(true);
+      expect(last.depthWrite).toBe(false);
+    });
+
+    it('setVisibility flips alpha 1↔0 per instance based on the predicate set', () => {
+      mesh.createInstancedMesh(3);
+      mesh.setNodeIds(['a', 'b', 'c']);
+      mesh.setVisibility(new Set(['a', 'c']));
+      const alpha = mesh.getInstanceAlpha()!;
+      expect(alpha.array[0]).toBeCloseTo(1, 5); // a visible
+      expect(alpha.array[1]).toBeCloseTo(0, 5); // b hidden
+      expect(alpha.array[2]).toBeCloseTo(1, 5); // c visible
+      expect(alpha.needsUpdate).toBe(true);
+    });
+
+    it('setVisibility is a no-op before createInstancedMesh', () => {
+      expect(() => mesh.setVisibility(new Set(['a']))).not.toThrow();
+    });
+
+    it('setVisibility is a no-op when node ids have not been registered', () => {
+      mesh.createInstancedMesh(2);
+      mesh.setVisibility(new Set(['a']));
+      const alpha = mesh.getInstanceAlpha()!;
+      // No mapping → alpha stays at the initial 1.0.
+      expect(alpha.array[0]).toBeCloseTo(1, 5);
+      expect(alpha.array[1]).toBeCloseTo(1, 5);
     });
   });
 

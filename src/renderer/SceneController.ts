@@ -238,20 +238,24 @@ export interface SceneControllerOptions {
    */
   outgoingEdgeLabels?: EdgeLabelMap;
   /**
-   * Optional consumer-supplied predicate used to restrict which nodes are
-   * visible in tree mode. When supplied, only nodes for which the predicate
-   * returns `true` are passed to {@link TreeLayout} / {@link TreeNodeMesh},
-   * and edges whose source or target is filtered out are dropped from the
-   * tree connectors.
+   * Domain-agnostic visibility predicate. When supplied, only nodes for
+   * which the predicate returns `true` are rendered; edges whose source
+   * OR target node is filtered out are hidden too.
    *
-   * The predicate ONLY affects tree mode. Graph mode always renders the
-   * full data set so consumers can flip into tree view to focus a specific
-   * sub-population (e.g. only people, hiding places + events) and back to
-   * the full graph without surprise.
+   * The same predicate applies in **every** visualization mode — graph,
+   * tree, and any future mode (geospatial / timeline / chord / etc.).
+   * Each mesh class implements the internal `VisibilityHost` contract
+   * and the SceneController dispatches a single `setVisibility` call to
+   * each on every filter change.
    *
-   * Default: `() => true` (no filter — same as 0.1.15 behaviour).
+   * Filter changes are applied as in-place visibility toggles on the
+   * existing GPU buffers — there's NO mesh teardown, NO rebuild, and
+   * NO layout recompute. Hidden nodes keep their layout positions, so
+   * unhiding restores the prior frame instantly.
+   *
+   * Default: `() => true` (no filter).
    */
-  treeFilter?: (node: NodeData) => boolean;
+  filter?: (node: NodeData) => boolean;
 }
 
 /**
@@ -328,15 +332,32 @@ export class SceneController {
   private tooltip: TooltipConfig | undefined;
   private incomingEdgeLabels: EdgeLabelMap | undefined;
   private outgoingEdgeLabels: EdgeLabelMap | undefined;
-  private treeFilter: (node: NodeData) => boolean;
+  /**
+   * Domain-agnostic visibility predicate. Default `() => true` accepts
+   * every node. Replaced via {@link setFilter}; never branched on
+   * layout mode — the same predicate flows through to every mesh.
+   */
+  private nodeFilter: (node: NodeData) => boolean;
 
   private showLabels: boolean;
   private enableHover: boolean;
 
   private nodeIdsByIndex: string[] = [];
   private nodesByIndex: NodeData[] = [];
+  private edgeIdsByIndex: string[] = [];
   private edgeEndpoints: Array<{ sourceId: string; targetId: string; type?: string }> = [];
   private baseColorsByIndex: string[] = [];
+
+  /**
+   * Cached filter result, recomputed by {@link recomputeVisibility}
+   * whenever {@link setFilter} runs OR new meshes are built. Both maps
+   * are passed into the per-mesh `VisibilityHost` implementations on
+   * each {@link applyFilterMask} call. Tree-edge meshes consume
+   * `visibleNodeIds` (their endpoints are nodes); graph-edge meshes
+   * consume `visibleEdgeIds`.
+   */
+  private visibleNodeIds: Set<string> = new Set();
+  private visibleEdgeIds: Set<string> = new Set();
 
   /**
    * Per-mode cache of computed layout positions. Only the active layout is
@@ -374,7 +395,7 @@ export class SceneController {
     this.tooltip = options.tooltip;
     this.incomingEdgeLabels = options.incomingEdgeLabels;
     this.outgoingEdgeLabels = options.outgoingEdgeLabels;
-    this.treeFilter = options.treeFilter ?? (() => true);
+    this.nodeFilter = options.filter ?? (() => true);
     this.showLabels = options.showLabels ?? true;
     this.enableHover = options.enableHover ?? true;
 
@@ -529,8 +550,11 @@ export class SceneController {
     this.edgeMesh = null;
     this.nodeIdsByIndex = [];
     this.nodesByIndex = [];
+    this.edgeIdsByIndex = [];
     this.edgeEndpoints = [];
     this.baseColorsByIndex = [];
+    this.visibleNodeIds = new Set();
+    this.visibleEdgeIds = new Set();
     this.hoveredIndex = null;
     this.pointerActive = false;
     this.pulseController.reset();
@@ -562,6 +586,7 @@ export class SceneController {
 
     this.nodeIdsByIndex = nodes.map((n) => n.id);
     this.nodesByIndex = nodes.slice();
+    this.edgeIdsByIndex = edges.map((e) => e.id);
     // Capture the edge `type` (e.g. `father_of`, `husband_of`) alongside the
     // endpoints so the active layout can consult it. The tree layout uses
     // the type to distinguish parent edges from spouse edges; force
@@ -573,6 +598,10 @@ export class SceneController {
     }));
     this.baseColorsByIndex = this.nodesByIndex.map((n) => this.colorResolver.resolve(n));
     this.pulseController.reset();
+    // Recompute the cached visibility id sets from the freshly-loaded
+    // graph data. The mesh-level masks are applied in `buildGraph/Tree
+    // Meshes` after the meshes exist.
+    this.recomputeVisibility();
 
     // The graph data just changed — every cached layout is stale. Drop
     // them so the next entry into any mode (active or otherwise) recomputes
@@ -606,9 +635,13 @@ export class SceneController {
       this.applyGraphCamera();
       this.buildGraphMeshes(edges, positions);
     }
-    // Frame to the visible nodes only — in tree mode the consumer's
-    // `treeFilter` may have hidden a chunk of the data set; centring the
-    // camera on the unfiltered centroid would leave the tree off-axis.
+    // Apply the cached visibility mask to the freshly-built meshes so
+    // an existing filter predicate carries through `syncFromStore`
+    // without an extra round-trip to the host.
+    this.applyFilterMask();
+    // Frame to the visible nodes only — the consumer's `filter` may
+    // have hidden a chunk of the data set; centring the camera on the
+    // unfiltered centroid would leave the visible cluster off-axis.
     this.frameToFit(this.framingPositions(positions));
     // Tree first-entry: re-assert axis-alignment AFTER frameToFit so the
     // orthographic eye is purely along +Z relative to the freshly-framed
@@ -623,14 +656,16 @@ export class SceneController {
   }
 
   /**
-   * Restrict a positions map to the nodes that are actually rendered in
-   * the active layout. Graph mode renders everything; tree mode honours
-   * the consumer's {@link SceneControllerOptions.treeFilter} predicate.
+   * Restrict a positions map to the nodes that are actually visible
+   * under the current filter predicate. The same predicate applies
+   * across modes, so framing always centres on the visible subset
+   * regardless of which layout is active. When the predicate accepts
+   * everything (the default), the input positions map is returned
+   * verbatim without allocation.
    */
   private framingPositions(positions: Map<string, Vector3>): Map<string, Vector3> {
-    if (this.layoutMode !== 'tree') return positions;
-    const visible = this.getTreeVisibleIds();
-    if (visible.size === positions.size) return positions;
+    const visible = this.visibleNodeIds;
+    if (visible.size === 0 || visible.size === positions.size) return positions;
     const out = new Map<string, Vector3>();
     for (const [id, p] of positions) {
       if (visible.has(id)) out.set(id, p);
@@ -649,6 +684,7 @@ export class SceneController {
   ): void {
     const nodeMesh = new NodeMesh(this.nodeRender);
     nodeMesh.createInstancedMesh(this.nodesByIndex.length);
+    nodeMesh.setNodeIds(this.nodeIdsByIndex);
     this.nodeIdsByIndex.forEach((id, index) => {
       const pos = positions.get(id) ?? { x: 0, y: 0, z: 0 };
       nodeMesh.updateInstance(index, pos, this.baseColorsByIndex[index]);
@@ -675,6 +711,7 @@ export class SceneController {
     if (edges.length > 0) {
       const edgeMesh = new EdgeMesh();
       edgeMesh.createLineSegments(edges.length);
+      edgeMesh.setEdgeIds(this.edgeIdsByIndex);
       // Index endpoint nodes by id so we can hand the resolver the
       // already-resolved source / target colours from `baseColorsByIndex`
       // — picking the same hex {@link NodeColorResolver.resolve} returned
@@ -715,9 +752,9 @@ export class SceneController {
 
   /**
    * Build the tree-view meshes:
-   *   - A {@link TreeNodeMesh} (one rounded-rect card per visible node,
-   *     fill translucent dark, outline = node colour, with the node's
-   *     title rasterised inside).
+   *   - A {@link TreeNodeMesh} (one rounded-rect card per node, fill
+   *     translucent dark, outline = node colour, with the node's title
+   *     rasterised inside).
    *   - A {@link TreeEdgeMesh} containing the orthogonal connectors
    *     (marriage line, parent-to-bar drop, sibling bar, drops to
    *     children).
@@ -725,13 +762,13 @@ export class SceneController {
    * Called from {@link syncFromStore} and on entry to tree mode from
    * {@link setLayout}.
    *
-   * Honours the consumer's {@link SceneControllerOptions.treeFilter}
-   * predicate. Nodes that fail the filter are skipped, and any edge whose
-   * source or target is hidden is dropped.
+   * Cards are built for **every** node — the predicate is applied
+   * AFTER build via {@link applyFilterMask} which calls
+   * `treeNodeMesh.setVisibility(...)` to hide filter-rejected cards.
+   * This keeps the build path mode-agnostic and makes a future filter
+   * change a per-frame no-op (no rebuild).
    */
   private buildTreeMeshes(positions: Map<string, Vector3>): void {
-    const visibleIds = this.getTreeVisibleIds();
-
     const treeNodeMesh = new TreeNodeMesh();
     const entries: Array<{
       id: string;
@@ -740,7 +777,6 @@ export class SceneController {
       label?: string;
     }> = [];
     this.nodeIdsByIndex.forEach((id, index) => {
-      if (!visibleIds.has(id)) return;
       const node = this.nodesByIndex[index];
       const labelText = SceneController.getLabelText(node);
       entries.push({
@@ -765,16 +801,20 @@ export class SceneController {
     // empty is the simplest fix and makes the tree view self-contained.
 
     // Raycast targets are the per-card groups (each carries
-    // `userData.nodeId`). Only visible cards exist, so no ghost hits from
-    // filtered nodes.
+    // `userData.nodeId`). Filter-rejected cards have `group.visible ===
+    // false` after the post-build `applyFilterMask` call, and the
+    // raycaster's standard intersect path naturally rejects invisible
+    // Object3Ds — so filtered cards don't produce ghost hits.
     this.raycaster.setObjects(treeNodeMesh.getRaycastTargets());
     this.raycaster.setNodeIds(this.nodeIdsByIndex);
     const cam = this.renderer.getCamera();
     if (cam) this.raycaster.setCamera(cam);
 
     // Build the orthogonal connectors from the tree topology + positions.
-    // Edges whose source or target is hidden by the filter are skipped.
-    const segments = this.computeTreeEdgeSegments(positions, visibleIds);
+    // ALL connectors are built; the post-build `applyFilterMask` call
+    // hides those whose endpoint nodes are filtered out by setting
+    // alpha=0 on the appropriate vertex-colour-buffer slots.
+    const segments = this.computeTreeEdgeSegments(positions);
     if (segments.length > 0) {
       const treeEdgeMesh = new TreeEdgeMesh();
       treeEdgeMesh.build(segments);
@@ -782,20 +822,6 @@ export class SceneController {
       if (mesh) this.renderer.addObject('__tree_edges__', mesh);
       this.treeEdgeMesh = treeEdgeMesh;
     }
-  }
-
-  /**
-   * Set of node ids currently visible in tree mode. Built from the
-   * consumer's {@link SceneControllerOptions.treeFilter} predicate; the
-   * graph view always renders the full data set.
-   */
-  private getTreeVisibleIds(): Set<string> {
-    const visible = new Set<string>();
-    for (let i = 0; i < this.nodeIdsByIndex.length; i++) {
-      const node = this.nodesByIndex[i];
-      if (this.treeFilter(node)) visible.add(this.nodeIdsByIndex[i]);
-    }
-    return visible;
   }
 
   private teardownGraphMeshes(): void {
@@ -840,18 +866,15 @@ export class SceneController {
    */
   private computeTreeEdgeSegments(
     positions: Map<string, Vector3>,
-    visibleIds?: Set<string>,
   ): TreeEdgeSegment[] {
     const cardSize = this.treeNodeMesh?.getCardSize() ?? {
       width: TreeNodeMesh.DEFAULT_WIDTH,
       height: TreeNodeMesh.DEFAULT_HEIGHT,
     };
-    const edges = visibleIds
-      ? this.edgeEndpoints.filter(
-          (e) => visibleIds.has(e.sourceId) && visibleIds.has(e.targetId),
-        )
-      : this.edgeEndpoints;
-    return buildTreeEdgeSegments(positions, edges, cardSize);
+    // ALL edges go through. Per-segment visibility is applied later via
+    // `treeEdgeMesh.setVisibility(visibleNodeIds)` so connectors hide
+    // when either endpoint is filtered out.
+    return buildTreeEdgeSegments(positions, this.edgeEndpoints, cardSize);
   }
 
   /**
@@ -978,6 +1001,9 @@ export class SceneController {
       this.labelRenderer.clear();
       this.applyTreeCamera();
       this.buildTreeMeshes(positions);
+      // Carry the current filter through to the freshly-built tree
+      // meshes so toggling modes preserves the visibility predicate.
+      this.applyFilterMask();
 
       // 2. Restore the saved tree-mode camera if we have one; otherwise
       //    fall through to the first-entry default (frameToFit on the
@@ -1004,6 +1030,9 @@ export class SceneController {
       this.applyGraphCamera();
       const edges = this.store.getAllEdges();
       this.buildGraphMeshes(edges, positions);
+      // Carry the current filter through to the freshly-built graph
+      // meshes so toggling modes preserves the visibility predicate.
+      this.applyFilterMask();
 
       // 2. Restore the saved graph-mode camera if we have one; otherwise
       //    fall through to the first-entry default (frameToFit only —
@@ -1421,28 +1450,75 @@ export class SceneController {
   }
 
   /**
-   * Replace the tree-mode visibility predicate. When tree mode is active
-   * the meshes are rebuilt so the change is visible immediately; in graph
-   * mode the new filter is just stashed for the next entry into tree mode.
-   * Pass `undefined` to clear the filter.
+   * Replace the domain-agnostic visibility predicate. The same predicate
+   * is dispatched to every mounted mesh via the internal
+   * `VisibilityHost` contract — graph nodes / graph edges / tree cards /
+   * tree connectors / any future visualization mode — so a single call
+   * here updates every active layout uniformly.
+   *
+   * Filter changes are applied as in-place visibility toggles on the
+   * existing GPU buffers. There is **no** mesh teardown, **no** mesh
+   * rebuild, and **no** layout recompute. Hidden nodes keep their
+   * positions; toggling them back on restores the prior frame
+   * instantly.
+   *
+   * Pass `undefined` to clear the filter (everyone visible).
    */
-  setTreeFilter(filter: ((node: NodeData) => boolean) | undefined): void {
-    this.treeFilter = filter ?? (() => true);
-    if (!this.container) return;
-    if (this.layoutMode !== 'tree') return;
-    if (this.nodeIdsByIndex.length === 0) return;
-    // Tear down the old tree meshes and rebuild from the cached layout.
-    this.teardownTreeMeshes();
-    this.labelRenderer.clear();
-    const positions = this.computeActiveLayout();
-    this.applyTreeCamera();
-    this.buildTreeMeshes(positions);
-    this.frameToFit(this.framingPositions(positions));
+  setFilter(predicate: ((node: NodeData) => boolean) | undefined): void {
+    this.nodeFilter = predicate ?? (() => true);
+    this.recomputeVisibility();
+    this.applyFilterMask();
   }
 
-  /** Active tree-mode filter (for tests + introspection). */
-  getTreeFilter(): (node: NodeData) => boolean {
-    return this.treeFilter;
+  /** Active visibility predicate (for tests + introspection). */
+  getFilter(): (node: NodeData) => boolean {
+    return this.nodeFilter;
+  }
+
+  /**
+   * Recompute the cached `visibleNodeIds` + `visibleEdgeIds` from the
+   * active predicate. Edges are visible iff BOTH of their endpoints
+   * pass the node predicate — there is no separate edge predicate, by
+   * design. Cheap: O(N + E) with no allocations beyond the two output
+   * sets.
+   */
+  private recomputeVisibility(): void {
+    const visibleNodes = new Set<string>();
+    for (let i = 0; i < this.nodeIdsByIndex.length; i++) {
+      if (this.nodeFilter(this.nodesByIndex[i])) {
+        visibleNodes.add(this.nodeIdsByIndex[i]);
+      }
+    }
+    const visibleEdges = new Set<string>();
+    for (let i = 0; i < this.edgeIdsByIndex.length; i++) {
+      const ep = this.edgeEndpoints[i];
+      if (visibleNodes.has(ep.sourceId) && visibleNodes.has(ep.targetId)) {
+        visibleEdges.add(this.edgeIdsByIndex[i]);
+      }
+    }
+    this.visibleNodeIds = visibleNodes;
+    this.visibleEdgeIds = visibleEdges;
+  }
+
+  /**
+   * Dispatch the cached visibility id sets to every currently-mounted
+   * mesh via the uniform `VisibilityHost.setVisibility` interface. This
+   * is the single chokepoint where mesh-level visibility is updated;
+   * adding a new visualization mode (geospatial / timeline / chord /
+   * etc.) means writing a new mesh class that implements
+   * `VisibilityHost`, mounting it via the existing `addObject` flow,
+   * and adding ONE line here — the public prop surface and the
+   * dispatch logic do not change.
+   *
+   * Tree-edge meshes consume `visibleNodeIds` (tree edges are derived
+   * from node visibility); everything else consumes the appropriate
+   * domain set.
+   */
+  private applyFilterMask(): void {
+    this.nodeMesh?.setVisibility(this.visibleNodeIds);
+    this.edgeMesh?.setVisibility(this.visibleEdgeIds);
+    this.treeNodeMesh?.setVisibility(this.visibleNodeIds);
+    this.treeEdgeMesh?.setVisibility(this.visibleNodeIds);
   }
 
   /**

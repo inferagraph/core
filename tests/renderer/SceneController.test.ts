@@ -140,8 +140,33 @@ vi.mock('three', () => {
       geometry: { dispose: vi.fn() },
       material: { dispose: vi.fn() },
     })),
-    SphereGeometry: vi.fn().mockImplementation(() => ({ dispose: vi.fn() })),
-    ShapeGeometry: vi.fn().mockImplementation(() => ({ dispose: vi.fn() })),
+    InstancedBufferAttribute: vi.fn().mockImplementation((arr: Float32Array, size: number) => ({
+      array: arr,
+      itemSize: size,
+      needsUpdate: false,
+    })),
+    SphereGeometry: vi.fn().mockImplementation(() => {
+      const attributes: Record<string, unknown> = {};
+      return {
+        attributes,
+        setAttribute: vi.fn().mockImplementation((name: string, attr: unknown) => {
+          attributes[name] = attr;
+        }),
+        getAttribute: vi.fn().mockImplementation((name: string) => attributes[name]),
+        dispose: vi.fn(),
+      };
+    }),
+    ShapeGeometry: vi.fn().mockImplementation(() => {
+      const attributes: Record<string, unknown> = {};
+      return {
+        attributes,
+        setAttribute: vi.fn().mockImplementation((name: string, attr: unknown) => {
+          attributes[name] = attr;
+        }),
+        getAttribute: vi.fn().mockImplementation((name: string) => attributes[name]),
+        dispose: vi.fn(),
+      };
+    }),
     Shape: vi.fn().mockImplementation(() => ({
       moveTo: vi.fn(),
       lineTo: vi.fn(),
@@ -260,7 +285,7 @@ import {
   hashStringToIndex,
   brighten,
 } from '../../src/renderer/palette.js';
-import type { GraphData } from '../../src/types.js';
+import type { GraphData, NodeData } from '../../src/types.js';
 
 const autoFor = (type: string) =>
   DEFAULT_PALETTE_32[hashStringToIndex(type, DEFAULT_PALETTE_32.length)];
@@ -505,12 +530,13 @@ describe('SceneController', () => {
     });
   });
 
-  describe('treeFilter', () => {
+  describe('setFilter (domain-agnostic visibility predicate)', () => {
     // The Bible-Graph use case: tree mode should show ONLY people, hiding
     // events / places / clans. The filter is wired on the React layer
-    // (`<InferaGraph treeFilter={...} />`) but the SceneController is the
-    // single source of truth; verify the predicate is applied to both
-    // cards and connectors.
+    // (`<InferaGraph filter={...} />`) but the SceneController is the
+    // single source of truth; verify the predicate is applied to cards,
+    // connectors, AND the graph-mode meshes via per-instance visibility
+    // (no rebuild).
     const mixed: GraphData = {
       nodes: [
         { id: 'noah', attributes: { name: 'Noah', type: 'person' } },
@@ -519,37 +545,46 @@ describe('SceneController', () => {
         { id: 'ararat', attributes: { name: 'Ararat', type: 'place' } },
       ],
       edges: [
-        // father_of: noah -> shem (kept).
+        // father_of: noah -> shem (kept under person-only filter).
         { id: 'p1', sourceId: 'noah', targetId: 'shem', attributes: { type: 'father_of' } },
-        // participant_in: noah -> flood (dropped because flood is filtered).
+        // participant_in: noah -> flood (hidden because flood is filtered).
         { id: 'p2', sourceId: 'noah', targetId: 'flood', attributes: { type: 'participant_in' } },
       ],
     };
 
-    it('passes only filter-passing nodes to TreeNodeMesh on build', async () => {
+    it('builds tree cards for ALL nodes — visibility is applied via setVisibility, not pre-filter', () => {
       seedStore(store, mixed);
       const ctrl = new SceneController({
         store,
         layout: 'tree',
-        treeFilter: (n) => n.attributes.type === 'person',
+        filter: (n) => n.attributes.type === 'person',
       });
       ctrl.attach(container);
       ctrl.syncFromStore();
 
-      // The only Object3D added to the scene under '__tree_nodes__' is the
-      // TreeNodeMesh root Group, whose children are the per-node card
-      // groups. The filter should leave only the two people.
+      // ALL four nodes must have card groups mounted in the scene
+      // (the filter is applied via per-card `group.visible`, not by
+      // skipping cards on build).
       const root = ctrl.getRenderer().getObject('__tree_nodes__') as
-        | { children: Array<{ userData: { nodeId: string } }> }
+        | { children: Array<{ userData: { nodeId: string }; visible?: boolean }> }
         | undefined;
       expect(root).toBeDefined();
       const ids = root!.children.map((c) => c.userData.nodeId).sort();
-      expect(ids).toEqual(['noah', 'shem']);
+      expect(ids).toEqual(['ararat', 'flood', 'noah', 'shem']);
+
+      // The two non-person cards must be hidden via group.visible=false.
+      const visibleById = new Map(
+        root!.children.map((c) => [c.userData.nodeId, c.visible]),
+      );
+      expect(visibleById.get('noah')).toBe(true);
+      expect(visibleById.get('shem')).toBe(true);
+      expect(visibleById.get('flood')).toBe(false);
+      expect(visibleById.get('ararat')).toBe(false);
 
       ctrl.detach();
     });
 
-    it('renders every node when no treeFilter is supplied (back-compat)', () => {
+    it('renders every node when no filter is supplied', () => {
       seedStore(store, mixed);
       const ctrl = new SceneController({ store, layout: 'tree' });
       ctrl.attach(container);
@@ -565,29 +600,127 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('exposes a setter that rebuilds the tree on a runtime filter swap', () => {
+    it('setFilter toggles visibility WITHOUT tearing down + rebuilding tree meshes', () => {
       seedStore(store, mixed);
       const ctrl = new SceneController({ store, layout: 'tree' });
       ctrl.attach(container);
       ctrl.syncFromStore();
 
-      // Swap to a person-only predicate at runtime.
-      ctrl.setTreeFilter((n) => n.attributes.type === 'person');
-      const root = ctrl.getRenderer().getObject('__tree_nodes__') as
-        | { children: Array<{ userData: { nodeId: string } }> }
-        | undefined;
-      const ids = root!.children.map((c) => c.userData.nodeId).sort();
-      expect(ids).toEqual(['noah', 'shem']);
+      // Spy on the private mesh rebuild path to verify it does NOT run
+      // on a filter change.
+      const ctrlAny = ctrl as unknown as {
+        buildGraphMeshes: (...args: unknown[]) => void;
+        buildTreeMeshes: (...args: unknown[]) => void;
+        teardownGraphMeshes: () => void;
+        teardownTreeMeshes: () => void;
+      };
+      const buildGraphSpy = vi.spyOn(ctrlAny, 'buildGraphMeshes');
+      const buildTreeSpy = vi.spyOn(ctrlAny, 'buildTreeMeshes');
+      const teardownGraphSpy = vi.spyOn(ctrlAny, 'teardownGraphMeshes');
+      const teardownTreeSpy = vi.spyOn(ctrlAny, 'teardownTreeMeshes');
 
-      // Clear the filter and confirm everything comes back.
-      ctrl.setTreeFilter(undefined);
-      const root2 = ctrl.getRenderer().getObject('__tree_nodes__') as
-        | { children: Array<{ userData: { nodeId: string } }> }
+      // Swap to a person-only predicate at runtime.
+      ctrl.setFilter((n) => n.attributes.type === 'person');
+
+      const root = ctrl.getRenderer().getObject('__tree_nodes__') as
+        | { children: Array<{ userData: { nodeId: string }; visible?: boolean }> }
         | undefined;
-      const ids2 = root2!.children.map((c) => c.userData.nodeId).sort();
-      expect(ids2).toEqual(['ararat', 'flood', 'noah', 'shem']);
+      // Cards still mounted, but only the two people are visible.
+      const ids = root!.children.map((c) => c.userData.nodeId).sort();
+      expect(ids).toEqual(['ararat', 'flood', 'noah', 'shem']);
+      const visibleById = new Map(
+        root!.children.map((c) => [c.userData.nodeId, c.visible]),
+      );
+      expect(visibleById.get('noah')).toBe(true);
+      expect(visibleById.get('flood')).toBe(false);
+
+      // Clear the filter and confirm everything is shown again.
+      ctrl.setFilter(undefined);
+      const root2 = ctrl.getRenderer().getObject('__tree_nodes__') as
+        | { children: Array<{ userData: { nodeId: string }; visible?: boolean }> }
+        | undefined;
+      const visibleAfterClear = new Map(
+        root2!.children.map((c) => [c.userData.nodeId, c.visible]),
+      );
+      expect(visibleAfterClear.get('flood')).toBe(true);
+      expect(visibleAfterClear.get('ararat')).toBe(true);
+
+      // Critically: filter changes do NOT trigger mesh teardown / rebuild.
+      expect(buildGraphSpy).not.toHaveBeenCalled();
+      expect(buildTreeSpy).not.toHaveBeenCalled();
+      expect(teardownGraphSpy).not.toHaveBeenCalled();
+      expect(teardownTreeSpy).not.toHaveBeenCalled();
+
+      buildGraphSpy.mockRestore();
+      buildTreeSpy.mockRestore();
+      teardownGraphSpy.mockRestore();
+      teardownTreeSpy.mockRestore();
+      ctrl.detach();
+    });
+
+    it('setFilter hides graph-mode node + edge meshes via per-instance alpha', () => {
+      seedStore(store, mixed);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      ctrl.setFilter((n) => n.attributes.type === 'person');
+
+      // Graph node mesh: instanceAlpha buffer should have 1s for noah +
+      // shem (indices 0, 1) and 0s for flood + ararat (indices 2, 3).
+      const ctrlAny = ctrl as unknown as {
+        nodeMesh: { getInstanceAlpha(): { array: Float32Array } | null } | null;
+        edgeMesh: { getMesh(): { geometry: { getAttribute(n: string): { array: Float32Array } } } | null } | null;
+      };
+      const alpha = ctrlAny.nodeMesh?.getInstanceAlpha();
+      expect(alpha).not.toBeNull();
+      expect(alpha!.array[0]).toBeCloseTo(1, 5); // noah
+      expect(alpha!.array[1]).toBeCloseTo(1, 5); // shem
+      expect(alpha!.array[2]).toBeCloseTo(0, 5); // flood
+      expect(alpha!.array[3]).toBeCloseTo(0, 5); // ararat
+
+      // Graph edge mesh: edge p1 (noah↔shem) visible; p2 (noah↔flood) hidden.
+      const colorAttr = ctrlAny.edgeMesh!.getMesh()!.geometry.getAttribute('color');
+      // Edge index 0 (p1) → alpha at offsets 3, 7. Visible.
+      expect(colorAttr.array[3]).toBeCloseTo(1, 5);
+      expect(colorAttr.array[7]).toBeCloseTo(1, 5);
+      // Edge index 1 (p2) → alpha at offsets 11, 15. Hidden.
+      expect(colorAttr.array[11]).toBeCloseTo(0, 5);
+      expect(colorAttr.array[15]).toBeCloseTo(0, 5);
 
       ctrl.detach();
+    });
+
+    it('setFilter is reversible — clearing restores all visibility', () => {
+      seedStore(store, mixed);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      ctrl.setFilter((n) => n.attributes.type === 'person');
+      ctrl.setFilter(undefined);
+
+      const ctrlAny = ctrl as unknown as {
+        nodeMesh: { getInstanceAlpha(): { array: Float32Array } | null } | null;
+      };
+      const alpha = ctrlAny.nodeMesh!.getInstanceAlpha()!;
+      // All four instances back to alpha=1.
+      for (let i = 0; i < 4; i++) {
+        expect(alpha.array[i]).toBeCloseTo(1, 5);
+      }
+      ctrl.detach();
+    });
+
+    it('getFilter returns the active predicate', () => {
+      const ctrl = new SceneController({ store });
+      // Default: trivial accept-all predicate.
+      const f0 = ctrl.getFilter();
+      expect(typeof f0).toBe('function');
+      expect(f0({ id: 'x', attributes: {} } as NodeData)).toBe(true);
+
+      const personOnly = (n: NodeData) => n.attributes.type === 'person';
+      ctrl.setFilter(personOnly);
+      expect(ctrl.getFilter()).toBe(personOnly);
     });
 
     it('keeps the HTML LabelRenderer overlay empty in tree mode', () => {

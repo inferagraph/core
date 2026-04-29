@@ -42,16 +42,20 @@ export interface InferaGraphProps {
    */
   outgoingEdgeLabels?: EdgeLabelMap;
   /**
-   * Optional consumer-supplied predicate used to restrict which nodes are
-   * visible in tree mode. When supplied, only nodes for which the predicate
-   * returns `true` are rendered as cards (and only edges between visible
-   * nodes appear as connectors). Has no effect in graph mode.
+   * Domain-agnostic visibility predicate. When supplied, only nodes for
+   * which the predicate returns `true` are rendered; edges whose source
+   * OR target node is filtered out are hidden too.
    *
-   * Use case: a Bible-Graph-style consumer that wants tree mode to show
-   * ONLY people, hiding places / events / clans, can pass
-   * `(n) => n.attributes.type === 'person'`. Default: no filter.
+   * The same predicate applies in **every** visualization mode — graph,
+   * tree, and any future mode (geospatial / timeline / chord / etc.).
+   * Filter changes are applied as in-place visibility toggles on the
+   * existing GPU buffers — there's no mesh teardown, no rebuild, and
+   * no layout recompute. Hidden nodes keep their layout positions, so
+   * unhiding restores the prior frame instantly.
+   *
+   * Default: no filter (every node visible).
    */
-  treeFilter?: (node: NodeData) => boolean;
+  filter?: (node: NodeData) => boolean;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -67,7 +71,7 @@ interface InferaGraphInnerProps {
   edgeColorFn?: EdgeColorFn;
   incomingEdgeLabels?: EdgeLabelMap;
   outgoingEdgeLabels?: EdgeLabelMap;
-  treeFilter?: (node: NodeData) => boolean;
+  filter?: (node: NodeData) => boolean;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -83,7 +87,7 @@ function InferaGraphInner({
   edgeColorFn,
   incomingEdgeLabels,
   outgoingEdgeLabels,
-  treeFilter,
+  filter,
   className,
   style,
 }: InferaGraphInnerProps): React.JSX.Element {
@@ -133,7 +137,7 @@ function InferaGraphInner({
       edgeColorFn,
       incomingEdgeLabels,
       outgoingEdgeLabels,
-      treeFilter,
+      filter,
     });
     controller.attach(container);
     controllerRef.current = controller;
@@ -200,8 +204,8 @@ function InferaGraphInner({
   useEffect(() => {
     const controller = controllerRef.current;
     if (!controller) return;
-    controller.setTreeFilter(treeFilter);
-  }, [treeFilter]);
+    controller.setFilter(filter);
+  }, [filter]);
 
   return (
     <div
@@ -225,7 +229,7 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     edgeColorFn,
     incomingEdgeLabels,
     outgoingEdgeLabels,
-    treeFilter,
+    filter,
     className,
     style,
   } = props;
@@ -242,7 +246,7 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
         edgeColorFn={edgeColorFn}
         incomingEdgeLabels={incomingEdgeLabels}
         outgoingEdgeLabels={outgoingEdgeLabels}
-        treeFilter={treeFilter}
+        filter={filter}
         className={className}
         style={style}
       />

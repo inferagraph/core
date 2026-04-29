@@ -2,32 +2,52 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // PulseController doesn't import THREE directly, but it does call
 // NodeMesh.updateInstance which does. Mock just enough so the chain runs.
-vi.mock('three', () => ({
-  Vector3: vi.fn().mockImplementation(function (this: { x: number; y: number; z: number }, x?: number, y?: number, z?: number) {
-    this.x = x ?? 0;
-    this.y = y ?? 0;
-    this.z = z ?? 0;
-    return this;
-  }),
-  Quaternion: vi.fn().mockImplementation(() => ({})),
-  Matrix4: vi.fn().mockImplementation(() => ({ compose: vi.fn().mockReturnThis() })),
-  Color: vi.fn().mockImplementation(() => ({})),
-  SphereGeometry: vi.fn().mockImplementation(() => ({ dispose: vi.fn() })),
-  ShapeGeometry: vi.fn().mockImplementation(() => ({ dispose: vi.fn() })),
-  Shape: vi.fn().mockImplementation(() => ({
-    moveTo: vi.fn(), lineTo: vi.fn(), quadraticCurveTo: vi.fn(),
-  })),
-  MeshPhongMaterial: vi.fn().mockImplementation(() => ({ dispose: vi.fn() })),
-  InstancedMesh: vi.fn().mockImplementation((_g, _m, count) => ({
-    count,
-    instanceMatrix: { needsUpdate: false },
-    instanceColor: { needsUpdate: false },
-    setMatrixAt: vi.fn(),
-    setColorAt: vi.fn(),
-    geometry: { dispose: vi.fn() },
-    material: { dispose: vi.fn() },
-  })),
-}));
+vi.mock('three', () => {
+  // Minimal geometry mock — needs `setAttribute` so NodeMesh can attach
+  // its `instanceAlpha` buffer at construction time.
+  const makeGeometry = () => {
+    const attributes: Record<string, unknown> = {};
+    return {
+      attributes,
+      setAttribute: vi.fn().mockImplementation((name: string, attr: unknown) => {
+        attributes[name] = attr;
+      }),
+      getAttribute: vi.fn().mockImplementation((name: string) => attributes[name]),
+      dispose: vi.fn(),
+    };
+  };
+  return {
+    Vector3: vi.fn().mockImplementation(function (this: { x: number; y: number; z: number }, x?: number, y?: number, z?: number) {
+      this.x = x ?? 0;
+      this.y = y ?? 0;
+      this.z = z ?? 0;
+      return this;
+    }),
+    Quaternion: vi.fn().mockImplementation(() => ({})),
+    Matrix4: vi.fn().mockImplementation(() => ({ compose: vi.fn().mockReturnThis() })),
+    Color: vi.fn().mockImplementation(() => ({})),
+    SphereGeometry: vi.fn().mockImplementation(() => makeGeometry()),
+    ShapeGeometry: vi.fn().mockImplementation(() => makeGeometry()),
+    Shape: vi.fn().mockImplementation(() => ({
+      moveTo: vi.fn(), lineTo: vi.fn(), quadraticCurveTo: vi.fn(),
+    })),
+    MeshPhongMaterial: vi.fn().mockImplementation(() => ({ dispose: vi.fn() })),
+    InstancedMesh: vi.fn().mockImplementation((_g, _m, count) => ({
+      count,
+      instanceMatrix: { needsUpdate: false },
+      instanceColor: { needsUpdate: false },
+      setMatrixAt: vi.fn(),
+      setColorAt: vi.fn(),
+      geometry: { dispose: vi.fn() },
+      material: { dispose: vi.fn() },
+    })),
+    InstancedBufferAttribute: vi.fn().mockImplementation((arr: Float32Array, size: number) => ({
+      array: arr,
+      itemSize: size,
+      needsUpdate: false,
+    })),
+  };
+});
 
 import { PulseController } from '../../src/renderer/PulseController.js';
 import { NodeMesh } from '../../src/renderer/NodeMesh.js';

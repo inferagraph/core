@@ -1,7 +1,10 @@
 import * as THREE from 'three';
 import type { Vector3 } from '../types.js';
+import type { VisibilityHost } from './types.js';
 
 /**
+ * @implements {VisibilityHost}
+ *
  * Per-node "card" mesh used by the tree view. Each node renders as a
  * rounded-rectangle plane (translucent dark fill) with a coloured outline
  * matching the node's resolved colour, plus a centred CanvasTexture-backed
@@ -26,7 +29,7 @@ import type { Vector3 } from '../types.js';
  * Hit-testing: each Group stamps its `userData.nodeId` so the
  * {@link Raycaster} can resolve a hit back to the originating node id.
  */
-export class TreeNodeMesh {
+export class TreeNodeMesh implements VisibilityHost {
   /** Card size (world units). Mirrors the SVG mockup's 90×32 proportions. */
   static readonly DEFAULT_WIDTH = 90;
   static readonly DEFAULT_HEIGHT = 32;
@@ -132,9 +135,37 @@ export class TreeNodeMesh {
     return this.root;
   }
 
-  /** Raycast targets — the per-card groups, NOT the outer root. */
+  /**
+   * Raycast targets — the per-card groups, NOT the outer root.
+   *
+   * Hidden cards (their `group.visible === false`, set via
+   * {@link setVisibility}) stay registered as raycast targets but the
+   * raycaster's intersect test naturally rejects invisible Object3Ds, so
+   * filtered-out nodes don't produce hover events.
+   */
   getRaycastTargets(): THREE.Object3D[] {
     return Array.from(this.cards.values()).map((c) => c.group);
+  }
+
+  /**
+   * Toggle per-card visibility WITHOUT teardown or rebuild. For each
+   * card group, set `group.visible = visibleIds.has(nodeId)`. Cards
+   * stay mounted in the scene either way — they're just rendered or
+   * skipped per frame based on the THREE.Object3D `visible` flag.
+   *
+   * Note: `build()` now creates cards for ALL nodes the host hands in
+   * (the SceneController previously pre-filtered the entries before
+   * calling build; that pre-filter was removed once visibility moved
+   * here). This means tree-mode initial-render cost scales with the
+   * full node count rather than the post-filter subset. For typical
+   * Bible-Graph datasets (≤ ~200 people) this is negligible; if
+   * larger trees become common in future, an off-screen LOD path can
+   * be added without changing the public API.
+   */
+  setVisibility(visibleIds: ReadonlySet<string>): void {
+    for (const [id, card] of this.cards) {
+      card.group.visible = visibleIds.has(id);
+    }
   }
 
   dispose(): void {
