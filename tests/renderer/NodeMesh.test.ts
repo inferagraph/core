@@ -366,6 +366,55 @@ describe('NodeMesh', () => {
     });
   });
 
+  // Regression: 0.1.25 patched the wrong fragment chunk
+  // (`<output_fragment>`) which Three.js r150+ renamed to
+  // `<opaque_fragment>`. The String#replace silently no-op'd, the alpha
+  // multiplication was never injected, and instances stayed opaque
+  // regardless of the per-instance alpha buffer. The fix is to inject
+  // against `<opaque_fragment>` in the fragment shader.
+  describe('shader patch (instanceAlpha → fragment alpha)', () => {
+    type ShaderLike = { vertexShader: string; fragmentShader: string };
+    type MaterialLike = { onBeforeCompile?: (shader: ShaderLike) => void };
+
+    it('installs an onBeforeCompile callback that injects the alpha multiplication', () => {
+      mesh.createInstancedMesh(2);
+      const calls = (THREE.MeshPhongMaterial as unknown as ReturnType<typeof vi.fn>).mock.results;
+      const material = calls[calls.length - 1].value as MaterialLike;
+      expect(typeof material.onBeforeCompile).toBe('function');
+
+      const shader: ShaderLike = {
+        vertexShader: 'void main() {\n#include <begin_vertex>\n}',
+        fragmentShader: 'void main() {\n#include <opaque_fragment>\n}',
+      };
+      material.onBeforeCompile!(shader);
+
+      // Vertex: declares attribute + varying, forwards instanceAlpha.
+      expect(shader.vertexShader).toContain('attribute float instanceAlpha;');
+      expect(shader.vertexShader).toContain('varying float vInstanceAlpha;');
+      expect(shader.vertexShader).toContain('vInstanceAlpha = instanceAlpha;');
+
+      // Fragment: declares the varying and multiplies into gl_FragColor.a.
+      expect(shader.fragmentShader).toContain('varying float vInstanceAlpha;');
+      expect(shader.fragmentShader).toContain('gl_FragColor.a *= vInstanceAlpha;');
+    });
+
+    it('targets <opaque_fragment> (the Three.js r150+ chunk name), not the legacy <output_fragment>', () => {
+      mesh.createInstancedMesh(2);
+      const calls = (THREE.MeshPhongMaterial as unknown as ReturnType<typeof vi.fn>).mock.results;
+      const material = calls[calls.length - 1].value as MaterialLike;
+
+      // Negative test: a shader with the OLD chunk name should NOT receive
+      // the alpha-multiplication injection. (The varying declaration is
+      // always prepended, so we only check for the multiplication line.)
+      const legacyShader: ShaderLike = {
+        vertexShader: 'void main() {\n#include <begin_vertex>\n}',
+        fragmentShader: 'void main() {\n#include <output_fragment>\n}',
+      };
+      material.onBeforeCompile!(legacyShader);
+      expect(legacyShader.fragmentShader).not.toContain('gl_FragColor.a *= vInstanceAlpha;');
+    });
+  });
+
   describe('getters', () => {
     it('should return stored renderNode function via getRenderNode', () => {
       const renderNode = vi.fn();

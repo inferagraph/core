@@ -739,6 +739,73 @@ describe('SceneController', () => {
 
       ctrl.detach();
     });
+
+    // Regression: 0.1.25 setFilter updated visibility but did NOT reframe
+    // the camera. When biblegraph switched graph→tree, the layout effect
+    // ran first (frameToFit on stale visibility) then the filter effect
+    // updated visibility — leaving the tree shifted off-screen because
+    // the camera was centred on all 18 nodes while only 13 were visible.
+    // Fix: setFilter must call frameToFit on the visible subset after
+    // applyFilterMask. (Not from inside applyFilterMask itself, which is
+    // also invoked by syncFromStore / setLayout / build* — those callers
+    // already frame.)
+    it('setFilter reframes the camera on the visible subset (tree mode)', () => {
+      seedStore(store, mixed);
+      const ctrl = new SceneController({ store, layout: 'tree' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // @ts-expect-error — accessing private for a behaviour assertion
+      const frameSpy = vi.spyOn(ctrl, 'frameToFit');
+
+      ctrl.setFilter((n) => n.attributes.type === 'person');
+
+      // Exactly one reframe per setFilter call.
+      expect(frameSpy).toHaveBeenCalledTimes(1);
+      // The positions Map handed to frameToFit must be restricted to the
+      // visible subset (noah + shem) — NOT the full set of four.
+      const arg = frameSpy.mock.calls[0][0] as Map<string, unknown>;
+      const ids = Array.from(arg.keys()).sort();
+      expect(ids).toEqual(['noah', 'shem']);
+
+      frameSpy.mockRestore();
+      ctrl.detach();
+    });
+
+    it('setFilter reframes the camera on the visible subset (graph mode)', () => {
+      seedStore(store, mixed);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // @ts-expect-error — accessing private for a behaviour assertion
+      const frameSpy = vi.spyOn(ctrl, 'frameToFit');
+
+      ctrl.setFilter((n) => n.attributes.type === 'person');
+
+      expect(frameSpy).toHaveBeenCalledTimes(1);
+      const arg = frameSpy.mock.calls[0][0] as Map<string, unknown>;
+      const ids = Array.from(arg.keys()).sort();
+      expect(ids).toEqual(['noah', 'shem']);
+
+      frameSpy.mockRestore();
+      ctrl.detach();
+    });
+
+    it('setFilter does NOT crash or call frameToFit when called before any layout has run', () => {
+      // Constructor-time predicate path: setFilter runs before
+      // syncFromStore / attach. The layout cache is empty and getPositions
+      // returns nothing, so the reframe must be skipped — the eventual
+      // syncFromStore frames using the now-correct visibleNodeIds.
+      const ctrl = new SceneController({ store });
+      // @ts-expect-error — accessing private for a behaviour assertion
+      const frameSpy = vi.spyOn(ctrl, 'frameToFit');
+
+      expect(() => ctrl.setFilter((n) => n.attributes.type === 'person')).not.toThrow();
+      expect(frameSpy).not.toHaveBeenCalled();
+
+      frameSpy.mockRestore();
+    });
   });
 
   describe('lazy layout dispatch', () => {

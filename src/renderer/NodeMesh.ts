@@ -156,18 +156,41 @@ export class NodeMesh implements VisibilityHost {
     // tests can assert on the buffer contents directly without
     // exercising the shader.
     this.material.onBeforeCompile = (shader) => {
+      // Vertex: attach the per-instance alpha attribute and forward it to
+      // the fragment shader as a varying. `<begin_vertex>` is a stable
+      // chunk name across recent Three.js versions.
+      const vertexInjection = '#include <begin_vertex>';
+      const patchedVertex = shader.vertexShader.replace(
+        vertexInjection,
+        `${vertexInjection}\nvInstanceAlpha = instanceAlpha;`,
+      );
+      if (patchedVertex === shader.vertexShader) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[NodeMesh] vertex shader chunk <begin_vertex> not found — instance visibility patch did not apply.',
+        );
+      }
       shader.vertexShader =
         `attribute float instanceAlpha;\nvarying float vInstanceAlpha;\n` +
-        shader.vertexShader.replace(
-          '#include <begin_vertex>',
-          '#include <begin_vertex>\nvInstanceAlpha = instanceAlpha;',
+        patchedVertex;
+
+      // Fragment: multiply the final fragment alpha by the per-instance
+      // varying. Three.js r150+ renamed `<output_fragment>` to
+      // `<opaque_fragment>` (the chunk that emits the final
+      // gl_FragColor); use the current name here.
+      const fragmentInjection = '#include <opaque_fragment>';
+      const patchedFragment = shader.fragmentShader.replace(
+        fragmentInjection,
+        `${fragmentInjection}\ngl_FragColor.a *= vInstanceAlpha;`,
+      );
+      if (patchedFragment === shader.fragmentShader) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[NodeMesh] fragment shader chunk <opaque_fragment> not found — instance visibility patch did not apply.',
         );
+      }
       shader.fragmentShader =
-        `varying float vInstanceAlpha;\n` +
-        shader.fragmentShader.replace(
-          '#include <output_fragment>',
-          '#include <output_fragment>\ngl_FragColor.a *= vInstanceAlpha;',
-        );
+        `varying float vInstanceAlpha;\n` + patchedFragment;
     };
   }
 

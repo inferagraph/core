@@ -78,4 +78,24 @@ export class LabelRenderer {
     }
     this.labels.clear();
   }
+
+  /**
+   * Toggle each label's visibility based on the supplied id set. Labels
+   * whose id is in `visibleIds` are shown (`display = ''`); others are
+   * hidden (`display = 'none'`). This is the LabelRenderer counterpart to
+   * the per-instance alpha buffer in {@link NodeMesh.setVisibility} —
+   * `SceneController.applyFilterMask` calls both so HTML labels stay in
+   * lock-step with WebGL node visibility.
+   *
+   * Custom-style mode owns its own `display` discipline (labels are
+   * already hidden by {@link setStyle} when the style switched to
+   * `'custom'`); this method is a no-op in that mode so we don't fight
+   * with that behavior.
+   */
+  setVisibility(visibleIds: ReadonlySet<string>): void {
+    if (this.style === 'custom') return;
+    for (const [id, el] of this.labels) {
+      el.style.display = visibleIds.has(id) ? '' : 'none';
+    }
+  }
 }

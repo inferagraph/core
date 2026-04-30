@@ -1468,6 +1468,34 @@ export class SceneController {
     this.nodeFilter = predicate ?? (() => true);
     this.recomputeVisibility();
     this.applyFilterMask();
+
+    // A filter change genuinely changes which nodes are visible, so the
+    // camera should reframe on the visible subset. Without this, when
+    // both `layout` and `filter` props change in the same React render
+    // (e.g. graph→tree on the Bible Graph app) the layout effect runs
+    // first against stale visibility and the tree shifts off-screen.
+    //
+    // This is a camera move only — `applyFilterMask` already pushed the
+    // new visibility to the GPU; nothing is rebuilt or recomputed here.
+    //
+    // `applyFilterMask` is also called from `buildGraphMeshes` /
+    // `buildTreeMeshes` / `syncFromStore` / `setLayout`, all of which
+    // already call `frameToFit` themselves — so the reframe lives at
+    // the `setFilter` entry point only, never inside `applyFilterMask`.
+    //
+    // Edge case: if `setFilter` is called before any layout has been
+    // computed (e.g. constructor-time predicate before
+    // `syncFromStore`), the layout cache is empty and `getPositions`
+    // returns nothing meaningful. Skip the reframe in that case — the
+    // eventual `syncFromStore` will frame correctly using the
+    // now-correct `visibleNodeIds`.
+    if (this.nodeIdsByIndex.length === 0) return;
+    const positions = this.layoutEngine.animated
+      ? this.layoutEngine.getPositions()
+      : this.layoutCache.get(this.layoutMode);
+    if (positions && positions.size > 0) {
+      this.frameToFit(this.framingPositions(positions));
+    }
   }
 
   /** Active visibility predicate (for tests + introspection). */
@@ -1519,6 +1547,10 @@ export class SceneController {
     this.edgeMesh?.setVisibility(this.visibleEdgeIds);
     this.treeNodeMesh?.setVisibility(this.visibleNodeIds);
     this.treeEdgeMesh?.setVisibility(this.visibleNodeIds);
+    // HTML label overlay must follow the same predicate. Without this,
+    // graph-mode labels stayed in the DOM with `display: ''` even when
+    // their owning instance was hidden via per-instance alpha.
+    this.labelRenderer.setVisibility(this.visibleNodeIds);
   }
 
   /**

@@ -136,6 +136,50 @@ describe('LabelRenderer', () => {
     });
   });
 
+  describe('setVisibility', () => {
+    it('hides labels whose id is not in the visible set', () => {
+      renderer.addLabel('a', 'Alpha');
+      renderer.addLabel('b', 'Beta');
+      renderer.addLabel('c', 'Gamma');
+
+      renderer.setVisibility(new Set(['a']));
+
+      expect(renderer.getLabel('a')!.style.display).toBe('');
+      expect(renderer.getLabel('b')!.style.display).toBe('none');
+      expect(renderer.getLabel('c')!.style.display).toBe('none');
+    });
+
+    it('restores all labels when the visible set is the full id set', () => {
+      renderer.addLabel('a', 'Alpha');
+      renderer.addLabel('b', 'Beta');
+      renderer.addLabel('c', 'Gamma');
+
+      // First hide some.
+      renderer.setVisibility(new Set(['a']));
+      expect(renderer.getLabel('b')!.style.display).toBe('none');
+
+      // Then show everyone again.
+      renderer.setVisibility(new Set(['a', 'b', 'c']));
+      expect(renderer.getLabel('a')!.style.display).toBe('');
+      expect(renderer.getLabel('b')!.style.display).toBe('');
+      expect(renderer.getLabel('c')!.style.display).toBe('');
+    });
+
+    it('is a no-op when the style is custom (custom mode owns its own display discipline)', () => {
+      renderer.addLabel('a', 'Alpha');
+      renderer.addLabel('b', 'Beta');
+      // Switch to custom — both labels are hidden by setStyle.
+      renderer.setStyle('custom');
+      expect(renderer.getLabel('a')!.style.display).toBe('none');
+      expect(renderer.getLabel('b')!.style.display).toBe('none');
+
+      // setVisibility must NOT clobber the custom-mode hides.
+      renderer.setVisibility(new Set(['a', 'b']));
+      expect(renderer.getLabel('a')!.style.display).toBe('none');
+      expect(renderer.getLabel('b')!.style.display).toBe('none');
+    });
+  });
+
   describe('custom style', () => {
     it('should not add label when style is custom', () => {
       renderer.setStyle('custom');
