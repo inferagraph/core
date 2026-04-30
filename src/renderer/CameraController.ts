@@ -32,6 +32,15 @@ export class CameraController {
   private initialUp: THREE.Vector3 | null = null;
   private initialTarget: THREE.Vector3 | null = null;
 
+  /**
+   * Active focus animation, if any. Updated every frame by
+   * {@link tickFocus} (called from SceneController's tick). `null` when
+   * no animation is running. Calling {@link focusOn} mid-animation
+   * smoothly retargets — the new animation interpolates from the
+   * current live state, not from the previous animation's start.
+   */
+  private focusAnimation: FocusAnimation | null = null;
+
   attach(container: HTMLElement, camera: THREE.Camera): void {
     this.container = container;
     this.camera = camera;
@@ -143,7 +152,84 @@ export class CameraController {
    * pointer is idle.
    */
   update(): void {
+    this.tickFocus();
     this.controls?.update();
+  }
+
+  /**
+   * Begin (or retarget) a smooth-eased animation of the camera to focus
+   * on `target`. The animation:
+   *   - Lerps the orbit target from its current value to `target` over
+   *     `duration` ms (default 600ms).
+   *   - Lerps the orbit radius from its current value to `radius`
+   *     (default = current radius * 0.6 — frames the focused node and
+   *     its 1-hop neighbourhood without excessive zoom).
+   *   - Uses cubic in/out easing.
+   *
+   * Calling `focusOn` mid-animation resets the animation's start state
+   * to the live camera + the previous animation's progress is dropped.
+   * The result is a smooth retarget without any discontinuity.
+   *
+   * No-op when not attached.
+   */
+  focusOn(
+    target: Vector3,
+    options?: { duration?: number; radius?: number },
+  ): void {
+    if (!this.camera || !this.controls) return;
+    const duration = Math.max(1, options?.duration ?? 600);
+    const liveTarget = this.getTarget();
+    const liveRadius = this.getRadius();
+    const targetRadius = options?.radius ?? Math.max(20, liveRadius * 0.6);
+
+    this.focusAnimation = {
+      startTime: now(),
+      duration,
+      fromTarget: { ...liveTarget },
+      toTarget: { ...target },
+      fromRadius: liveRadius,
+      toRadius: targetRadius,
+    };
+  }
+
+  /**
+   * `true` when {@link focusOn} has scheduled an animation that hasn't
+   * yet completed. Exposed for tests + advanced consumers; the renderer
+   * itself just calls {@link update} each frame.
+   */
+  isFocusAnimationActive(): boolean {
+    return this.focusAnimation !== null;
+  }
+
+  /**
+   * Advance the active focus animation by one frame. Pure interpolation
+   * + write-through — no allocation in the hot path. Resolves and
+   * clears the animation when it reaches t=1.
+   */
+  private tickFocus(): void {
+    const anim = this.focusAnimation;
+    if (!anim) return;
+    if (!this.camera || !this.controls) {
+      this.focusAnimation = null;
+      return;
+    }
+    const elapsed = now() - anim.startTime;
+    const t = Math.min(1, Math.max(0, elapsed / anim.duration));
+    const eased = easeInOutCubic(t);
+
+    const tx = lerp(anim.fromTarget.x, anim.toTarget.x, eased);
+    const ty = lerp(anim.fromTarget.y, anim.toTarget.y, eased);
+    const tz = lerp(anim.fromTarget.z, anim.toTarget.z, eased);
+    const r = lerp(anim.fromRadius, anim.toRadius, eased);
+
+    this.target = { x: tx, y: ty, z: tz };
+    this.controls.target.set(tx, ty, tz);
+    this.radius = Math.max(1, r);
+    this.placeCameraAtRadius();
+
+    if (t >= 1) {
+      this.focusAnimation = null;
+    }
   }
 
   /**
@@ -299,6 +385,15 @@ export class CameraController {
   }
 
   /**
+   * Cancel any active focus animation. Used by SceneController when an
+   * external action (mode toggle, syncFromStore) supersedes a pending
+   * focus.
+   */
+  cancelFocus(): void {
+    this.focusAnimation = null;
+  }
+
+  /**
    * Position the camera at `this.radius` units from the target, along the
    * current look direction. If the camera is currently coincident with the
    * target, default to the +Z axis so we don't divide by zero.
@@ -318,4 +413,37 @@ export class CameraController {
     this.camera.position.set(t.x + eye.x, t.y + eye.y, t.z + eye.z);
     this.camera.lookAt(new THREE.Vector3(t.x, t.y, t.z));
   }
+}
+
+/** Interpolation state for an active focus animation. */
+interface FocusAnimation {
+  startTime: number;
+  duration: number;
+  fromTarget: Vector3;
+  toTarget: Vector3;
+  fromRadius: number;
+  toRadius: number;
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+/**
+ * Smooth in/out cubic easing. Identity at t=0 and t=1, accelerates from
+ * 0 to 0.5, decelerates from 0.5 to 1.
+ */
+function easeInOutCubic(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/**
+ * Monotonic time source. Uses `performance.now()` when available (jsdom +
+ * browsers), falls back to `Date.now()` (older Node test runtimes).
+ */
+function now(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
 }

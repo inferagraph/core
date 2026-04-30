@@ -21,6 +21,7 @@ import {
   type TreeEdgeSegment,
 } from './TreeEdgeMesh.js';
 import { LabelRenderer } from './LabelRenderer.js';
+import { AnnotationRenderer } from './AnnotationRenderer.js';
 import { Raycaster } from './Raycaster.js';
 import { TooltipOverlay } from '../overlay/TooltipOverlay.js';
 import {
@@ -276,6 +277,7 @@ export class SceneController {
   private readonly renderer = new WebGLRenderer();
   private readonly cameraController = new CameraController();
   private readonly labelRenderer = new LabelRenderer();
+  private readonly annotationRenderer = new AnnotationRenderer();
   private readonly raycaster = new Raycaster();
   private readonly tooltipOverlay = new TooltipOverlay();
   private readonly colorResolver: NodeColorResolver;
@@ -284,6 +286,13 @@ export class SceneController {
 
   private container: HTMLElement | null = null;
   private labelOverlay: HTMLElement | null = null;
+  private annotationOverlay: HTMLElement | null = null;
+  /**
+   * Highlight set dispatched to every mounted mesh's `setHighlight`
+   * each time {@link applyHighlightMask} runs. Empty = baseline (no
+   * dim). Same shape as visibility — uniform across modes.
+   */
+  private highlightIds: Set<string> = new Set();
 
   private nodeMesh: NodeMesh | null = null;
   private edgeMesh: EdgeMesh | null = null;
@@ -505,6 +514,18 @@ export class SceneController {
     container.appendChild(this.labelOverlay);
     this.labelRenderer.attach(this.labelOverlay);
 
+    // Annotation overlay — sibling of the label overlay; lives in its own
+    // div so styling / pointer-events can differ from labels (annotations
+    // are interactive).
+    this.annotationOverlay = document.createElement('div');
+    this.annotationOverlay.className = 'ig-annotation-overlay';
+    this.annotationOverlay.style.position = 'absolute';
+    this.annotationOverlay.style.inset = '0';
+    this.annotationOverlay.style.pointerEvents = 'none';
+    this.annotationOverlay.style.overflow = 'hidden';
+    container.appendChild(this.annotationOverlay);
+    this.annotationRenderer.attach(this.annotationOverlay);
+
     // Tooltip overlay sits on top.
     this.tooltipOverlay.attach(container);
     if (this.tooltip) {
@@ -537,11 +558,16 @@ export class SceneController {
     this.renderer.removeTickCallback(this.tickBound);
     this.cameraController.detach();
     this.labelRenderer.clear();
+    this.annotationRenderer.detach();
     this.tooltipOverlay.detach();
 
     if (this.labelOverlay) {
       this.labelOverlay.remove();
       this.labelOverlay = null;
+    }
+    if (this.annotationOverlay) {
+      this.annotationOverlay.remove();
+      this.annotationOverlay = null;
     }
 
     this.renderer.detach();
@@ -555,6 +581,7 @@ export class SceneController {
     this.baseColorsByIndex = [];
     this.visibleNodeIds = new Set();
     this.visibleEdgeIds = new Set();
+    this.highlightIds = new Set();
     this.hoveredIndex = null;
     this.pointerActive = false;
     this.pulseController.reset();
@@ -712,6 +739,17 @@ export class SceneController {
       const edgeMesh = new EdgeMesh();
       edgeMesh.createLineSegments(edges.length);
       edgeMesh.setEdgeIds(this.edgeIdsByIndex);
+      // Endpoint mapping powers `setHighlight` (an edge's highlight
+      // state depends on whether BOTH of its endpoint nodes are
+      // highlighted). The visibility path uses the edge-id set so it
+      // doesn't need this; but feeding both keeps the mesh's two
+      // hosts (VisibilityHost + HighlightHost) self-contained.
+      edgeMesh.setEdgeEndpoints(
+        this.edgeEndpoints.map((ep) => ({
+          sourceId: ep.sourceId,
+          targetId: ep.targetId,
+        })),
+      );
       // Index endpoint nodes by id so we can hand the resolver the
       // already-resolved source / target colours from `baseColorsByIndex`
       // — picking the same hex {@link NodeColorResolver.resolve} returned
@@ -1229,6 +1267,11 @@ export class SceneController {
     // it through the orthographic camera would otherwise collapse every
     // label to the screen origin.
     if (this.showLabels && this.layoutMode !== 'tree') this.projectLabels();
+    // Annotations always project — they're host-driven so the overlay
+    // shouldn't depend on the label setting. Projection works in both
+    // graph (perspective) and tree (orthographic) modes since
+    // `Vector3.project` is camera-type-agnostic.
+    if (this.annotationRenderer.getCount() > 0) this.projectAnnotations();
 
     // Update hover state if pointer is over the canvas.
     if (this.enableHover && this.pointerActive) this.updateHover();
@@ -1279,6 +1322,47 @@ export class SceneController {
       const x = this._projectVec.x * halfW + halfW;
       const y = -this._projectVec.y * halfH + halfH;
       this.labelRenderer.updatePosition(id, x, y);
+    }
+  }
+
+  /**
+   * Project the world-space position of every annotated node into
+   * screen space and push the result into the annotation renderer. The
+   * AnnotationRenderer holds its own DOM elements; this method just
+   * keeps their `transform: translate(...)` in sync with the camera.
+   *
+   * Projection works in both graph (perspective) and tree
+   * (orthographic) modes — `Vector3.project` is camera-type-agnostic.
+   *
+   * Looks up positions from the layout engine for animated layouts and
+   * the layout cache for static ones, mirroring {@link paintNode}.
+   */
+  private projectAnnotations(): void {
+    if (!this.container) return;
+    const camera = this.renderer.getCamera();
+    if (!camera) return;
+
+    const ids = this.annotationRenderer.getAnnotatedNodeIds();
+    if (ids.length === 0) return;
+
+    const positions = this.layoutEngine.animated
+      ? this.layoutEngine.getPositions()
+      : this.layoutCache.get(this.layoutMode);
+    if (!positions || positions.size === 0) return;
+
+    const width = this.container.clientWidth || 1;
+    const height = this.container.clientHeight || 1;
+    const halfW = width / 2;
+    const halfH = height / 2;
+
+    for (const id of ids) {
+      const pos = positions.get(id);
+      if (!pos) continue;
+      this._projectVec.set(pos.x, pos.y, pos.z);
+      this._projectVec.project(camera);
+      const x = this._projectVec.x * halfW + halfW;
+      const y = -this._projectVec.y * halfH + halfH;
+      this.annotationRenderer.updatePosition(id, x, y);
     }
   }
 
@@ -1551,6 +1635,82 @@ export class SceneController {
     // graph-mode labels stayed in the DOM with `display: ''` even when
     // their owning instance was hidden via per-instance alpha.
     this.labelRenderer.setVisibility(this.visibleNodeIds);
+    // Visibility may have shadowed a previously-set highlight (e.g. a
+    // mode toggle rebuilds the meshes); re-dispatch it so the freshly
+    // built buffers carry the active highlight.
+    this.applyHighlightMask();
+  }
+
+  /**
+   * Replace the active highlight set. Same uniform-dispatch contract as
+   * {@link setFilter}: every mounted mesh class implementing
+   * {@link HighlightHost} receives the new set, regardless of viz mode.
+   * An empty set restores baseline (no dim).
+   *
+   * Highlight composes with visibility — a hidden node stays hidden
+   * even when "highlighted." This is intentional: visibility is the
+   * stronger constraint.
+   */
+  setHighlight(ids: ReadonlySet<string>): void {
+    this.highlightIds = new Set(ids);
+    this.applyHighlightMask();
+  }
+
+  /** Active highlight set (for tests + introspection). */
+  getHighlight(): ReadonlySet<string> {
+    return this.highlightIds;
+  }
+
+  /**
+   * Dispatch the cached highlight set to every mounted mesh class
+   * implementing {@link HighlightHost}. Mirror of
+   * {@link applyFilterMask}.
+   */
+  private applyHighlightMask(): void {
+    this.nodeMesh?.setHighlight(this.highlightIds);
+    this.edgeMesh?.setHighlight(this.highlightIds);
+    this.treeNodeMesh?.setHighlight(this.highlightIds);
+    this.treeEdgeMesh?.setHighlight(this.highlightIds);
+  }
+
+  /**
+   * Animate the camera to focus on `nodeId`. Looks up the node's
+   * position from the active layout (live for animated layouts, cached
+   * for static layouts) and hands it to
+   * {@link CameraController.focusOn}.
+   *
+   * No-op when the node is unknown or no layout has run yet.
+   */
+  focusOn(nodeId: string): void {
+    const idx = this.nodeIdsByIndex.indexOf(nodeId);
+    if (idx < 0) return;
+    const positions = this.layoutEngine.animated
+      ? this.layoutEngine.getPositions()
+      : this.layoutCache.get(this.layoutMode);
+    const pos = positions?.get(nodeId);
+    if (!pos) return;
+    this.cameraController.focusOn(pos);
+  }
+
+  /**
+   * Attach a callout to a node via the {@link AnnotationRenderer}. Same
+   * uniform-dispatch pattern as the other tool-call sinks.
+   */
+  annotate(nodeId: string, text: string): void {
+    this.annotationRenderer.annotate(nodeId, text);
+  }
+
+  /**
+   * Clear the callout(s) on a node, or all callouts when `nodeId` is
+   * omitted.
+   */
+  clearAnnotations(nodeId?: string): void {
+    this.annotationRenderer.clearAnnotations(nodeId);
+  }
+
+  /** The annotation renderer (exposed for tests + advanced consumers). */
+  getAnnotationRenderer(): AnnotationRenderer {
+    return this.annotationRenderer;
   }
 
   /**

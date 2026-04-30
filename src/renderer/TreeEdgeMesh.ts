@@ -1,6 +1,9 @@
 import * as THREE from 'three';
 import type { Vector3 } from '../types.js';
-import type { VisibilityHost } from './types.js';
+import type { HighlightHost, VisibilityHost } from './types.js';
+
+/** Alpha applied to non-highlighted tree connectors. */
+const TREE_EDGE_DIM_ALPHA = 0.15;
 
 /**
  * Single straight line segment fed to {@link TreeEdgeMesh.build}. Each
@@ -199,8 +202,9 @@ export function buildTreeEdgeSegments(
 
 /**
  * @implements {VisibilityHost}
+ * @implements {HighlightHost}
  */
-export class TreeEdgeMesh implements VisibilityHost {
+export class TreeEdgeMesh implements VisibilityHost, HighlightHost {
   private lineSegments: THREE.LineSegments | null = null;
   private geometry: THREE.BufferGeometry | null = null;
   private material: THREE.LineBasicMaterial | null = null;
@@ -220,6 +224,10 @@ export class TreeEdgeMesh implements VisibilityHost {
    * connectors recede from the cards without disappearing on dark themes.
    */
   private opacity = 0.35;
+  /** Last visibility set seen; null = "no visibility filter applied yet". */
+  private visibleIds: ReadonlySet<string> | null = null;
+  /** Last highlight set seen. Empty = baseline. */
+  private highlightIds: ReadonlySet<string> = new Set();
 
   /**
    * (Re)build the line geometry from `segments`. Replaces any previous
@@ -303,20 +311,49 @@ export class TreeEdgeMesh implements VisibilityHost {
    * No-op if the mesh hasn't been built yet.
    */
   setVisibility(visibleNodeIds: ReadonlySet<string>): void {
+    this.visibleIds = visibleNodeIds;
+    this.recomputeAlpha();
+  }
+
+  /**
+   * Highlight tree connectors. A connector keeps full alpha when BOTH of
+   * its endpoint nodes are in `highlightIds`; otherwise it dims to
+   * {@link TREE_EDGE_DIM_ALPHA}. Empty set = baseline. Visibility wins.
+   */
+  setHighlight(highlightIds: ReadonlySet<string>): void {
+    this.highlightIds = highlightIds;
+    this.recomputeAlpha();
+  }
+
+  private recomputeAlpha(): void {
     if (!this.geometry) return;
     if (this.segmentCount === 0) return;
     const colorAttr = this.geometry.getAttribute('color');
     if (!colorAttr) return;
     const array = colorAttr.array as Float32Array;
+    const hasVisibility = this.visibleIds !== null;
+    const visible = this.visibleIds;
+    const hasHighlight = this.highlightIds.size > 0;
     for (let i = 0; i < this.segmentCount; i++) {
       const ep = this.segmentEndpoints[i];
       let alpha = 1;
       if (ep && (ep.sourceNodeId !== undefined || ep.targetNodeId !== undefined)) {
-        const sourceVisible =
-          ep.sourceNodeId === undefined || visibleNodeIds.has(ep.sourceNodeId);
-        const targetVisible =
-          ep.targetNodeId === undefined || visibleNodeIds.has(ep.targetNodeId);
-        alpha = sourceVisible && targetVisible ? 1 : 0;
+        if (hasVisibility) {
+          const sourceVisible =
+            ep.sourceNodeId === undefined || visible!.has(ep.sourceNodeId);
+          const targetVisible =
+            ep.targetNodeId === undefined || visible!.has(ep.targetNodeId);
+          if (!(sourceVisible && targetVisible)) alpha = 0;
+        }
+        if (alpha > 0 && hasHighlight) {
+          const sourceHi =
+            ep.sourceNodeId === undefined ||
+            this.highlightIds.has(ep.sourceNodeId);
+          const targetHi =
+            ep.targetNodeId === undefined ||
+            this.highlightIds.has(ep.targetNodeId);
+          if (!(sourceHi && targetHi)) alpha = TREE_EDGE_DIM_ALPHA;
+        }
       }
       const offset = i * 8;
       array[offset + 3] = alpha;
@@ -350,5 +387,7 @@ export class TreeEdgeMesh implements VisibilityHost {
     this.lineSegments = null;
     this.segmentCount = 0;
     this.segmentEndpoints = [];
+    this.visibleIds = null;
+    this.highlightIds = new Set();
   }
 }

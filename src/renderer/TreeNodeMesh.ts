@@ -1,6 +1,12 @@
 import * as THREE from 'three';
 import type { Vector3 } from '../types.js';
-import type { VisibilityHost } from './types.js';
+import type { HighlightHost, VisibilityHost } from './types.js';
+
+/**
+ * Multiplier applied to fill / outline / label opacity on non-
+ * highlighted cards when a non-empty highlight set is active.
+ */
+const TREE_DIM_FACTOR = 0.3;
 
 /**
  * @implements {VisibilityHost}
@@ -29,7 +35,7 @@ import type { VisibilityHost } from './types.js';
  * Hit-testing: each Group stamps its `userData.nodeId` so the
  * {@link Raycaster} can resolve a hit back to the originating node id.
  */
-export class TreeNodeMesh implements VisibilityHost {
+export class TreeNodeMesh implements VisibilityHost, HighlightHost {
   /** Card size (world units). Mirrors the SVG mockup's 90×32 proportions. */
   static readonly DEFAULT_WIDTH = 90;
   static readonly DEFAULT_HEIGHT = 32;
@@ -64,6 +70,8 @@ export class TreeNodeMesh implements VisibilityHost {
    */
   private root: THREE.Group | null = null;
   private cards = new Map<string, TreeCardEntry>();
+  /** Highlight set; empty = baseline. */
+  private highlightIds: ReadonlySet<string> = new Set();
 
   constructor(options?: {
     width?: number;
@@ -166,6 +174,38 @@ export class TreeNodeMesh implements VisibilityHost {
     for (const [id, card] of this.cards) {
       card.group.visible = visibleIds.has(id);
     }
+    // Re-apply highlight in case visibility changed which cards are
+    // mounted as visible. Highlight reads from `cards` directly so
+    // restoring or hiding doesn't need a separate pass; calling
+    // applyHighlight idempotently is cheap.
+    this.applyHighlight();
+  }
+
+  /**
+   * Emphasize a subset of cards. Non-matching visible cards drop their
+   * fill / outline / label opacity by {@link TREE_DIM_FACTOR}; matching
+   * cards (and the empty-set baseline) keep their default opacity.
+   * Hidden cards stay hidden — visibility wins over highlight.
+   */
+  setHighlight(highlightIds: ReadonlySet<string>): void {
+    this.highlightIds = highlightIds;
+    this.applyHighlight();
+  }
+
+  private applyHighlight(): void {
+    const hasHighlight = this.highlightIds.size > 0;
+    for (const [id, card] of this.cards) {
+      const dim = hasHighlight && !this.highlightIds.has(id);
+      const fillOpacity = dim
+        ? this.fillOpacity * TREE_DIM_FACTOR
+        : this.fillOpacity;
+      const lineOpacity = dim ? TREE_DIM_FACTOR : 1.0;
+      card.fillMaterial.opacity = fillOpacity;
+      card.outlineMaterial.opacity = lineOpacity;
+      if (card.labelMaterial) {
+        card.labelMaterial.opacity = lineOpacity;
+      }
+    }
   }
 
   dispose(): void {
@@ -180,6 +220,7 @@ export class TreeNodeMesh implements VisibilityHost {
     }
     this.cards.clear();
     this.root = null;
+    this.highlightIds = new Set();
   }
 
   // --- internals ---

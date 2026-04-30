@@ -1,9 +1,17 @@
 import * as THREE from 'three';
 import type { Vector3, NodeStyle, NodeRenderConfig, NodeRenderFn } from '../types.js';
-import type { VisibilityHost } from './types.js';
+import type { HighlightHost, VisibilityHost } from './types.js';
+
+/**
+ * Alpha applied to non-highlighted instances when a non-empty highlight
+ * set is active. Visible enough to provide context, dim enough that the
+ * highlighted set reads as the focus.
+ */
+const DIM_ALPHA = 0.3;
 
 /**
  * @implements {VisibilityHost}
+ * @implements {HighlightHost}
  *
  * Per-instance visibility is encoded as a custom `instanceAlpha`
  * `InstancedBufferAttribute` (itemSize=1) attached to the underlying
@@ -12,8 +20,13 @@ import type { VisibilityHost } from './types.js';
  * varying. Hidden nodes therefore disappear without any teardown,
  * rebuild, or layout recompute — `setVisibility` only writes to the
  * existing GPU buffer and flags it for upload on the next frame.
+ *
+ * Highlight reuses the same alpha buffer: a non-empty highlight set
+ * drops non-matching instances to {@link DIM_ALPHA}; an empty set
+ * restores baseline alpha. Visibility wins over highlight — a hidden
+ * node stays at alpha 0 even if it would otherwise highlight.
  */
-export class NodeMesh implements VisibilityHost {
+export class NodeMesh implements VisibilityHost, HighlightHost {
   private position: Vector3 = { x: 0, y: 0, z: 0 };
   private color: string = '#4a9eff';
   private radius: number = 5;
@@ -30,6 +43,17 @@ export class NodeMesh implements VisibilityHost {
   private instanceAlpha: THREE.InstancedBufferAttribute | null = null;
   /** Index → node-id mapping. Populated by SceneController via {@link setNodeIds}. */
   private nodeIds: string[] = [];
+  /**
+   * Last visibility set seen by {@link setVisibility}. `null` means
+   * "never set" (everyone visible by default). `setHighlight` reads this
+   * so visibility wins over highlight on the same instance.
+   */
+  private visibleIds: ReadonlySet<string> | null = null;
+  /**
+   * Last highlight set seen by {@link setHighlight}. Empty set means
+   * "no highlight" (baseline alpha for everyone).
+   */
+  private highlightIds: ReadonlySet<string> = new Set();
 
   private readonly style: NodeStyle;
   private readonly cardWidth: number;
@@ -263,12 +287,48 @@ export class NodeMesh implements VisibilityHost {
    * hasn't been registered via {@link setNodeIds}.
    */
   setVisibility(visibleIds: ReadonlySet<string>): void {
+    this.visibleIds = visibleIds;
+    this.recomputeAlpha();
+  }
+
+  /**
+   * Apply per-instance highlight emphasis WITHOUT rebuild. A non-empty
+   * `highlightIds` drops alpha on non-matching instances to
+   * {@link DIM_ALPHA}; an empty set restores baseline (everyone at full
+   * alpha, modulated by the visibility set).
+   *
+   * No-op if the mesh hasn't been built yet, or if the node id mapping
+   * hasn't been registered via {@link setNodeIds}.
+   */
+  setHighlight(highlightIds: ReadonlySet<string>): void {
+    this.highlightIds = highlightIds;
+    this.recomputeAlpha();
+  }
+
+  /**
+   * Recompute the instance-alpha buffer from the current visibility +
+   * highlight state. Visibility is dominant — a hidden node has alpha 0
+   * regardless of highlight. Among visible nodes, an empty highlight
+   * set means everyone is at full alpha (1.0); a non-empty set means
+   * highlighted instances are at full alpha and others are dimmed.
+   */
+  private recomputeAlpha(): void {
     if (!this.instanceAlpha) return;
     if (this.nodeIds.length === 0) return;
     const arr = this.instanceAlpha.array as Float32Array;
     const n = Math.min(arr.length, this.nodeIds.length);
+    const hasVisibility = this.visibleIds !== null;
+    const visible = this.visibleIds;
+    const hasHighlight = this.highlightIds.size > 0;
     for (let i = 0; i < n; i++) {
-      arr[i] = visibleIds.has(this.nodeIds[i]) ? 1 : 0;
+      const id = this.nodeIds[i];
+      let alpha = 1;
+      if (hasVisibility && !visible!.has(id)) {
+        alpha = 0;
+      } else if (hasHighlight && !this.highlightIds.has(id)) {
+        alpha = DIM_ALPHA;
+      }
+      arr[i] = alpha;
     }
     this.instanceAlpha.needsUpdate = true;
   }
@@ -297,6 +357,8 @@ export class NodeMesh implements VisibilityHost {
     this.instancedMesh = null;
     this.instanceAlpha = null;
     this.nodeIds = [];
+    this.visibleIds = null;
+    this.highlightIds = new Set();
   }
 
   /** Create a rounded rectangle geometry using THREE.Shape */
