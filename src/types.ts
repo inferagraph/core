@@ -45,8 +45,17 @@ export interface Vector3 {
 /** Filter predicate function */
 export type FilterPredicate = (attributes: NodeAttributes) => boolean;
 
-/** Search result */
-export interface SearchResult {
+/**
+ * Keyword search result produced by the data-layer {@link SearchEngine}.
+ * Carries every matched `"key: value"` pair so consumers that want to render
+ * highlighted snippets keep that information.
+ *
+ * The AI-side {@link AIEngine.search} returns a different (slimmer) shape —
+ * see `src/ai/SearchResult.ts`. Keep the two distinct: the AI surface is the
+ * canonical search API for hosts wiring `<InferaGraph>`, and the data-layer
+ * shape is for direct `SearchEngine` consumers.
+ */
+export interface KeywordSearchResult {
   nodeId: NodeId;
   score: number;
   matches: string[];

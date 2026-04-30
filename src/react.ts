@@ -8,5 +8,7 @@ export type { InferaGraphProps } from './react/InferaGraph.js';
 export { useInferaGraph } from './react/useInferaGraph.js';
 export { useInferaGraphChat } from './react/useInferaGraphChat.js';
 export type { InferaGraphChatHook } from './react/useInferaGraphChat.js';
+export { useInferaGraphSearch } from './react/useInferaGraphSearch.js';
+export type { InferaGraphSearchHook } from './react/useInferaGraphSearch.js';
 export { GraphProvider } from './react/GraphProvider.js';
 export { createReactNodeRenderFn, createReactTooltipRenderFn } from './react/ReactNodeRenderer.js';

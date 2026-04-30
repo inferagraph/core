@@ -16,7 +16,7 @@ export type {
   GraphData,
   Vector3,
   FilterPredicate,
-  SearchResult,
+  KeywordSearchResult,
   MessageRole,
   LLMMessage,
   AIQueryResult,
@@ -59,6 +59,7 @@ export type { Cluster } from './store/ClusterEngine.js';
 export {
   AIEngine,
   buildPredicateFromSpec,
+  isKeywordShape,
   parseFilterSpec,
   parseToolCall,
 } from './ai/AIEngine.js';
@@ -70,9 +71,30 @@ export type {
   LLMStreamEvent,
   LLMToolDefinition,
 } from './ai/LLMProvider.js';
-export { mockLLMProvider } from './ai/MockLLMProvider.js';
-export type { MockLLMProvider } from './ai/MockLLMProvider.js';
+export { mockLLMProvider, deterministicVector } from './ai/MockLLMProvider.js';
+export type { MockLLMProvider, MockEmbedSource } from './ai/MockLLMProvider.js';
 export type { ChatEvent, ChatOptions, FilterSpec } from './ai/ChatEvent.js';
+export type { SearchResult } from './ai/SearchResult.js';
+export {
+  contentHash,
+  cosineSimilarity,
+} from './ai/Embedding.js';
+export type {
+  Vector,
+  EmbedOptions,
+  EmbeddingMeta,
+  EmbeddingRecord,
+  EmbeddingStore,
+  SimilarHit,
+} from './ai/Embedding.js';
+export { inMemoryEmbeddingStore } from './ai/InMemoryEmbeddingStore.js';
+export { SchemaInspector, embeddingText } from './ai/SchemaInspector.js';
+export type {
+  SchemaSummary,
+  SchemaAttribute,
+  SchemaAttributeType,
+  SchemaInspectorConfig,
+} from './ai/SchemaInspector.js';
 export {
   inProcessTransport,
   httpTransport,

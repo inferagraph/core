@@ -1,4 +1,4 @@
-import type { SearchResult } from '../types.js';
+import type { KeywordSearchResult } from '../types.js';
 import type { GraphStore } from './GraphStore.js';
 
 export interface SearchConfig {
@@ -22,9 +22,9 @@ export class SearchEngine {
     Object.assign(this.config, config);
   }
 
-  search(query: string): SearchResult[] {
+  search(query: string): KeywordSearchResult[] {
     const lowerQuery = query.toLowerCase();
-    const results: SearchResult[] = [];
+    const results: KeywordSearchResult[] = [];
     const keyCount = this.config.searchableKeys.length;
 
     for (const node of this.store.getAllNodes()) {
