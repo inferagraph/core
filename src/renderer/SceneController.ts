@@ -14,6 +14,7 @@ import { WebGLRenderer } from './WebGLRenderer.js';
 import { CameraController } from './CameraController.js';
 import { NodeMesh } from './NodeMesh.js';
 import { EdgeMesh } from './EdgeMesh.js';
+import { InferredEdgeMesh } from './InferredEdgeMesh.js';
 import { TreeNodeMesh } from './TreeNodeMesh.js';
 import {
   TreeEdgeMesh,
@@ -37,6 +38,8 @@ import {
 import { PulseController, type PulseOption } from './PulseController.js';
 import { describeNode } from '../utils/describeNode.js';
 import type { EdgeLabelMap } from '../utils/aggregateEdges.js';
+import type { InferredEdge } from '../ai/InferredEdge.js';
+import type { InferredEdgeHost } from './types.js';
 
 /**
  * Minimal HTML escape used to safely embed dynamic strings (node titles,
@@ -272,7 +275,7 @@ export interface SceneControllerOptions {
  *   ctrl.setLayout('tree');
  *   ctrl.detach();
  */
-export class SceneController {
+export class SceneController implements InferredEdgeHost {
   private readonly store: GraphStore;
   private readonly renderer = new WebGLRenderer();
   private readonly cameraController = new CameraController();
@@ -296,6 +299,30 @@ export class SceneController {
 
   private nodeMesh: NodeMesh | null = null;
   private edgeMesh: EdgeMesh | null = null;
+  /**
+   * Phase 5 inferred-edge overlay mesh. Mounted in graph mode (built
+   * inside {@link buildGraphMeshes} as an empty mesh, populated by the
+   * first {@link setInferredEdges} call). Tree mode does not mount one
+   * — `setInferredEdges` / `setInferredEdgeVisibility` are no-ops with
+   * `console.debug` notes per the Phase 5 plan's tree-mode-deferred
+   * decision.
+   */
+  private inferredEdgeMesh: InferredEdgeMesh | null = null;
+  /**
+   * Cached inferred edges from the most recent
+   * {@link setInferredEdges} call. Replayed onto the freshly-built
+   * {@link inferredEdgeMesh} after a graph-mode rebuild (e.g. the user
+   * toggles `layout` from 'tree' back to 'graph') so the overlay
+   * survives the round-trip.
+   */
+  private lastInferredEdges: ReadonlyArray<InferredEdge> = [];
+  /**
+   * Cached visibility flag for the inferred-edge overlay. Default
+   * `false` matches the {@link InferredEdgeMesh} default + the
+   * `showInferredEdges` prop default. Replayed onto the freshly-built
+   * mesh on graph-mode re-entry alongside {@link lastInferredEdges}.
+   */
+  private inferredEdgesVisible: boolean = false;
 
   /**
    * Tree-mode meshes. Mounted only when {@link layoutMode} === 'tree'
@@ -574,6 +601,15 @@ export class SceneController {
 
     this.nodeMesh = null;
     this.edgeMesh = null;
+    if (this.inferredEdgeMesh) {
+      this.inferredEdgeMesh.dispose();
+      this.inferredEdgeMesh = null;
+    }
+    // Drop the inferred-edge cache too — a full detach is a hard
+    // reset. The next attach starts the overlay hidden + empty,
+    // matching the React prop default.
+    this.lastInferredEdges = [];
+    this.inferredEdgesVisible = false;
     this.nodeIdsByIndex = [];
     this.nodesByIndex = [];
     this.edgeIdsByIndex = [];
@@ -786,6 +822,27 @@ export class SceneController {
       this.renderer.addEdgeMesh('__edges__', edgeMesh);
       this.edgeMesh = edgeMesh;
     }
+
+    // Phase 5: mount the inferred-edge overlay as an empty mesh. The
+    // first `setInferredEdges` call (driven by AIEngine /
+    // computeInferredEdges) resizes its geometry to fit. Building it
+    // empty here keeps the mount path on the same edges-built code
+    // path — visibility + replay are handled below.
+    const inferredEdgeMesh = new InferredEdgeMesh();
+    // Replay any cached overlay state captured before this build —
+    // e.g. user toggled `showInferredEdges` while in tree mode, or
+    // `setInferredEdges` arrived during a tree-mode session. The
+    // freshly-built mesh starts from the cached data so the overlay
+    // survives layout round-trips without the host re-pushing it.
+    if (this.lastInferredEdges.length > 0 && positions.size > 0) {
+      inferredEdgeMesh.setInferredEdges(this.lastInferredEdges, positions);
+    }
+    inferredEdgeMesh.setVisibility(this.inferredEdgesVisible);
+    const overlayMesh = inferredEdgeMesh.getMesh();
+    if (overlayMesh) {
+      this.renderer.addObject('__inferred_edges__', overlayMesh);
+    }
+    this.inferredEdgeMesh = inferredEdgeMesh;
   }
 
   /**
@@ -870,6 +927,11 @@ export class SceneController {
     if (this.edgeMesh) {
       this.renderer.removeEdgeMesh('__edges__');
       this.edgeMesh = null;
+    }
+    if (this.inferredEdgeMesh) {
+      this.renderer.removeObject('__inferred_edges__');
+      this.inferredEdgeMesh.dispose();
+      this.inferredEdgeMesh = null;
     }
   }
 
@@ -1671,6 +1733,101 @@ export class SceneController {
     this.edgeMesh?.setHighlight(this.highlightIds);
     this.treeNodeMesh?.setHighlight(this.highlightIds);
     this.treeEdgeMesh?.setHighlight(this.highlightIds);
+  }
+
+  /**
+   * Replace the rendered set of inferred edges and dispatch them to
+   * the {@link InferredEdgeMesh}. Caches the input so a subsequent
+   * graph-mode rebuild (after a tree-mode round-trip) can replay
+   * them without the host re-pushing.
+   *
+   * Tree mode is a deliberate no-op in v1 per the Phase 5 plan
+   * (tree-mode dashed edges deferred to Phase 6). The cache is still
+   * updated so a later `setLayout('graph')` re-entry replays the
+   * latest edges + visibility.
+   *
+   * Implements {@link InferredEdgeHost.setInferredEdges}.
+   */
+  setInferredEdges(
+    edges: ReadonlyArray<InferredEdge>,
+    positions: ReadonlyMap<string, Vector3>,
+  ): void {
+    // Snapshot the input so the cache doesn't alias caller-mutable
+    // state. We only need a shallow copy — `InferredEdge` is `readonly`
+    // by contract.
+    this.lastInferredEdges = edges.slice();
+
+    if (this.layoutMode !== 'graph') {
+      // eslint-disable-next-line no-console
+      console.debug(
+        '[SceneController] setInferredEdges in tree mode is a no-op (overlay deferred to Phase 6); cached for graph-mode replay.',
+      );
+      return;
+    }
+
+    this.inferredEdgeMesh?.setInferredEdges(edges, positions);
+    // Adding a freshly-allocated mesh (the InferredEdgeMesh disposes
+    // and rebuilds on every setInferredEdges call) — re-register it
+    // on the renderer so the new geometry is part of the scene.
+    if (this.inferredEdgeMesh) {
+      const overlayMesh = this.inferredEdgeMesh.getMesh();
+      if (overlayMesh) {
+        this.renderer.addObject('__inferred_edges__', overlayMesh);
+      } else {
+        // Empty edge set — make sure the previous mesh, if any, is
+        // off the scene graph.
+        this.renderer.removeObject('__inferred_edges__');
+      }
+    }
+  }
+
+  /**
+   * Toggle inferred-edge overlay visibility. Caches the state so a
+   * later graph-mode rebuild (after a tree-mode round-trip) replays
+   * it onto the freshly-built mesh.
+   *
+   * Tree mode is a deliberate no-op in v1 per the Phase 5 plan; the
+   * cache still updates so a later graph-mode re-entry honours the
+   * latest visibility intent.
+   *
+   * Implements {@link InferredEdgeHost.setInferredEdgeVisibility}.
+   */
+  setInferredEdgeVisibility(visible: boolean): void {
+    this.inferredEdgesVisible = visible;
+
+    if (this.layoutMode !== 'graph') {
+      // eslint-disable-next-line no-console
+      console.debug(
+        '[SceneController] setInferredEdgeVisibility in tree mode is a no-op (overlay deferred to Phase 6); cached for graph-mode replay.',
+      );
+      return;
+    }
+
+    this.inferredEdgeMesh?.setVisibility(visible);
+  }
+
+  /** Active inferred-edge overlay visibility (for tests + introspection). */
+  getInferredEdgeVisibility(): boolean {
+    return this.inferredEdgesVisible;
+  }
+
+  /**
+   * Snapshot of the most recently dispatched inferred-edge set
+   * (cache only — not the buffer contents). Useful for tests + for
+   * inspecting "what's been pushed" without going through the mesh.
+   */
+  getInferredEdges(): ReadonlyArray<InferredEdge> {
+    return this.lastInferredEdges;
+  }
+
+  /**
+   * The active inferred-edge mesh (graph mode only). Exposed for
+   * tests + advanced consumers that need to drive the overlay
+   * directly. Returns `null` in tree mode or before
+   * {@link buildGraphMeshes} has run.
+   */
+  getInferredEdgeMesh(): InferredEdgeMesh | null {
+    return this.inferredEdgeMesh;
   }
 
   /**

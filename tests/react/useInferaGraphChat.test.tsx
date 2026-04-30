@@ -22,6 +22,9 @@ vi.mock('../../src/renderer/SceneController.js', () => ({
     focusOn,
     annotate,
     clearAnnotations,
+    // Phase 5: inferred-edge overlay dispatch surface. Stubbed so the
+    // useEffect that pushes `showInferredEdges` doesn't blow up.
+    setInferredEdgeVisibility: vi.fn(),
     resize: vi.fn(),
   })),
 }));

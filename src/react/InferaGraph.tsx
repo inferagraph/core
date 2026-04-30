@@ -113,6 +113,20 @@ export interface InferaGraphProps {
    */
   transport?: Transport;
   /**
+   * Toggle visibility of the Phase 5 inferred-edge overlay (dashed
+   * lines between nodes the AI inference pipeline thinks are related).
+   * Defaults to `false` (overlay hidden) so the explicit graph reads
+   * cleanly out of the box. Hosts opt in either by setting this to
+   * `true` or by handing the LLM a `set_inferred_visibility` chat
+   * tool call.
+   *
+   * The actual inferred edges are computed by
+   * `aiEngine.computeInferredEdges()` and pushed to the renderer
+   * separately — toggling this prop only shows/hides whatever has
+   * already been computed.
+   */
+  showInferredEdges?: boolean;
+  /**
    * Host-facing chat callback. Called with `text` and `done` events
    * only — tool calls (`apply_filter` / `highlight` / `focus` /
    * `annotate`) are dispatched silently to the renderer.
@@ -152,6 +166,7 @@ interface InferaGraphInnerProps {
   embeddingStore?: EmbeddingStore;
   query?: string;
   transport?: Transport;
+  showInferredEdges?: boolean;
   onChat?: (event: ChatEvent) => void;
   className?: string;
   style?: React.CSSProperties;
@@ -175,6 +190,7 @@ function InferaGraphInner({
   embeddingStore,
   query,
   transport,
+  showInferredEdges,
   onChat,
   className,
   style,
@@ -364,6 +380,18 @@ function InferaGraphInner({
     controller.setFilter(effectiveFilter);
   }, [effectiveFilter]);
 
+  // Push inferred-edge overlay visibility into the controller. The
+  // controller caches the value internally and replays it onto a
+  // freshly-built mesh after layout-mode round-trips, so we don't have
+  // to re-fire on every store/layout change — only on prop change.
+  // Default `false` matches the prop default + the InferredEdgeMesh
+  // default + the Phase 5 plan's "hidden by default" decision.
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    controller.setInferredEdgeVisibility(showInferredEdges ?? false);
+  }, [showInferredEdges]);
+
   // ---------- Chat: transport selection + dispatch + onChat callback ----------
 
   // The active chat transport. Explicit `transport` prop wins; otherwise
@@ -421,6 +449,13 @@ function InferaGraphInner({
           case 'annotate':
             controller.annotate(event.nodeId, event.text);
             return;
+          case 'set_inferred_visibility':
+            // Phase 5: route the LLM's overlay-toggle tool call to
+            // the renderer. Subagent A added the ChatEvent variant +
+            // `parseToolCall` mapping; Subagent B (this file) wires
+            // the dispatch.
+            controller.setInferredEdgeVisibility(event.visible);
+            return;
           default:
             return;
         }
@@ -459,6 +494,7 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     embeddingStore,
     query,
     transport,
+    showInferredEdges,
     onChat,
     className,
     style,
@@ -483,6 +519,7 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
         embeddingStore={embeddingStore}
         query={query}
         transport={transport}
+        showInferredEdges={showInferredEdges}
         onChat={onChat}
         className={className}
         style={style}

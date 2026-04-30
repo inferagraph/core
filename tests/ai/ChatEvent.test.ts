@@ -73,4 +73,20 @@ describe('ChatEvent', () => {
       throw new Error('expected done');
     }
   });
+
+  it('narrows correctly on set_inferred_visibility events', () => {
+    const ev: ChatEvent = { type: 'set_inferred_visibility', visible: true };
+    if (ev.type === 'set_inferred_visibility') {
+      expect(ev.visible).toBe(true);
+    } else {
+      throw new Error('expected set_inferred_visibility');
+    }
+  });
+
+  it('set_inferred_visibility carries the visibility flag in both states', () => {
+    const show: ChatEvent = { type: 'set_inferred_visibility', visible: true };
+    const hide: ChatEvent = { type: 'set_inferred_visibility', visible: false };
+    if (show.type === 'set_inferred_visibility') expect(show.visible).toBe(true);
+    if (hide.type === 'set_inferred_visibility') expect(hide.visible).toBe(false);
+  });
 });

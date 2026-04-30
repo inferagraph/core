@@ -62,6 +62,11 @@ export type ChatEvent =
       text: string;
     }
   | {
+      type: 'set_inferred_visibility';
+      /** True to show the inferred-relationship overlay; false to hide it. */
+      visible: boolean;
+    }
+  | {
       type: 'done';
       /** Why the stream ended. `'aborted'` = cancelled via AbortSignal. */
       reason?: 'stop' | 'length' | 'aborted';
