@@ -19,9 +19,6 @@ export type {
   SearchResult,
   MessageRole,
   LLMMessage,
-  LLMCompletionRequest,
-  LLMCompletionResponse,
-  LLMStreamChunk,
   AIQueryResult,
   NodeStyle,
   NodeRenderFn,
@@ -60,10 +57,18 @@ export type { Cluster } from './store/ClusterEngine.js';
 
 // AI
 export { AIEngine } from './ai/AIEngine.js';
-export { LLMProvider } from './ai/LLMProvider.js';
+export type { AIEngineConfig } from './ai/AIEngine.js';
+export type { LLMProvider, CompleteOptions } from './ai/LLMProvider.js';
+export { mockLLMProvider } from './ai/MockLLMProvider.js';
+export type { MockLLMProvider } from './ai/MockLLMProvider.js';
 export { ContextBuilder } from './ai/ContextBuilder.js';
 export { IntentParser } from './ai/IntentParser.js';
 export { ResponseHandler } from './ai/ResponseHandler.js';
+
+// Cache
+export { lruCache } from './cache/lruCache.js';
+export type { CacheProvider, CacheConfig } from './cache/lruCache.js';
+export { parseTTL } from './cache/parseTTL.js';
 
 // Animation
 export { AnimationManager } from './animation/AnimationManager.js';

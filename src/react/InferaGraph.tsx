@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useMemo } from 'react';
+import React, { useRef, useEffect, useMemo, useState } from 'react';
 import type {
   GraphData,
   LayoutMode,
@@ -14,6 +14,8 @@ import { SceneController } from '../renderer/SceneController.js';
 import type { NodeColorFn } from '../renderer/NodeColorResolver.js';
 import type { EdgeColorFn } from '../renderer/EdgeColorMap.js';
 import type { EdgeLabelMap } from '../utils/aggregateEdges.js';
+import type { LLMProvider } from '../ai/LLMProvider.js';
+import type { CacheProvider } from '../cache/lruCache.js';
 
 export interface InferaGraphProps {
   data?: GraphData;
@@ -56,6 +58,31 @@ export interface InferaGraphProps {
    * Default: no filter (every node visible).
    */
   filter?: (node: NodeData) => boolean;
+  /**
+   * LLM provider for AI features (NLQ filtering today; chat / search / highlight
+   * land in later phases). The host imports a provider package and passes a
+   * configured INSTANCE here. The host never invokes the LLM directly —
+   * InferaGraph owns the entire LLM lifecycle.
+   *
+   * Omitted = AI features are unavailable; the explicit `filter` predicate
+   * still works.
+   */
+  llm?: LLMProvider;
+  /**
+   * Cache provider for LLM responses. Defaults to NO CACHING when omitted, so
+   * tests + small demos don't accidentally retain old responses. Pass
+   * `lruCache()` (built-in) or `@inferagraph/redis-cache-provider` for
+   * production. The cache is wiped automatically when the LLM provider
+   * instance changes.
+   */
+  cache?: CacheProvider;
+  /**
+   * Natural-language query that the LLM compiles into a filter predicate.
+   * Combined with the explicit `filter` prop via AND: the developer-set
+   * `filter` runs first (proactive scope), then `query` narrows within that
+   * scope. Requires `llm`. An empty / undefined `query` is a no-op.
+   */
+  query?: string;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -72,6 +99,9 @@ interface InferaGraphInnerProps {
   incomingEdgeLabels?: EdgeLabelMap;
   outgoingEdgeLabels?: EdgeLabelMap;
   filter?: (node: NodeData) => boolean;
+  llm?: LLMProvider;
+  cache?: CacheProvider;
+  query?: string;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -88,12 +118,19 @@ function InferaGraphInner({
   incomingEdgeLabels,
   outgoingEdgeLabels,
   filter,
+  llm,
+  cache,
+  query,
   className,
   style,
 }: InferaGraphInnerProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<SceneController | null>(null);
-  const { store, isReady } = useGraphContext();
+  const { store, aiEngine, isReady } = useGraphContext();
+  // Predicate produced by the LLM from the `query` prop. `null` means "no
+  // query has been compiled yet" → don't apply anything; an explicit
+  // `() => true` means "compiled to match-everything".
+  const [queryPredicate, setQueryPredicate] = useState<((node: NodeData) => boolean) | null>(null);
 
   const resolvedNodeRender = useMemo(() => {
     if (!nodeRender) return undefined;
@@ -137,6 +174,9 @@ function InferaGraphInner({
       edgeColorFn,
       incomingEdgeLabels,
       outgoingEdgeLabels,
+      // The construction-time `filter` is the developer-set predicate only;
+      // any LLM-derived `queryPredicate` arrives asynchronously and is pushed
+      // in via the dedicated `effectiveFilter` effect below.
       filter,
     });
     controller.attach(container);
@@ -201,11 +241,64 @@ function InferaGraphInner({
     controller.setOutgoingEdgeLabels(outgoingEdgeLabels);
   }, [outgoingEdgeLabels]);
 
+  // Push the LLM provider + cache into the AIEngine. Both are optional; when
+  // omitted the engine simply degrades to a no-op for AI-only features. The
+  // engine itself handles cache-clear-on-provider-change, so we don't need to
+  // dance with effect ordering here.
+  useEffect(() => {
+    aiEngine.setProvider(llm);
+  }, [aiEngine, llm]);
+
+  useEffect(() => {
+    aiEngine.setCache(cache);
+  }, [aiEngine, cache]);
+
+  // Compile the natural-language `query` prop into a predicate. We track the
+  // current async run with a token so a fast-typed query doesn't race a slow
+  // earlier compile and clobber the latest result.
+  useEffect(() => {
+    const trimmed = query?.trim() ?? '';
+    if (!trimmed || !llm) {
+      setQueryPredicate(null);
+      return;
+    }
+
+    let cancelled = false;
+    aiEngine
+      .compileFilter(trimmed)
+      .then((predicate) => {
+        if (cancelled) return;
+        setQueryPredicate(() => predicate);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn('[InferaGraph] compileFilter failed:', err);
+        if (!cancelled) setQueryPredicate(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [aiEngine, llm, query]);
+
+  // Combine the developer-set `filter` predicate (low-level, proactive scope)
+  // with the LLM-compiled `queryPredicate` (high-level, user-driven). Per the
+  // architecture rules: predicate runs FIRST, NLQ narrows within that scope —
+  // so the effective predicate is a logical AND.
+  const effectiveFilter = useMemo<((node: NodeData) => boolean) | undefined>(() => {
+    if (!filter && !queryPredicate) return undefined;
+    if (filter && !queryPredicate) return filter;
+    if (!filter && queryPredicate) return queryPredicate;
+    const f = filter!;
+    const q = queryPredicate!;
+    return (node) => f(node) && q(node);
+  }, [filter, queryPredicate]);
+
   useEffect(() => {
     const controller = controllerRef.current;
     if (!controller) return;
-    controller.setFilter(filter);
-  }, [filter]);
+    controller.setFilter(effectiveFilter);
+  }, [effectiveFilter]);
 
   return (
     <div
@@ -230,6 +323,9 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     incomingEdgeLabels,
     outgoingEdgeLabels,
     filter,
+    llm,
+    cache,
+    query,
     className,
     style,
   } = props;
@@ -247,6 +343,9 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
         incomingEdgeLabels={incomingEdgeLabels}
         outgoingEdgeLabels={outgoingEdgeLabels}
         filter={filter}
+        llm={llm}
+        cache={cache}
+        query={query}
         className={className}
         style={style}
       />

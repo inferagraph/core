@@ -1,14 +1,11 @@
 import { useCallback } from 'react';
 import { useGraphContext } from './GraphProvider.js';
-import type { GraphData, AIQueryResult, NodeId, NodeData, ContentData, PaginatedResult } from '../types.js';
+import type { GraphData, NodeId, NodeData, ContentData, PaginatedResult } from '../types.js';
 
 export interface UseInferaGraphReturn {
-  // existing
   loadData: (data: GraphData) => void;
-  query: (question: string) => Promise<AIQueryResult>;
   nodeCount: number;
   edgeCount: number;
-  // new
   expandNode: (nodeId: NodeId, depth?: number) => Promise<void>;
   findPath: (fromId: NodeId, toId: NodeId) => Promise<NodeData[]>;
   search: (query: string) => Promise<PaginatedResult<NodeData>>;
@@ -17,7 +14,10 @@ export interface UseInferaGraphReturn {
 }
 
 export function useInferaGraph(): UseInferaGraphReturn {
-  const { store, aiEngine, dataManager, isReady } = useGraphContext();
+  // The chat / NLQ API moves to Phase 2; for now we only expose data + lifecycle
+  // helpers here. Natural-language filtering is wired via the `<InferaGraph query>`
+  // prop, not via this hook.
+  const { store, dataManager, isReady } = useGraphContext();
 
   const expandNode = useCallback(async (nodeId: NodeId, depth?: number): Promise<void> => {
     if (!dataManager) return;
@@ -41,7 +41,6 @@ export function useInferaGraph(): UseInferaGraphReturn {
 
   return {
     loadData: (data: GraphData) => store.loadData(data),
-    query: (question: string) => aiEngine.query(question),
     nodeCount: store.nodeCount,
     edgeCount: store.edgeCount,
     expandNode,
