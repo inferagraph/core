@@ -1,9 +1,18 @@
 import * as THREE from 'three';
 import type { Vector3 } from '../types.js';
-import type { VisibilityHost } from './types.js';
+import type { HighlightHost, VisibilityHost } from './types.js';
+
+/**
+ * Alpha applied to non-highlighted edges when a non-empty highlight set
+ * is active. Edges are visually busier than nodes, so we dim them
+ * harder than the node-dim — 0.15 vs the node mesh's 0.3 — so the
+ * highlighted subgraph reads cleanly.
+ */
+const EDGE_DIM_ALPHA = 0.15;
 
 /**
  * @implements {VisibilityHost}
+ * @implements {HighlightHost}
  *
  * Per-edge line geometry. Internally a single `THREE.LineSegments` whose
  * vertex-color attribute carries one colour-and-alpha quad per vertex —
@@ -11,6 +20,10 @@ import type { VisibilityHost } from './types.js';
  * each edge with its own resolved colour (e.g. `father_of` cyan,
  * `married_to` blue) AND hide individual edges via {@link setVisibility}
  * by writing alpha=0 to both endpoints.
+ *
+ * Highlight is endpoint-keyed: an edge stays at full alpha when BOTH of
+ * its endpoint node ids are in the highlight set; otherwise it dims
+ * to {@link EDGE_DIM_ALPHA}. Visibility wins over highlight.
  *
  * Lifecycle:
  *   const mesh = new EdgeMesh();
@@ -22,7 +35,7 @@ import type { VisibilityHost } from './types.js';
  *   // ...later, on filter change:
  *   mesh.setVisibility(visibleEdgeIds);
  */
-export class EdgeMesh implements VisibilityHost {
+export class EdgeMesh implements VisibilityHost, HighlightHost {
   private source: Vector3 = { x: 0, y: 0, z: 0 };
   private target: Vector3 = { x: 0, y: 0, z: 0 };
   /** Default tint used for any segment that hasn't been given an explicit colour. */
@@ -34,6 +47,17 @@ export class EdgeMesh implements VisibilityHost {
   private segmentCount: number = 0;
   /** Index → edge-id mapping. Populated by SceneController via {@link setEdgeIds}. */
   private edgeIds: string[] = [];
+  /**
+   * Per-edge endpoint node ids, used by {@link setHighlight} to decide
+   * which edges should stay at full alpha (both endpoints highlighted)
+   * and which should dim. Populated by SceneController via
+   * {@link setEdgeEndpoints}; if absent, highlight is a no-op.
+   */
+  private edgeEndpoints: Array<{ sourceId: string; targetId: string }> = [];
+  /** Last visibility set seen; null = "no visibility filter applied yet". */
+  private visibleIds: ReadonlySet<string> | null = null;
+  /** Last highlight set seen. Empty = baseline. */
+  private highlightIds: ReadonlySet<string> = new Set();
   private readonly _scratch = new THREE.Color();
 
   setPositions(source: Vector3, target: Vector3): void {
@@ -188,6 +212,20 @@ export class EdgeMesh implements VisibilityHost {
   }
 
   /**
+   * Register per-edge endpoint node ids so {@link setHighlight} can
+   * decide which segments to dim. The SceneController owns the
+   * canonical mapping; the mesh keeps a copy keyed by segment index.
+   */
+  setEdgeEndpoints(
+    endpoints: ReadonlyArray<{ sourceId: string; targetId: string }>,
+  ): void {
+    this.edgeEndpoints = endpoints.map((e) => ({
+      sourceId: e.sourceId,
+      targetId: e.targetId,
+    }));
+  }
+
+  /**
    * Toggle per-edge visibility WITHOUT rebuild. For each segment index,
    * if the corresponding edge id is in `visibleIds` we set alpha to 1.0;
    * otherwise 0.0. The vertex-colour shader path multiplies the
@@ -198,11 +236,53 @@ export class EdgeMesh implements VisibilityHost {
    * hasn't been registered via {@link setEdgeIds}.
    */
   setVisibility(visibleIds: ReadonlySet<string>): void {
+    this.visibleIds = visibleIds;
+    this.recomputeAlpha();
+  }
+
+  /**
+   * Apply per-edge highlight emphasis WITHOUT rebuild. An edge stays at
+   * full alpha when BOTH of its endpoint node ids are in
+   * `highlightIds`; otherwise it dims to {@link EDGE_DIM_ALPHA}. An
+   * empty set restores baseline.
+   *
+   * Visibility wins over highlight: edges hidden by the visibility set
+   * stay at alpha 0.
+   *
+   * No-op if the mesh hasn't been built yet, or if endpoints aren't
+   * registered via {@link setEdgeEndpoints}.
+   */
+  setHighlight(highlightIds: ReadonlySet<string>): void {
+    this.highlightIds = highlightIds;
+    this.recomputeAlpha();
+  }
+
+  /**
+   * Recompute the per-segment alpha buffer from the current visibility
+   * + highlight state. Visibility is dominant — a hidden edge stays at
+   * alpha 0 regardless of highlight.
+   */
+  private recomputeAlpha(): void {
     if (!this.geometry) return;
     if (this.edgeIds.length === 0) return;
     const n = Math.min(this.segmentCount, this.edgeIds.length);
+    const hasVisibility = this.visibleIds !== null;
+    const visible = this.visibleIds;
+    const hasHighlight = this.highlightIds.size > 0;
+    const hasEndpoints = this.edgeEndpoints.length === this.edgeIds.length;
     for (let i = 0; i < n; i++) {
-      this.setSegmentAlpha(i, visibleIds.has(this.edgeIds[i]) ? 1 : 0);
+      const id = this.edgeIds[i];
+      let alpha = 1;
+      if (hasVisibility && !visible!.has(id)) {
+        alpha = 0;
+      } else if (hasHighlight && hasEndpoints) {
+        const ep = this.edgeEndpoints[i];
+        const both =
+          this.highlightIds.has(ep.sourceId) &&
+          this.highlightIds.has(ep.targetId);
+        if (!both) alpha = EDGE_DIM_ALPHA;
+      }
+      this.setSegmentAlpha(i, alpha);
     }
   }
 
@@ -227,5 +307,8 @@ export class EdgeMesh implements VisibilityHost {
     this.lineSegments = null;
     this.segmentCount = 0;
     this.edgeIds = [];
+    this.edgeEndpoints = [];
+    this.visibleIds = null;
+    this.highlightIds = new Set();
   }
 }

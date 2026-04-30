@@ -56,11 +56,32 @@ export { ClusterEngine } from './store/ClusterEngine.js';
 export type { Cluster } from './store/ClusterEngine.js';
 
 // AI
-export { AIEngine } from './ai/AIEngine.js';
+export {
+  AIEngine,
+  buildPredicateFromSpec,
+  parseFilterSpec,
+  parseToolCall,
+} from './ai/AIEngine.js';
 export type { AIEngineConfig } from './ai/AIEngine.js';
-export type { LLMProvider, CompleteOptions } from './ai/LLMProvider.js';
+export type {
+  LLMProvider,
+  CompleteOptions,
+  StreamOptions,
+  LLMStreamEvent,
+  LLMToolDefinition,
+} from './ai/LLMProvider.js';
 export { mockLLMProvider } from './ai/MockLLMProvider.js';
 export type { MockLLMProvider } from './ai/MockLLMProvider.js';
+export type { ChatEvent, ChatOptions, FilterSpec } from './ai/ChatEvent.js';
+export {
+  inProcessTransport,
+  httpTransport,
+} from './ai/Transport.js';
+export type {
+  Transport,
+  InProcessTransportConfig,
+  HttpTransportConfig,
+} from './ai/Transport.js';
 export { ContextBuilder } from './ai/ContextBuilder.js';
 export { IntentParser } from './ai/IntentParser.js';
 export { ResponseHandler } from './ai/ResponseHandler.js';
@@ -97,7 +118,13 @@ export type {
   SceneControllerOptions,
   CameraSnapshot,
 } from './renderer/SceneController.js';
-export type { VisibilityHost } from './renderer/types.js';
+export type {
+  VisibilityHost,
+  HighlightHost,
+  FocusHost,
+  AnnotateHost,
+} from './renderer/types.js';
+export { AnnotationRenderer } from './renderer/AnnotationRenderer.js';
 export {
   NodeColorResolver,
   DEFAULT_NODE_COLOR,

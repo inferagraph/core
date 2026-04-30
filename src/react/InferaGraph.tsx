@@ -16,6 +16,9 @@ import type { EdgeColorFn } from '../renderer/EdgeColorMap.js';
 import type { EdgeLabelMap } from '../utils/aggregateEdges.js';
 import type { LLMProvider } from '../ai/LLMProvider.js';
 import type { CacheProvider } from '../cache/lruCache.js';
+import type { ChatEvent } from '../ai/ChatEvent.js';
+import { inProcessTransport, type Transport } from '../ai/Transport.js';
+import { ChatContext, type InferaGraphChatContext } from './chatContext.js';
 
 export interface InferaGraphProps {
   data?: GraphData;
@@ -83,8 +86,34 @@ export interface InferaGraphProps {
    * scope. Requires `llm`. An empty / undefined `query` is a no-op.
    */
   query?: string;
+  /**
+   * Optional explicit chat {@link Transport}. Wins over the implicit
+   * "build an in-process transport from `llm`" path. Use this to wire
+   * an HTTP transport (Next.js `/api/chat` proxy) so the LLM + cache
+   * stay server-side.
+   */
+  transport?: Transport;
+  /**
+   * Host-facing chat callback. Called with `text` and `done` events
+   * only — tool calls (`apply_filter` / `highlight` / `focus` /
+   * `annotate`) are dispatched silently to the renderer.
+   *
+   * The host writes its own chat UI on top of this callback (input
+   * box, message log, conversation pane). InferaGraph owns the
+   * streaming / tool-routing logistics.
+   */
+  onChat?: (event: ChatEvent) => void;
   className?: string;
   style?: React.CSSProperties;
+  /**
+   * Optional children rendered inside the InferaGraph subtree. Useful
+   * for hosts that want to embed components that consume
+   * {@link useInferaGraphChat} or other hooks that depend on the
+   * InferaGraph context. Children render OUTSIDE the WebGL canvas
+   * (after the `.ig-container` div) — they're for host-owned chrome /
+   * chat UI, not for in-canvas rendering.
+   */
+  children?: React.ReactNode;
 }
 
 interface InferaGraphInnerProps {
@@ -102,8 +131,11 @@ interface InferaGraphInnerProps {
   llm?: LLMProvider;
   cache?: CacheProvider;
   query?: string;
+  transport?: Transport;
+  onChat?: (event: ChatEvent) => void;
   className?: string;
   style?: React.CSSProperties;
+  children?: React.ReactNode;
 }
 
 function InferaGraphInner({
@@ -121,8 +153,11 @@ function InferaGraphInner({
   llm,
   cache,
   query,
+  transport,
+  onChat,
   className,
   style,
+  children,
 }: InferaGraphInnerProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<SceneController | null>(null);
@@ -300,12 +335,79 @@ function InferaGraphInner({
     controller.setFilter(effectiveFilter);
   }, [effectiveFilter]);
 
+  // ---------- Chat: transport selection + dispatch + onChat callback ----------
+
+  // The active chat transport. Explicit `transport` prop wins; otherwise
+  // we synthesize an in-process transport from the AIEngine when an LLM
+  // is configured. When neither is set, transport stays `null` and
+  // `useInferaGraphChat()` throws.
+  const activeTransport = useMemo<Transport | null>(() => {
+    if (transport) return transport;
+    if (!llm) return null;
+    return inProcessTransport({ engine: aiEngine });
+  }, [transport, llm, aiEngine]);
+
+  // Stable onChat ref so the chat-context callback doesn't re-create
+  // every render (which would invalidate `useInferaGraphChat`'s
+  // memoised `chat` callback in consumers that keep a long-lived
+  // iterator).
+  const onChatRef = useRef(onChat);
+  onChatRef.current = onChat;
+
+  // Build a chat context value that surfaces the current transport
+  // through getters so swapping `transport` mid-flight is transparent
+  // to consumers.
+  const chatContextValue = useMemo<InferaGraphChatContext>(() => {
+    return {
+      getTransport: () => {
+        if (!activeTransport) return null;
+        return {
+          chat: (message, opts) => {
+            // Wrap the transport so the host's `onChat` callback fires
+            // for ALL events (text + done), but tool calls still flow
+            // through to the consumer of `useInferaGraphChat`. The hook
+            // itself filters tool calls out of its public iterable.
+            return interceptTextEvents(
+              activeTransport.chat(message, opts),
+              (ev) => {
+                onChatRef.current?.(ev);
+              },
+            );
+          },
+        };
+      },
+      dispatch: (event: ChatEvent) => {
+        const controller = controllerRef.current;
+        if (!controller) return;
+        switch (event.type) {
+          case 'apply_filter':
+            controller.setFilter(event.predicate);
+            return;
+          case 'highlight':
+            controller.setHighlight(event.ids);
+            return;
+          case 'focus':
+            controller.focusOn(event.nodeId);
+            return;
+          case 'annotate':
+            controller.annotate(event.nodeId, event.text);
+            return;
+          default:
+            return;
+        }
+      },
+    };
+  }, [activeTransport]);
+
   return (
-    <div
-      ref={containerRef}
-      className={`ig-container ${className ?? ''}`}
-      style={{ width: '100%', height: '100%', position: 'relative', ...style }}
-    />
+    <ChatContext.Provider value={chatContextValue}>
+      <div
+        ref={containerRef}
+        className={`ig-container ${className ?? ''}`}
+        style={{ width: '100%', height: '100%', position: 'relative', ...style }}
+      />
+      {children}
+    </ChatContext.Provider>
   );
 }
 
@@ -326,8 +428,11 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     llm,
     cache,
     query,
+    transport,
+    onChat,
     className,
     style,
+    children,
   } = props;
   return (
     <GraphProvider data={data}>
@@ -346,9 +451,38 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
         llm={llm}
         cache={cache}
         query={query}
+        transport={transport}
+        onChat={onChat}
         className={className}
         style={style}
-      />
+      >
+        {children}
+      </InferaGraphInner>
     </GraphProvider>
   );
+}
+
+/**
+ * Wrap a transport's chat stream so a side-effect callback fires for
+ * the `text` and `done` events the host cares about. Tool-call events
+ * are passed through unchanged so the consumer (`useInferaGraphChat`)
+ * can still dispatch them to the renderer.
+ *
+ * Pure pass-through otherwise — the iterator's order of events is
+ * preserved.
+ */
+async function* interceptTextEvents(
+  source: AsyncIterable<ChatEvent>,
+  sideEffect: (event: ChatEvent) => void,
+): AsyncGenerator<ChatEvent, void, unknown> {
+  for await (const ev of source) {
+    if (ev.type === 'text' || ev.type === 'done') {
+      try {
+        sideEffect(ev);
+      } catch {
+        // Host callbacks must not break the stream.
+      }
+    }
+    yield ev;
+  }
 }

@@ -18,11 +18,61 @@ export interface CompleteOptions {
 }
 
 /**
- * The Phase-1 LLM contract: send a prompt, get a single string back.
+ * A tool definition the LLM may emit calls for. The shape mirrors what
+ * Anthropic / OpenAI tool-calling APIs accept: a name, a human-readable
+ * description, and a JSON-Schema for the arguments.
  *
- * Streaming and tool-calls land in Phase 2 (Chat API); Phase 1 is intentionally
- * request/response only so the surface area is tiny while we wire NLQ → filter
- * predicate.
+ * AIEngine builds these for the four Phase 2 visual instructions
+ * (`apply_filter`, `highlight`, `focus`, `annotate`) and hands them to the
+ * provider via {@link StreamOptions.tools}. Providers translate them into
+ * whatever format their underlying SDK expects.
+ */
+export interface LLMToolDefinition {
+  name: string;
+  description: string;
+  /** JSON Schema for the tool's arguments. Opaque to InferaGraph. */
+  parameters: Record<string, unknown>;
+}
+
+/**
+ * Per-call options accepted by {@link LLMProvider.stream}. Extends
+ * {@link CompleteOptions} with streaming-specific concerns: cancellation
+ * via `AbortSignal` and the tool definitions the LLM may emit calls for.
+ */
+export interface StreamOptions extends CompleteOptions {
+  /**
+   * Optional cancellation signal. When aborted mid-stream the provider must
+   * stop yielding events and emit a final `{type: 'done', reason: 'aborted'}`
+   * if the stream is still alive — providers may choose to throw an
+   * `AbortError` instead, but {@link AIEngine.chat} normalises both shapes.
+   */
+  signal?: AbortSignal;
+  /**
+   * Tool definitions the provider can emit calls for. Each entry is a
+   * JSON Schema describing a callable tool. AIEngine populates this before
+   * calling stream() so the LLM knows which visual instructions are valid.
+   */
+  tools?: LLMToolDefinition[];
+}
+
+/**
+ * A single event in an LLM streaming response. Providers map their native
+ * stream protocols (Anthropic SSE, OpenAI SSE, etc.) onto this uniform
+ * shape so InferaGraph's AIEngine can consume them without knowing which
+ * provider is in use.
+ *
+ * `arguments` on a `tool_call` event is the RAW JSON string emitted by the
+ * model — the AIEngine parses + validates before turning it into a
+ * {@link ChatEvent}.
+ */
+export type LLMStreamEvent =
+  | { type: 'text'; delta: string }
+  | { type: 'tool_call'; name: string; arguments: string }
+  | { type: 'done'; reason?: 'stop' | 'length' | 'aborted' };
+
+/**
+ * The LLM provider contract. Phase 1 added `complete()`; Phase 2 adds
+ * `stream()` for the streaming chat / tool-call path.
  *
  * Hosts NEVER invoke this directly. They import a provider package
  * (`@inferagraph/anthropic-provider`, `@inferagraph/openai-provider`, etc.)
@@ -34,4 +84,16 @@ export interface LLMProvider {
   readonly name: string;
   /** Send a prompt to the model, get a single response back. */
   complete(prompt: string, opts?: CompleteOptions): Promise<string>;
+  /**
+   * Streaming completion. Returns an async iterable of LLM stream events.
+   * Tool calls come through as `tool_call` events; the provider does NOT
+   * interpret them — it forwards whatever the underlying LLM emits.
+   * AIEngine consumes the stream and decides whether each event is host-
+   * visible or silently dispatched to the renderer.
+   *
+   * Providers MUST always emit a final `{type: 'done'}` event so consumers
+   * can release resources deterministically; this is true even on error /
+   * cancellation paths (use `reason: 'aborted'`).
+   */
+  stream(prompt: string, opts?: StreamOptions): AsyncIterable<LLMStreamEvent>;
 }
