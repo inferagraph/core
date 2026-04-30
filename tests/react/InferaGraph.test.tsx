@@ -247,6 +247,118 @@ describe('InferaGraph', () => {
     expect(detach).not.toHaveBeenCalled();
   });
 
+  describe('AI props (llm / cache / query)', () => {
+    it('forwards an llm provider into the AIEngine', async () => {
+      const { mockLLMProvider } = await import('../../src/ai/MockLLMProvider.js');
+      const provider = mockLLMProvider({});
+      render(<InferaGraph data={sampleData} llm={provider} />);
+      // Renders cleanly. With no `query` prop, no predicate flows out — any
+      // setFilter call should be the inert undefined pass-through, never a
+      // function.
+      await waitFor(() => expect(syncFromStore).toHaveBeenCalled());
+      const calledWithPredicate = setFilter.mock.calls.some(
+        ([arg]) => typeof arg === 'function',
+      );
+      expect(calledWithPredicate).toBe(false);
+    });
+
+    it('forwards a cache provider into the AIEngine', async () => {
+      const { mockLLMProvider } = await import('../../src/ai/MockLLMProvider.js');
+      const { lruCache } = await import('../../src/cache/lruCache.js');
+      const provider = mockLLMProvider({});
+      const cache = lruCache({ maxEntries: 5 });
+      render(<InferaGraph data={sampleData} llm={provider} cache={cache} />);
+      await waitFor(() => expect(syncFromStore).toHaveBeenCalled());
+    });
+
+    it('compiles a `query` prop into a predicate and forwards it via setFilter', async () => {
+      const { mockLLMProvider } = await import('../../src/ai/MockLLMProvider.js');
+      const provider = mockLLMProvider(() => JSON.stringify({ type: ['person'] }));
+      render(<InferaGraph data={sampleData} llm={provider} query="only people" />);
+      await waitFor(() => expect(setFilter).toHaveBeenCalled());
+      // The most recent setFilter call should be invoked with a predicate
+      // function (not undefined) once compileFilter resolves.
+      await waitFor(() => {
+        const last = setFilter.mock.calls[setFilter.mock.calls.length - 1];
+        expect(typeof last[0]).toBe('function');
+      });
+      // And the predicate should reflect the LLM-compiled spec.
+      const last = setFilter.mock.calls[setFilter.mock.calls.length - 1];
+      const predicate = last[0] as (n: { attributes: Record<string, unknown> }) => boolean;
+      expect(predicate({ attributes: { type: 'person' } })).toBe(true);
+      expect(predicate({ attributes: { type: 'place' } })).toBe(false);
+    });
+
+    it('combines `filter` AND `query` predicates', async () => {
+      const { mockLLMProvider } = await import('../../src/ai/MockLLMProvider.js');
+      const provider = mockLLMProvider(() => JSON.stringify({ type: ['person'] }));
+      const onlyCreation = (n: { attributes: { era?: unknown } }) =>
+        n.attributes.era === 'Creation';
+      render(
+        <InferaGraph data={sampleData} llm={provider} query="only people" filter={onlyCreation} />,
+      );
+      // Wait until the LLM-derived query predicate has been merged with the
+      // explicit `filter`. We detect that via a person+Patriarchs node — the
+      // explicit filter alone would let it through (no, it requires Creation,
+      // so actually it'd be filtered). Use a person+Creation node instead:
+      // before the query predicate arrives, that returns true (era matches);
+      // after, it ALSO returns true (type matches). So we need a distinguisher:
+      // type=place + era=Creation. Before query: passes the explicit filter
+      // → true. After query merge: blocked by type=person requirement → false.
+      await waitFor(() => {
+        const last = setFilter.mock.calls[setFilter.mock.calls.length - 1];
+        expect(typeof last?.[0]).toBe('function');
+        const predicate = last[0] as (n: { attributes: Record<string, unknown> }) => boolean;
+        // After merge, place+Creation must be excluded (type≠person).
+        expect(predicate({ attributes: { type: 'place', era: 'Creation' } })).toBe(false);
+      });
+      const last = setFilter.mock.calls[setFilter.mock.calls.length - 1];
+      const predicate = last[0] as (n: { attributes: Record<string, unknown> }) => boolean;
+      expect(predicate({ attributes: { type: 'person', era: 'Creation' } })).toBe(true);
+      expect(predicate({ attributes: { type: 'person', era: 'Patriarchs' } })).toBe(false);
+      expect(predicate({ attributes: { type: 'place', era: 'Creation' } })).toBe(false);
+    });
+
+    it('does not call setFilter for query when no llm is configured', async () => {
+      // Without an llm, the `query` prop is inert. Only the explicit `filter`
+      // prop (if any) flows through. With no filter and no llm, setFilter
+      // should not be called with a predicate function.
+      render(<InferaGraph data={sampleData} query="only people" />);
+      await waitFor(() => expect(syncFromStore).toHaveBeenCalled());
+      const calledWithPredicate = setFilter.mock.calls.some(
+        ([arg]) => typeof arg === 'function',
+      );
+      expect(calledWithPredicate).toBe(false);
+    });
+
+    it('updating `query` retriggers compileFilter and updates setFilter', async () => {
+      const { mockLLMProvider } = await import('../../src/ai/MockLLMProvider.js');
+      const provider = mockLLMProvider((prompt) => {
+        if (prompt.includes('first query')) return JSON.stringify({ type: ['person'] });
+        if (prompt.includes('second query')) return JSON.stringify({ type: ['place'] });
+        return '{}';
+      });
+      const { rerender } = render(
+        <InferaGraph data={sampleData} llm={provider} query="first query" />,
+      );
+
+      await waitFor(() => {
+        const last = setFilter.mock.calls[setFilter.mock.calls.length - 1];
+        expect(typeof last?.[0]).toBe('function');
+        const predicate = last[0] as (n: { attributes: Record<string, unknown> }) => boolean;
+        expect(predicate({ attributes: { type: 'person' } })).toBe(true);
+      });
+
+      rerender(<InferaGraph data={sampleData} llm={provider} query="second query" />);
+      await waitFor(() => {
+        const last = setFilter.mock.calls[setFilter.mock.calls.length - 1];
+        const predicate = last[0] as (n: { attributes: Record<string, unknown> }) => boolean;
+        expect(predicate({ attributes: { type: 'place' } })).toBe(true);
+        expect(predicate({ attributes: { type: 'person' } })).toBe(false);
+      });
+    });
+  });
+
   it('observes container resize and forwards to the controller', async () => {
     const observeSpy = vi.fn();
     const disconnectSpy = vi.fn();

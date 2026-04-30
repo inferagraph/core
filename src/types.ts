@@ -52,34 +52,17 @@ export interface SearchResult {
   matches: string[];
 }
 
-/** LLM message role */
+/**
+ * Chat message role (Phase 2 / chat API). Kept here even though Phase 1 uses
+ * single-shot `complete()` only — Phase 2 will reintroduce a full chat API and
+ * downstream packages (`@inferagraph/anthropic-provider` etc.) already type
+ * against this in their roadmap.
+ */
 export type MessageRole = 'system' | 'user' | 'assistant';
 
-/** LLM message */
+/** Chat message (Phase 2 / chat API). See {@link MessageRole}. */
 export interface LLMMessage {
   role: MessageRole;
-  content: string;
-}
-
-/** LLM completion request */
-export interface LLMCompletionRequest {
-  messages: LLMMessage[];
-  maxTokens?: number;
-  temperature?: number;
-}
-
-/** LLM completion response */
-export interface LLMCompletionResponse {
-  content: string;
-  usage?: {
-    inputTokens: number;
-    outputTokens: number;
-  };
-}
-
-/** LLM stream chunk */
-export interface LLMStreamChunk {
-  type: 'text' | 'done' | 'error';
   content: string;
 }
 

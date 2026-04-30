@@ -62,7 +62,7 @@ function HookReader({ onHook }: { onHook: (hook: UseInferaGraphReturn) => void }
 
 describe('useInferaGraph', () => {
   describe('without adapter (manual mode)', () => {
-    it('should return loadData, query, nodeCount, and edgeCount', () => {
+    it('should return loadData, nodeCount, and edgeCount', () => {
       let captured: UseInferaGraphReturn | null = null;
       render(
         <GraphProvider>
@@ -72,7 +72,6 @@ describe('useInferaGraph', () => {
 
       expect(captured).not.toBeNull();
       expect(typeof captured!.loadData).toBe('function');
-      expect(typeof captured!.query).toBe('function');
       expect(captured!.nodeCount).toBe(0);
       expect(captured!.edgeCount).toBe(0);
     });
