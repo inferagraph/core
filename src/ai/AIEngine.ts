@@ -2,6 +2,7 @@ import type { NodeData } from '../types.js';
 import type { GraphStore } from '../store/GraphStore.js';
 import type { QueryEngine } from '../store/QueryEngine.js';
 import type { CacheProvider } from '../cache/lruCache.js';
+import { SearchEngine } from '../store/SearchEngine.js';
 import type {
   CompleteOptions,
   LLMProvider,
@@ -9,6 +10,15 @@ import type {
   LLMToolDefinition,
 } from './LLMProvider.js';
 import type { ChatEvent, ChatOptions, FilterSpec } from './ChatEvent.js';
+import {
+  contentHash as computeContentHash,
+  cosineSimilarity,
+  type EmbeddingRecord,
+  type EmbeddingStore,
+  type Vector,
+} from './Embedding.js';
+import { SchemaInspector, embeddingText } from './SchemaInspector.js';
+import type { SearchResult } from './SearchResult.js';
 
 /**
  * Tunables for the AI engine. Phase 1 deliberately keeps this small — chat,
@@ -18,11 +28,18 @@ export interface AIEngineConfig {
   /**
    * Maximum number of distinct values to include per attribute when describing
    * the dataset schema to the LLM. Keeps token usage bounded on large graphs.
-   * Default: 10. Phase 3 replaces this lightweight discovery with a richer
-   * schema engine; consumers shouldn't depend on the exact prompt shape.
+   * Default: 10.
    */
   schemaSampleSize?: number;
+  /**
+   * Default `k` for {@link AIEngine.search}. Default: 25.
+   * Per-call `opts.k` always wins.
+   */
+  defaultSearchK?: number;
 }
+
+/** Internal: which embedding storage path is currently active. */
+type EmbeddingTier = 'tier-1' | 'tier-2' | 'tier-3';
 
 /**
  * Locked Phase 2 tool definitions. The same names + parameter shapes are
@@ -128,14 +145,32 @@ interface CachedChatReplay {
 export class AIEngine {
   private readonly store: GraphStore;
   private readonly schemaSampleSize: number;
+  private readonly defaultSearchK: number;
+  private readonly inspector: SchemaInspector;
+  private readonly keywordEngine: SearchEngine;
   private provider: LLMProvider | undefined;
   private cache: CacheProvider | undefined;
+  private embeddingStore: EmbeddingStore | undefined;
   /**
    * Reference identity of the last provider seen by any cached operation.
    * Per the user's design choice, switching the provider instance triggers a
    * `cache.clear()` so responses from the prior model don't bleed across.
    */
   private lastProvider: LLMProvider | undefined;
+  /**
+   * Most-recent embedding warmup promise. `undefined` until the first
+   * call to {@link ensureEmbeddings}; non-`undefined` while warmup is
+   * either in-flight or settled. Re-used by all callers within a single
+   * "data version" so concurrent searches never trigger duplicate batch
+   * embeds.
+   */
+  private warmupPromise: Promise<void> | undefined;
+  /**
+   * Hash of the (provider-name, store-snapshot) signature that the current
+   * warmup was issued against. When the snapshot changes (data edit, provider
+   * swap, etc.) we drop {@link warmupPromise} on next ensure call.
+   */
+  private warmupSignature: string | undefined;
 
   constructor(
     store: GraphStore,
@@ -144,11 +179,20 @@ export class AIEngine {
   ) {
     this.store = store;
     this.schemaSampleSize = config?.schemaSampleSize ?? 10;
+    this.defaultSearchK = config?.defaultSearchK ?? 25;
+    this.inspector = new SchemaInspector(store, {
+      maxSamplesPerAttribute: this.schemaSampleSize,
+    });
+    this.keywordEngine = new SearchEngine(store);
   }
 
   /** Inject (or replace) the LLM provider. Triggers cache wipe if it changes. */
   setProvider(provider: LLMProvider | undefined): void {
     this.provider = provider;
+    // Provider changes invalidate any in-flight or settled warmup — the next
+    // ensureEmbeddings() call will compute fresh.
+    this.warmupPromise = undefined;
+    this.warmupSignature = undefined;
   }
 
   /** Get the current LLM provider, or `undefined` if none configured. */
@@ -162,11 +206,42 @@ export class AIEngine {
     // Reset the provider tracker so the next call doesn't see a stale identity
     // and skip clearing a freshly-attached cache.
     this.lastProvider = undefined;
+    this.warmupPromise = undefined;
+    this.warmupSignature = undefined;
   }
 
   /** Get the current cache, or `undefined` if caching is disabled. */
   getCache(): CacheProvider | undefined {
     return this.cache;
+  }
+
+  /**
+   * Inject (or replace) a dedicated {@link EmbeddingStore}. Pass `undefined`
+   * to fall back to Tier 2 (cache) or Tier 1 (no embeddings) per the
+   * progressive-enhancement contract.
+   */
+  setEmbeddingStore(store: EmbeddingStore | undefined): void {
+    this.embeddingStore = store;
+    this.warmupPromise = undefined;
+    this.warmupSignature = undefined;
+  }
+
+  /** Get the current embedding store, or `undefined` if none configured. */
+  getEmbeddingStore(): EmbeddingStore | undefined {
+    return this.embeddingStore;
+  }
+
+  /**
+   * Detect which embedding storage tier is currently active. Tier 1 means
+   * "no semantic search" — search() will fall back to keyword. Tier 2 uses
+   * the cache as a vector store. Tier 3 uses a dedicated EmbeddingStore.
+   *
+   * Exposed for tests + diagnostics; consumers don't normally read this.
+   */
+  getEmbeddingTier(): EmbeddingTier {
+    if (this.embeddingStore && this.providerHasEmbed()) return 'tier-3';
+    if (this.cache && this.providerHasEmbed()) return 'tier-2';
+    return 'tier-1';
   }
 
   /**
@@ -412,28 +487,302 @@ export class AIEngine {
   }
 
   /**
-   * Internal: a tiny schema-discovery pass. Phase 3 replaces this with a real
-   * schema engine (with cardinality, type inference, value frequency, etc.).
-   * For Phase 1 we only need enough to teach the LLM which attribute keys exist.
+   * Phase 3: idempotent batch warmup. Walks the store, computes content
+   * hashes per node, and embeds anything missing from the active store
+   * (cache for Tier 2, embeddingStore for Tier 3). No-op for Tier 1.
+   *
+   * Concurrent callers with the same `(provider, data)` signature share a
+   * single in-flight Promise so we never run two batches in parallel. The
+   * Promise resolves once every node has a fresh-or-cached embedding.
+   *
+   * Errors during a single node's embed are swallowed (logged via console)
+   * so one bad text doesn't block search for the rest. The next call will
+   * retry the failures.
    */
-  private discoverSchema(): SchemaSummary {
-    const schema = new Map<string, Set<string>>();
+  ensureEmbeddings(): Promise<void> {
+    const tier = this.getEmbeddingTier();
+    if (tier === 'tier-1') return Promise.resolve();
+
+    const sig = this.computeWarmupSignature();
+    if (this.warmupPromise && this.warmupSignature === sig) {
+      return this.warmupPromise;
+    }
+    this.warmupSignature = sig;
+    this.warmupPromise = this.runWarmup(tier).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn('[InferaGraph AIEngine] ensureEmbeddings failed:', err);
+    });
+    return this.warmupPromise;
+  }
+
+  /**
+   * Phase 4: single search entry-point. Auto-detects keyword vs semantic
+   * routing based on the query shape:
+   *
+   *   - Short token-only inputs (≤3 whitespace-separated tokens, lowercase
+   *     letters/digits/hyphens, no punctuation) → keyword search via the
+   *     existing data-layer SearchEngine. Always available.
+   *   - Anything else (sentences, NLQ, mixed-case prose) → semantic search
+   *     via {@link provider.embed} + the active embedding store. When
+   *     embeddings aren't available (Tier 1), falls back to keyword.
+   *
+   * Returns at most `opts.k ?? 25` hits, sorted by descending score. An
+   * empty / whitespace-only query returns `[]`.
+   */
+  async search(
+    query: string,
+    opts?: { k?: number; signal?: AbortSignal },
+  ): Promise<SearchResult[]> {
+    const trimmed = query?.trim() ?? '';
+    if (trimmed.length === 0) return [];
+    const k = opts?.k ?? this.defaultSearchK;
+    const signal = opts?.signal;
+    if (signal?.aborted) return [];
+
+    const tier = this.getEmbeddingTier();
+    const isKeyword = isKeywordShape(trimmed);
+    if (isKeyword || tier === 'tier-1') {
+      return this.runKeywordSearch(trimmed, k);
+    }
+
+    return this.runSemanticSearch(trimmed, k, signal);
+  }
+
+  /** Run keyword search via the data-layer SearchEngine and shape results. */
+  private runKeywordSearch(query: string, k: number): SearchResult[] {
+    const raw = this.keywordEngine.search(query);
+    const out: SearchResult[] = [];
+    for (const r of raw) {
+      const matchedField = pickMatchedField(r.matches);
+      out.push({ nodeId: r.nodeId, score: r.score, matchedField });
+      if (out.length >= k) break;
+    }
+    return out;
+  }
+
+  /**
+   * Run semantic search: embed the query, ensure node embeddings are warm,
+   * then delegate to the active store's similarity API (Tier 3) or compute
+   * cosine in-memory across cache entries (Tier 2).
+   */
+  private async runSemanticSearch(
+    query: string,
+    k: number,
+    signal: AbortSignal | undefined,
+  ): Promise<SearchResult[]> {
+    if (!this.providerHasEmbed() || !this.provider) return [];
+    const embedFn = this.provider.embed!.bind(this.provider);
+
+    // Kick off warmup but don't block the user's query — we'll search
+    // whatever's already embedded. The warmup completes in the background
+    // and benefits subsequent queries.
+    void this.ensureEmbeddings();
+
+    let queryVectors: Vector[];
+    try {
+      queryVectors = await embedFn([query], { signal });
+    } catch {
+      return [];
+    }
+    const queryVector = queryVectors[0];
+    if (!queryVector || queryVector.length === 0) return [];
+    if (signal?.aborted) return [];
+
+    const tier = this.getEmbeddingTier();
+    const model = inferModel(this.provider);
+    if (tier === 'tier-3' && this.embeddingStore) {
+      const hits = await this.embeddingStore.similar(queryVector, k, model, '');
+      return hits.map((h) => ({ nodeId: h.nodeId, score: h.score }));
+    }
+    // Tier 2: cache as vector store. Load the index + every record, score in-memory.
+    const records = await this.loadCachedEmbeddings();
+    const filtered = model
+      ? records.filter((r) => r.meta.model === model)
+      : records;
+    const seen = new Map<string, number>();
+    for (const r of filtered) {
+      const score = cosineSimilarity(queryVector, r.vector);
+      if (Number.isNaN(score)) continue;
+      const prev = seen.get(r.nodeId);
+      if (prev === undefined || score > prev) seen.set(r.nodeId, score);
+    }
+    const hits: SearchResult[] = [];
+    for (const [nodeId, score] of seen) hits.push({ nodeId, score });
+    hits.sort((a, b) => b.score - a.score);
+    return hits.slice(0, k);
+  }
+
+  /** Returns true when the configured provider exposes the optional `embed` method. */
+  private providerHasEmbed(): boolean {
+    return !!this.provider && typeof this.provider.embed === 'function';
+  }
+
+  /** Internal: signature used to detect when an in-flight warmup is stale. */
+  private computeWarmupSignature(): string {
+    const providerName = this.provider?.name ?? '';
+    const tier = this.getEmbeddingTier();
+    return `${providerName}|${tier}|${this.store.nodeCount}`;
+  }
+
+  /** Internal: actual warmup body. Runs once per signature. */
+  private async runWarmup(tier: EmbeddingTier): Promise<void> {
+    if (!this.provider || !this.providerHasEmbed()) return;
+    const embedFn = this.provider.embed!.bind(this.provider);
+    const model = inferModel(this.provider);
+    const modelVersion = '';
     const nodes = this.store.getAllNodes();
-    for (const node of nodes) {
-      for (const [key, value] of Object.entries(node.attributes)) {
-        let bucket = schema.get(key);
-        if (!bucket) {
-          bucket = new Set();
-          schema.set(key, bucket);
-        }
-        if (bucket.size >= this.schemaSampleSize) continue;
-        for (const sample of summarizeValue(value)) {
-          if (bucket.size >= this.schemaSampleSize) break;
-          bucket.add(sample);
-        }
+
+    // Determine which nodes need fresh embeddings (missing or content-hash mismatch).
+    const pending: Array<{ node: NodeData; text: string; hash: string }> = [];
+    for (const storeNode of nodes) {
+      const node: NodeData = {
+        id: storeNode.id,
+        attributes: storeNode.attributes,
+      };
+      const text = embeddingText(node);
+      const hash = computeContentHash(text);
+      const existing = await this.lookupEmbedding(node.id, model, modelVersion, hash);
+      if (existing) continue;
+      pending.push({ node, text, hash });
+    }
+    if (pending.length === 0) return;
+
+    // Batch the embed call — providers handle their own internal batching too,
+    // but we send a single array per warmup pass for fewer round-trips.
+    const texts = pending.map((p) => p.text);
+    let vectors: Vector[];
+    try {
+      vectors = await embedFn(texts);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[InferaGraph AIEngine] embed batch failed:', err);
+      return;
+    }
+    const generatedAt = new Date().toISOString();
+    for (let i = 0; i < pending.length; i++) {
+      const vector = vectors[i];
+      if (!vector) continue;
+      const record: EmbeddingRecord = {
+        nodeId: pending[i].node.id,
+        vector,
+        meta: {
+          model,
+          modelVersion,
+          generatedAt,
+          contentHash: pending[i].hash,
+        },
+      };
+      await this.persistEmbedding(record, tier);
+    }
+  }
+
+  private async lookupEmbedding(
+    nodeId: string,
+    model: string,
+    modelVersion: string,
+    hash: string,
+  ): Promise<EmbeddingRecord | undefined> {
+    if (this.embeddingStore) {
+      return this.embeddingStore.get(nodeId, model, modelVersion, hash);
+    }
+    if (this.cache) {
+      const raw = await this.cache.get(embedCacheKey(nodeId, model, modelVersion, hash));
+      if (!raw) return undefined;
+      try {
+        const parsed = JSON.parse(raw) as EmbeddingRecord;
+        if (parsed && Array.isArray(parsed.vector) && parsed.meta) return parsed;
+      } catch {
+        return undefined;
       }
     }
-    return schema;
+    return undefined;
+  }
+
+  private async persistEmbedding(
+    record: EmbeddingRecord,
+    tier: EmbeddingTier,
+  ): Promise<void> {
+    if (tier === 'tier-3' && this.embeddingStore) {
+      await this.embeddingStore.set(record);
+      return;
+    }
+    if (tier === 'tier-2' && this.cache) {
+      const key = embedCacheKey(
+        record.nodeId,
+        record.meta.model,
+        record.meta.modelVersion,
+        record.meta.contentHash,
+      );
+      try {
+        await this.cache.set(key, JSON.stringify(record));
+      } catch {
+        // Cache failures must never break warmup.
+      }
+      // Also maintain a sidecar index so Tier 2 similarity can enumerate
+      // every embedded nodeId without scanning unrelated cache keys.
+      await this.appendToCacheIndex(record.nodeId, record.meta.model, record.meta.modelVersion, record.meta.contentHash);
+    }
+  }
+
+  private async appendToCacheIndex(
+    nodeId: string,
+    model: string,
+    modelVersion: string,
+    hash: string,
+  ): Promise<void> {
+    if (!this.cache) return;
+    try {
+      const raw = await this.cache.get(EMBED_INDEX_KEY);
+      const list: string[] = raw ? (JSON.parse(raw) as string[]) : [];
+      const entry = `${nodeId}|${model}|${modelVersion}|${hash}`;
+      if (!list.includes(entry)) list.push(entry);
+      await this.cache.set(EMBED_INDEX_KEY, JSON.stringify(list));
+    } catch {
+      // Index failures are non-fatal — similarity will degrade but not crash.
+    }
+  }
+
+  /**
+   * Load every cached embedding record (Tier 2). Walks the sidecar index,
+   * fetches each entry, drops malformed values silently.
+   */
+  private async loadCachedEmbeddings(): Promise<EmbeddingRecord[]> {
+    if (!this.cache) return [];
+    let list: string[] = [];
+    try {
+      const raw = await this.cache.get(EMBED_INDEX_KEY);
+      list = raw ? (JSON.parse(raw) as string[]) : [];
+    } catch {
+      return [];
+    }
+    const records: EmbeddingRecord[] = [];
+    for (const entry of list) {
+      const [nodeId, model, modelVersion, hash] = entry.split('|');
+      if (!nodeId) continue;
+      const raw = await this.cache.get(embedCacheKey(nodeId, model ?? '', modelVersion ?? '', hash ?? ''));
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as EmbeddingRecord;
+        if (parsed && Array.isArray(parsed.vector) && parsed.meta) records.push(parsed);
+      } catch {
+        // skip
+      }
+    }
+    return records;
+  }
+
+  /**
+   * Internal: compatibility wrapper used by the prompt builders. Returns
+   * the same key→samples shape the legacy code expected, but sourced
+   * from the new {@link SchemaInspector}.
+   */
+  private discoverSchema(): SchemaSummary {
+    const summary = this.inspector.summary();
+    const out: SchemaSummary = new Map();
+    for (const [key, attr] of summary.attributes) {
+      out.set(key, new Set(attr.samples));
+    }
+    return out;
   }
 
   /**
@@ -492,6 +841,70 @@ export class AIEngine {
 
 type SchemaSummary = Map<string, Set<string>>;
 
+/** Sidecar cache key listing every (nodeId|model|version|hash) entry persisted. */
+const EMBED_INDEX_KEY = '__inferagraph_embed_index__';
+
+/**
+ * Cache key for a Tier 2 embedding entry. The key prefix lets callers
+ * recognise our entries vs other consumer-owned cache slots, and the
+ * composite suffix matches {@link EmbeddingStore.get}'s contract.
+ */
+function embedCacheKey(
+  nodeId: string,
+  model: string,
+  modelVersion: string,
+  hash: string,
+): string {
+  return `embed|${escapePipe(nodeId)}|${model}|${modelVersion}|${hash}`;
+}
+
+function escapePipe(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+}
+
+/**
+ * Decide whether a query is "keyword-shaped" (≤3 lowercase tokens, no
+ * punctuation other than hyphens) vs sentence/NLQ-shaped. Threshold tuned
+ * to handle typical lookup intents like `"adam"`, `"sons of noah"`,
+ * `"early-patriarchs"` while routing anything sentence-shaped (containing
+ * uppercase letters mid-string, punctuation, or 4+ tokens) to semantic.
+ */
+export function isKeywordShape(query: string): boolean {
+  const trimmed = query.trim();
+  if (trimmed.length === 0) return true;
+  const tokens = trimmed.split(/\s+/);
+  if (tokens.length > 3) return false;
+  for (const token of tokens) {
+    if (!/^[a-z0-9-]+$/.test(token)) return false;
+  }
+  return true;
+}
+
+/**
+ * Pick the attribute key for a `SearchResult.matchedField`. Data-layer
+ * `SearchEngine` returns matches as `"key: value"` strings; we strip down
+ * to the key for the AI-side shape.
+ */
+function pickMatchedField(matches: string[]): string | undefined {
+  if (matches.length === 0) return undefined;
+  const first = matches[0];
+  const colon = first.indexOf(':');
+  return colon > 0 ? first.slice(0, colon) : first;
+}
+
+/**
+ * Pull the embedding model name from a provider for cache scoping. Providers
+ * may expose it via a `defaultEmbeddingModel` getter; absent that, we fall
+ * back to the provider's `name` (which is enough to keep model families
+ * apart in practice).
+ */
+function inferModel(provider: LLMProvider): string {
+  const candidate = (provider as unknown as { defaultEmbeddingModel?: string })
+    .defaultEmbeddingModel;
+  if (typeof candidate === 'string' && candidate.length > 0) return candidate;
+  return provider.name;
+}
+
 function renderSchemaBlock(
   schema: SchemaSummary,
   sampleSize: number,
@@ -502,21 +915,6 @@ function renderSchemaBlock(
     lines.push(`- ${key}: ${samples.join(', ')}`);
   }
   return lines.length > 0 ? lines.join('\n') : '(no attributes)';
-}
-
-function summarizeValue(value: unknown): string[] {
-  if (value == null) return [];
-  if (typeof value === 'string') return [value];
-  if (typeof value === 'number' || typeof value === 'boolean') return [String(value)];
-  if (Array.isArray(value)) {
-    const out: string[] = [];
-    for (const item of value) {
-      if (typeof item === 'string') out.push(item);
-      else if (typeof item === 'number' || typeof item === 'boolean') out.push(String(item));
-    }
-    return out;
-  }
-  return [];
 }
 
 /**

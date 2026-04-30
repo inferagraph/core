@@ -72,12 +72,19 @@ export type LLMStreamEvent =
 
 /**
  * The LLM provider contract. Phase 1 added `complete()`; Phase 2 adds
- * `stream()` for the streaming chat / tool-call path.
+ * `stream()` for the streaming chat / tool-call path; Phase 3 adds the
+ * **optional** `embed()` method for vector embeddings.
  *
  * Hosts NEVER invoke this directly. They import a provider package
  * (`@inferagraph/anthropic-provider`, `@inferagraph/openai-provider`, etc.)
  * and pass a configured instance to `<InferaGraph llm={...} />`. From that
  * point on InferaGraph owns the entire LLM lifecycle.
+ *
+ * Providers without native embedding support (e.g. raw Anthropic) simply
+ * omit `embed`; consumers can still mix-and-match — pass an Anthropic
+ * provider for chat AND a separate provider for embeddings (or, in the
+ * Anthropic provider's case, provide a Voyage AI key in its config so it
+ * exposes an `embed` itself).
  */
 export interface LLMProvider {
   /** Provider name for diagnostics (e.g., "anthropic", "openai", "mock"). */
@@ -96,4 +103,20 @@ export interface LLMProvider {
    * cancellation paths (use `reason: 'aborted'`).
    */
   stream(prompt: string, opts?: StreamOptions): AsyncIterable<LLMStreamEvent>;
+  /**
+   * **Optional** — embed a batch of texts and return one vector per text,
+   * in the same order. Providers that don't support embeddings MUST omit
+   * this method entirely (rather than throwing) so the AIEngine's tier
+   * detection can identify them via `'embed' in provider`.
+   *
+   * Implementations should preserve input order, return plain `number[]`
+   * vectors (not typed arrays — see {@link Vector}), and respect
+   * `opts.signal` when supported by the underlying SDK.
+   */
+  embed?(texts: string[], opts?: EmbedOptions): Promise<Vector[]>;
 }
+
+// Re-export the embedding types here so provider authors only need to import
+// from one path. The canonical definitions live in ./Embedding.ts.
+export type { Vector, EmbedOptions } from './Embedding.js';
+import type { Vector, EmbedOptions } from './Embedding.js';

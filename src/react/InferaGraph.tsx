@@ -17,6 +17,7 @@ import type { EdgeLabelMap } from '../utils/aggregateEdges.js';
 import type { LLMProvider } from '../ai/LLMProvider.js';
 import type { CacheProvider } from '../cache/lruCache.js';
 import type { ChatEvent } from '../ai/ChatEvent.js';
+import type { EmbeddingStore } from '../ai/Embedding.js';
 import { inProcessTransport, type Transport } from '../ai/Transport.js';
 import { ChatContext, type InferaGraphChatContext } from './chatContext.js';
 
@@ -77,8 +78,26 @@ export interface InferaGraphProps {
    * `lruCache()` (built-in) or `@inferagraph/redis-cache-provider` for
    * production. The cache is wiped automatically when the LLM provider
    * instance changes.
+   *
+   * Also acts as the **Tier 2** embedding storage when `embeddingStore` is
+   * not supplied AND the configured `llm` provider implements `embed()` —
+   * embeddings are persisted in the cache and similarity is computed
+   * in-memory at query time.
    */
   cache?: CacheProvider;
+  /**
+   * Optional dedicated {@link EmbeddingStore} (Tier 3 of the embedding
+   * progression). When supplied, AIEngine uses the store's vector-native
+   * `similar()` for semantic search. The default in-process implementation
+   * ships as `inMemoryEmbeddingStore()`; persistent stores live in their
+   * own packages.
+   *
+   * Tier mapping at runtime:
+   *   - omit both → keyword search only.
+   *   - `cache` only + provider with `embed()` → Tier 2.
+   *   - `embeddingStore` + provider with `embed()` → Tier 3.
+   */
+  embeddingStore?: EmbeddingStore;
   /**
    * Natural-language query that the LLM compiles into a filter predicate.
    * Combined with the explicit `filter` prop via AND: the developer-set
@@ -130,6 +149,7 @@ interface InferaGraphInnerProps {
   filter?: (node: NodeData) => boolean;
   llm?: LLMProvider;
   cache?: CacheProvider;
+  embeddingStore?: EmbeddingStore;
   query?: string;
   transport?: Transport;
   onChat?: (event: ChatEvent) => void;
@@ -152,6 +172,7 @@ function InferaGraphInner({
   filter,
   llm,
   cache,
+  embeddingStore,
   query,
   transport,
   onChat,
@@ -287,6 +308,14 @@ function InferaGraphInner({
   useEffect(() => {
     aiEngine.setCache(cache);
   }, [aiEngine, cache]);
+
+  // Push the embedding store into the AIEngine. The engine selects its
+  // tier (1 / 2 / 3) lazily based on whether cache + embeddingStore are
+  // configured AND whether the provider implements `embed()`, so this
+  // wiring is purely "hand the dependency in".
+  useEffect(() => {
+    aiEngine.setEmbeddingStore(embeddingStore);
+  }, [aiEngine, embeddingStore]);
 
   // Compile the natural-language `query` prop into a predicate. We track the
   // current async run with a token so a fast-typed query doesn't race a slow
@@ -427,6 +456,7 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     filter,
     llm,
     cache,
+    embeddingStore,
     query,
     transport,
     onChat,
@@ -450,6 +480,7 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
         filter={filter}
         llm={llm}
         cache={cache}
+        embeddingStore={embeddingStore}
         query={query}
         transport={transport}
         onChat={onChat}
