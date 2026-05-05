@@ -65,6 +65,20 @@ export interface InferaGraphProps {
    */
   filter?: (node: NodeData) => boolean;
   /**
+   * Tree-mode option: edge types that the hierarchical tidy-tree layout
+   * treats as parent -> child. Default `['parent_of']` — set to your
+   * domain's vocabulary (`['manages']` for org charts, `['supplies']`
+   * for supply chains, `['is_a']` for taxonomies, `['cites']` for
+   * citation graphs, etc.). Has no effect in graph mode.
+   */
+  parentEdgeTypes?: string[];
+  /**
+   * Tree-mode option: edge types that pair two nodes at the same depth
+   * so they appear adjacent and share children. Default `[]` (no
+   * pairing). Has no effect in graph mode.
+   */
+  pairedEdgeTypes?: string[];
+  /**
    * LLM provider for AI features (NLQ filtering today; chat / search / highlight
    * land in later phases). The host imports a provider package and passes a
    * configured INSTANCE here. The host never invokes the LLM directly —
@@ -193,6 +207,8 @@ interface InferaGraphInnerProps {
   incomingEdgeLabels?: EdgeLabelMap;
   outgoingEdgeLabels?: EdgeLabelMap;
   filter?: (node: NodeData) => boolean;
+  parentEdgeTypes?: string[];
+  pairedEdgeTypes?: string[];
   llm?: LLMProvider;
   cache?: CacheProvider;
   embeddingStore?: EmbeddingStore;
@@ -219,6 +235,8 @@ function InferaGraphInner({
   incomingEdgeLabels,
   outgoingEdgeLabels,
   filter,
+  parentEdgeTypes,
+  pairedEdgeTypes,
   llm,
   cache,
   embeddingStore,
@@ -287,6 +305,8 @@ function InferaGraphInner({
       // any LLM-derived `queryPredicate` arrives asynchronously and is pushed
       // in via the dedicated `effectiveFilter` effect below.
       filter,
+      parentEdgeTypes,
+      pairedEdgeTypes,
     });
     controller.attach(container);
     controllerRef.current = controller;
@@ -577,6 +597,8 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     incomingEdgeLabels,
     outgoingEdgeLabels,
     filter,
+    parentEdgeTypes,
+    pairedEdgeTypes,
     llm,
     cache,
     embeddingStore,
@@ -606,6 +628,8 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
         incomingEdgeLabels={incomingEdgeLabels}
         outgoingEdgeLabels={outgoingEdgeLabels}
         filter={filter}
+        parentEdgeTypes={parentEdgeTypes}
+        pairedEdgeTypes={pairedEdgeTypes}
         llm={llm}
         cache={cache}
         embeddingStore={embeddingStore}

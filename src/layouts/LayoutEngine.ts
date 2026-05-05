@@ -31,8 +31,8 @@ export abstract class LayoutEngine {
 
 /**
  * Edge input shape consumed by {@link LayoutEngine.compute}. The optional
- * `type` is the raw `EdgeAttributes.type` string (e.g. `father_of`,
- * `husband_of`); layouts that care about kinship structure (the tree
+ * `type` is the raw `EdgeAttributes.type` string (e.g. `parent_of`,
+ * `manages`, `cites`); layouts that care about hierarchy (the tree
  * layout) consult it, layouts that don't (force-directed) ignore it.
  */
 export interface LayoutEdgeInput {

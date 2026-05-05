@@ -272,6 +272,21 @@ export interface SceneControllerOptions {
    * `show()` on the affordance instance.
    */
   showExpandAffordance?: boolean;
+  /**
+   * Forwarded to {@link TreeLayout} when the controller constructs the
+   * tree-mode layout engine. Edge types treated as parent -> child for
+   * the hierarchical tidy-tree layout. Default `['parent_of']` — set
+   * to your domain's vocabulary (`['manages']` for org charts,
+   * `['supplies']` for supply chains, `['is_a']` for taxonomies, etc.).
+   * Has no effect in graph mode.
+   */
+  parentEdgeTypes?: string[];
+  /**
+   * Forwarded to {@link TreeLayout}. Edge types that pair two nodes at
+   * the same depth (they appear adjacent and share children). Default
+   * `[]` (no pairing). Has no effect in graph mode.
+   */
+  pairedEdgeTypes?: string[];
 }
 
 /**
@@ -407,6 +422,15 @@ export class SceneController implements InferredEdgeHost {
    * working without null checks.
    */
   private readonly showExpandAffordance: boolean;
+  /**
+   * Tree-layout edge-type configuration. Captured at construction and
+   * forwarded to {@link TreeLayout} every time {@link createLayoutEngine}
+   * builds a fresh tree engine (initial mount + every `setLayout('tree')`).
+   * Default for `parentEdgeTypes` is `['parent_of']`; default for
+   * `pairedEdgeTypes` is `[]`.
+   */
+  private readonly parentEdgeTypes: readonly string[] | undefined;
+  private readonly pairedEdgeTypes: readonly string[] | undefined;
 
   private nodeIdsByIndex: string[] = [];
   private nodesByIndex: NodeData[] = [];
@@ -474,7 +498,9 @@ export class SceneController implements InferredEdgeHost {
   constructor(options: SceneControllerOptions) {
     this.store = options.store;
     this.layoutMode = options.layout ?? 'graph';
-    this.layoutEngine = SceneController.createLayoutEngine(this.layoutMode);
+    this.parentEdgeTypes = options.parentEdgeTypes;
+    this.pairedEdgeTypes = options.pairedEdgeTypes;
+    this.layoutEngine = this.createLayoutEngine(this.layoutMode);
     this.nodeRender = options.nodeRender;
     this.tooltip = options.tooltip;
     this.incomingEdgeLabels = options.incomingEdgeLabels;
@@ -734,10 +760,11 @@ export class SceneController implements InferredEdgeHost {
     this.nodeIdsByIndex = nodes.map((n) => n.id);
     this.nodesByIndex = nodes.slice();
     this.edgeIdsByIndex = edges.map((e) => e.id);
-    // Capture the edge `type` (e.g. `father_of`, `husband_of`) alongside the
-    // endpoints so the active layout can consult it. The tree layout uses
-    // the type to distinguish parent edges from spouse edges; force
-    // layouts ignore it.
+    // Capture the edge `type` (e.g. `parent_of`, `manages`, `cites`)
+    // alongside the endpoints so the active layout can consult it. The
+    // tree layout uses the type to distinguish parent edges from paired
+    // edges (per its configured `parentEdgeTypes` / `pairedEdgeTypes`);
+    // force layouts ignore it.
     this.edgeEndpoints = edges.map((e) => ({
       sourceId: e.sourceId,
       targetId: e.targetId,
@@ -1033,13 +1060,13 @@ export class SceneController implements InferredEdgeHost {
   }
 
   /**
-   * Walk the typed edge list to derive parent→child and spouse
-   * relationships, then produce the orthogonal-connector line segments
-   * required by the tree view.
+   * Walk the typed edge list to derive parent->child and same-depth
+   * pair relationships, then produce the orthogonal-connector line
+   * segments required by the tree view.
    *
-   * Output composition for each parent or couple:
-   *   - 1 horizontal marriage line per couple.
-   *   - 1 vertical drop from the parent / couple-midpoint to a sibling-
+   * Output composition for each parent or pair:
+   *   - 1 horizontal pair line per pair (when paired-edge types apply).
+   *   - 1 vertical drop from the parent / pair-midpoint to a sibling-
    *     bar y (`LEVEL_HEIGHT / 2` above the children).
    *   - 1 horizontal sibling bar spanning all children at that y.
    *   - 1 vertical drop from the bar to each child's top edge.
@@ -1170,7 +1197,7 @@ export class SceneController implements InferredEdgeHost {
     }
 
     this.layoutMode = mode;
-    this.layoutEngine = SceneController.createLayoutEngine(mode);
+    this.layoutEngine = this.createLayoutEngine(mode);
 
     if (this.nodeIdsByIndex.length === 0) return;
 
@@ -2219,10 +2246,17 @@ export class SceneController implements InferredEdgeHost {
     return (lo + hi) / 2;
   }
 
-  private static createLayoutEngine(mode: LayoutMode): LayoutEngine {
+  private createLayoutEngine(mode: LayoutMode): LayoutEngine {
     switch (mode) {
       case 'tree':
-        return new TreeLayout();
+        return new TreeLayout({
+          parentEdgeTypes: this.parentEdgeTypes
+            ? [...this.parentEdgeTypes]
+            : undefined,
+          pairedEdgeTypes: this.pairedEdgeTypes
+            ? [...this.pairedEdgeTypes]
+            : undefined,
+        });
       case 'graph':
       default:
         return new ForceLayout3D();

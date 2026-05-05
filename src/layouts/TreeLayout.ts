@@ -2,43 +2,75 @@ import type { NodeId, Vector3, LayoutOptions } from '../types.js';
 import { LayoutEngine, type LayoutEdgeInput } from './LayoutEngine.js';
 
 /**
- * Hierarchical tidy-tree layout with spouse pairing. Drives the "tree" view
- * mode: family trees, taxonomies, anything where the user wants to see
- * lineage as parents-on-top, children-below cards.
+ * Hierarchical tidy-tree layout. Drives the "tree" view mode for any
+ * domain in which the host wants to see a directed acyclic-ish graph as
+ * parents-on-top, children-below cards: org charts (Director manages
+ * Engineer), supply chains (Mill supplies Bakery), taxonomies (Mammal
+ * is_a Animal), citation graphs (PaperA cites PaperB), family trees
+ * (Parent parent_of Child), and so on.
+ *
+ * The layout is domain-agnostic. It does NOT recognise any particular
+ * edge-type vocabulary; the host configures which edge types form
+ * hierarchy via {@link TreeLayoutOptions.parentEdgeTypes} and (optionally)
+ * which edge types pair two nodes at the same depth via
+ * {@link TreeLayoutOptions.pairedEdgeTypes}.
  *
  * Inputs:
  *   - `nodeIds`: every node in the active store.
  *   - `edges`: each entry carries `{ sourceId, targetId, type? }`. The
- *     layout consults `type` to distinguish parent-child edges
- *     (`father_of`, `mother_of`, `parent_of`) from spouse edges
- *     (`husband_of`, `wife_of`, `married_to`). Edges with a missing or
- *     unrecognised type are ignored — this is intentional: a tree view
- *     can't render arbitrary relations as hierarchy without misleading the
- *     user.
+ *     layout consults `type` to decide whether an edge represents a
+ *     parent->child relation, a same-depth pair, or neither. Edges with
+ *     a missing or unrecognised `type` are ignored — this is intentional:
+ *     a tree view can't render arbitrary relations as hierarchy without
+ *     misleading the reader.
  *
  * Output:
  *   - `Map<NodeId, Vector3>` with z=0 for every node (the tree view is
  *     planar).
  *
- * Algorithm — a simplified Reingold-Tilford with three twists for the
- * Bible Graph use case:
+ * Algorithm — a simplified Reingold-Tilford with three twists:
  *
- *   1. Spouse pairing happens BEFORE tree placement. Spouses are merged
- *      into "couple groups" that occupy two adjacent slots at the same
- *      depth and share children. This is what produces the
- *      "Abraham — Sarah" horizontal pair sitting on top of "Isaac".
+ *   1. Same-depth pairing happens BEFORE tree placement. Pair members
+ *      are merged into "pair groups" that occupy two adjacent slots at
+ *      the same depth and share children. (E.g. two co-leads in an org
+ *      chart who share direct reports, or two paired entities at the
+ *      top of a hierarchy.)
  *
- *   2. Roots are nodes with no parents. If the data has a cycle (e.g.
- *      Bible Graph emits gender-specific reciprocal edges, which the
- *      visited-set guard absorbs) the tree is rooted at whichever node
- *      we encounter first that hasn't been visited. Disconnected
+ *   2. Roots are nodes with no parents. If the data has a cycle (the
+ *      visited-set guard absorbs it) the tree is rooted at whichever
+ *      node we encounter first that hasn't been visited. Disconnected
  *      sub-trees are laid out side-by-side, separated by a `FOREST_GAP`.
  *
  *   3. Cycle protection — a `visited` set guards every recursive call so
- *      bidirectional edges (`father_of` ↔ `son_of`, generation-skipping
- *      cycles, self-loops) cannot blow the call stack. This is the
- *      0.1.9 cycle-protection contract that the user has signed off on.
+ *      bidirectional edges (X parent_of Y AND Y parent_of X) and
+ *      self-loops cannot blow the call stack.
  */
+export interface TreeLayoutOptions extends LayoutOptions {
+  /**
+   * Edge types treated as parent -> child for the hierarchical tidy-tree
+   * layout. The layout interprets each edge of the listed types as
+   * "source is the parent of target"; any other edge type is ignored
+   * (a tree view can't faithfully render arbitrary relations as
+   * hierarchy without misleading the reader).
+   *
+   * Default: `['parent_of']` — the conventional CS-tree term, generic
+   * enough to cover org charts (rename your edges or pass
+   * `['manages']`), supply chains (`['supplies']`), taxonomies
+   * (`['is_a']` or `['subclass_of']`), citations (`['cites']`), and
+   * family trees (`['father_of', 'mother_of', 'parent_of']`).
+   */
+  parentEdgeTypes?: string[];
+  /**
+   * Edge types that pair two nodes at the same depth so they appear
+   * adjacent and share children. The mechanism is generic — co-leads in
+   * an org chart, allied suppliers in a supply chain, paired spouses in
+   * a family tree, etc. Empty by default (no pairing).
+   *
+   * Default: `[]`.
+   */
+  pairedEdgeTypes?: string[];
+}
+
 export class TreeLayout extends LayoutEngine {
   readonly name = 'tree';
 
@@ -51,31 +83,24 @@ export class TreeLayout extends LayoutEngine {
    */
   static readonly NODE_SPACING_X = 110;
 
-  /** Horizontal gap between two paired spouses (centre-to-centre). */
-  static readonly SPOUSE_GAP_X = 110;
+  /** Horizontal gap between two paired peers (centre-to-centre). */
+  static readonly PAIR_GAP_X = 110;
 
   /** Horizontal gap between disconnected sub-trees (forest layout). */
   static readonly FOREST_GAP = 60;
 
-  /** Edge types treated as parent → child. */
-  private static readonly PARENT_TYPES = new Set([
-    'father_of',
-    'mother_of',
-    'parent_of',
-  ]);
+  /** Edge types treated as parent -> child. Configured per-instance. */
+  private readonly parentTypes: ReadonlySet<string>;
 
-  /** Edge types treated as spouse pairings (symmetric). */
-  private static readonly SPOUSE_TYPES = new Set([
-    'husband_of',
-    'wife_of',
-    'married_to',
-    'spouse_of',
-  ]);
+  /** Edge types treated as same-depth pairs (symmetric). Configured per-instance. */
+  private readonly pairedTypes: ReadonlySet<string>;
 
   private positions = new Map<NodeId, Vector3>();
 
-  constructor(options?: LayoutOptions) {
+  constructor(options?: TreeLayoutOptions) {
     super({ animated: false, ...options });
+    this.parentTypes = new Set(options?.parentEdgeTypes ?? ['parent_of']);
+    this.pairedTypes = new Set(options?.pairedEdgeTypes ?? []);
   }
 
   compute(
@@ -88,14 +113,14 @@ export class TreeLayout extends LayoutEngine {
     // ---- Build adjacency from typed edges ----
     // childrenOf:  parentId   -> ordered list of childIds
     // parentsOf:   childId    -> Set of parentIds
-    // spousesOf:   nodeId     -> Set of spouseIds
+    // pairsOf:     nodeId     -> Set of paired peer ids
     //
     // Edges without a `type` are ignored — see class doc for why. Edges
-    // whose type is neither a parent edge nor a spouse edge are also
+    // whose type is neither a parent edge nor a pair edge are also
     // ignored (e.g. `lived_in`, `home_of`).
     const childrenOf = new Map<NodeId, NodeId[]>();
     const parentsOf = new Map<NodeId, Set<NodeId>>();
-    const spousesOf = new Map<NodeId, Set<NodeId>>();
+    const pairsOf = new Map<NodeId, Set<NodeId>>();
     const nodeSet = new Set(nodeIds);
 
     for (const edge of edges) {
@@ -103,7 +128,7 @@ export class TreeLayout extends LayoutEngine {
       const t = edge.type;
       if (!t) continue;
 
-      if (TreeLayout.PARENT_TYPES.has(t)) {
+      if (this.parentTypes.has(t)) {
         if (edge.sourceId === edge.targetId) continue; // self-parent is nonsense
         const list = childrenOf.get(edge.sourceId) ?? [];
         if (!list.includes(edge.targetId)) list.push(edge.targetId);
@@ -111,14 +136,14 @@ export class TreeLayout extends LayoutEngine {
         const ps = parentsOf.get(edge.targetId) ?? new Set<NodeId>();
         ps.add(edge.sourceId);
         parentsOf.set(edge.targetId, ps);
-      } else if (TreeLayout.SPOUSE_TYPES.has(t)) {
+      } else if (this.pairedTypes.has(t)) {
         if (edge.sourceId === edge.targetId) continue;
-        const a = spousesOf.get(edge.sourceId) ?? new Set<NodeId>();
+        const a = pairsOf.get(edge.sourceId) ?? new Set<NodeId>();
         a.add(edge.targetId);
-        spousesOf.set(edge.sourceId, a);
-        const b = spousesOf.get(edge.targetId) ?? new Set<NodeId>();
+        pairsOf.set(edge.sourceId, a);
+        const b = pairsOf.get(edge.targetId) ?? new Set<NodeId>();
         b.add(edge.sourceId);
-        spousesOf.set(edge.targetId, b);
+        pairsOf.set(edge.targetId, b);
       }
     }
 
@@ -127,27 +152,27 @@ export class TreeLayout extends LayoutEngine {
     // cycle (everyone has a parent) we still need an entry point —
     // process unvisited nodes as additional roots after the main pass.
     const visited = new Set<NodeId>();
-    const placedAsSpouseOf = new Map<NodeId, NodeId>(); // spouse -> primary id
+    const placedAsPeerOf = new Map<NodeId, NodeId>(); // peer -> primary id
     const roots: NodeId[] = [];
     for (const id of nodeIds) {
       const parents = parentsOf.get(id);
       if (!parents || parents.size === 0) roots.push(id);
     }
 
-    // De-duplicate roots so we don't lay out the same couple twice: if
-    // two spouses are both roots, the second one will be paired by the
-    // primary's placement.
+    // De-duplicate roots so we don't lay out the same pair twice: if
+    // two paired peers are both roots, the second one will be paired by
+    // the primary's placement.
     let cursorX = 0;
     for (const root of roots) {
-      if (visited.has(root) || placedAsSpouseOf.has(root)) continue;
+      if (visited.has(root) || placedAsPeerOf.has(root)) continue;
       const subtreeWidth = this.layoutSubtree(
         root,
         0,
         cursorX,
         childrenOf,
-        spousesOf,
+        pairsOf,
         visited,
-        placedAsSpouseOf,
+        placedAsPeerOf,
       );
       cursorX += subtreeWidth + TreeLayout.FOREST_GAP;
     }
@@ -157,15 +182,15 @@ export class TreeLayout extends LayoutEngine {
     // guard kicked in) or simply orphaned. Lay them out as additional
     // forest entries so they're visible rather than stacked on (0,0).
     for (const id of nodeIds) {
-      if (visited.has(id) || placedAsSpouseOf.has(id)) continue;
+      if (visited.has(id) || placedAsPeerOf.has(id)) continue;
       const subtreeWidth = this.layoutSubtree(
         id,
         0,
         cursorX,
         childrenOf,
-        spousesOf,
+        pairsOf,
         visited,
-        placedAsSpouseOf,
+        placedAsPeerOf,
       );
       cursorX += subtreeWidth + TreeLayout.FOREST_GAP;
     }
@@ -185,22 +210,23 @@ export class TreeLayout extends LayoutEngine {
   }
 
   /**
-   * Place `nodeId` (and its spouse, if any, and all of their children) at
-   * `depth`, starting at horizontal `xOffset`. Returns the total width
-   * consumed by this subtree so the caller can advance the cursor for the
-   * next sibling/forest entry.
+   * Place `nodeId` (and its paired peer, if any, and all of their
+   * children) at `depth`, starting at horizontal `xOffset`. Returns the
+   * total width consumed by this subtree so the caller can advance the
+   * cursor for the next sibling/forest entry.
    */
   private layoutSubtree(
     nodeId: NodeId,
     depth: number,
     xOffset: number,
     childrenOf: Map<NodeId, NodeId[]>,
-    spousesOf: Map<NodeId, Set<NodeId>>,
+    pairsOf: Map<NodeId, Set<NodeId>>,
     visited: Set<NodeId>,
-    placedAsSpouseOf: Map<NodeId, NodeId>,
+    placedAsPeerOf: Map<NodeId, NodeId>,
   ): number {
-    // Cycle guard: bidirectional edges (`father_of` ↔ `son_of`, marriage
-    // chains, self-loops) and a defensive depth cap stop runaway recursion.
+    // Cycle guard: bidirectional edges (X parent_of Y AND Y parent_of
+    // X), pair chains, self-loops, and a defensive depth cap stop runaway
+    // recursion.
     if (visited.has(nodeId) || depth > 1000) {
       this.positions.set(nodeId, {
         x: xOffset,
@@ -211,51 +237,52 @@ export class TreeLayout extends LayoutEngine {
     }
     visited.add(nodeId);
 
-    // Pick a single spouse (if any) to pair with at this level. Multiple
-    // spouses get linearised as siblings of the primary at +1 slot each;
-    // the typical Bible Graph case is monogamous, so we keep this simple.
-    let spouse: NodeId | null = null;
-    const candidates = spousesOf.get(nodeId);
+    // Pick a single peer (if any) to pair with at this level. Multiple
+    // peers get linearised as siblings of the primary at +1 slot each;
+    // the typical case is monogamous pairing (or none at all), so we
+    // keep this simple.
+    let peer: NodeId | null = null;
+    const candidates = pairsOf.get(nodeId);
     if (candidates) {
       for (const s of candidates) {
-        if (!visited.has(s) && !placedAsSpouseOf.has(s)) {
-          spouse = s;
+        if (!visited.has(s) && !placedAsPeerOf.has(s)) {
+          peer = s;
           break;
         }
       }
     }
-    if (spouse) {
-      placedAsSpouseOf.set(spouse, nodeId);
-      visited.add(spouse);
+    if (peer) {
+      placedAsPeerOf.set(peer, nodeId);
+      visited.add(peer);
     }
 
-    // Children come from BOTH partners — a couple's children are the
+    // Children come from BOTH partners — a pair's children are the
     // union of each partner's `children` list. Stable order: primary's
-    // children first, then any spouse-only children appended.
+    // children first, then any peer-only children appended.
     const ownChildren = (childrenOf.get(nodeId) ?? []).filter(
-      (c) => !visited.has(c) && !placedAsSpouseOf.has(c),
+      (c) => !visited.has(c) && !placedAsPeerOf.has(c),
     );
-    const spouseChildren = spouse
-      ? (childrenOf.get(spouse) ?? []).filter(
+    const peerChildren = peer
+      ? (childrenOf.get(peer) ?? []).filter(
           (c) =>
             !visited.has(c) &&
-            !placedAsSpouseOf.has(c) &&
+            !placedAsPeerOf.has(c) &&
             !ownChildren.includes(c),
         )
       : [];
-    const childIds = [...ownChildren, ...spouseChildren];
+    const childIds = [...ownChildren, ...peerChildren];
 
     // ---- Leaf case (no children) ----
     if (childIds.length === 0) {
       const y = -depth * TreeLayout.LEVEL_HEIGHT;
-      if (spouse) {
+      if (peer) {
         this.positions.set(nodeId, { x: xOffset, y, z: 0 });
-        this.positions.set(spouse, {
-          x: xOffset + TreeLayout.SPOUSE_GAP_X,
+        this.positions.set(peer, {
+          x: xOffset + TreeLayout.PAIR_GAP_X,
           y,
           z: 0,
         });
-        return TreeLayout.SPOUSE_GAP_X + TreeLayout.NODE_SPACING_X;
+        return TreeLayout.PAIR_GAP_X + TreeLayout.NODE_SPACING_X;
       }
       this.positions.set(nodeId, { x: xOffset, y, z: 0 });
       return TreeLayout.NODE_SPACING_X;
@@ -270,15 +297,15 @@ export class TreeLayout extends LayoutEngine {
         depth + 1,
         childCursor,
         childrenOf,
-        spousesOf,
+        pairsOf,
         visited,
-        placedAsSpouseOf,
+        placedAsPeerOf,
       );
-      // The child subtree may have been a couple — its rendered centre is
+      // The child subtree may have been a pair — its rendered centre is
       // the midpoint of its first node and the previous cursor + width.
       const childPos = this.positions.get(childId);
       const childCentre = childPos
-        ? childPos.x + (this.computeRenderedHalfWidth(childId, spousesOf) ?? 0)
+        ? childPos.x + (this.computeRenderedHalfWidth(childId, pairsOf) ?? 0)
         : childCursor;
       childCentres.push(childCentre);
       childCursor += subtreeWidth;
@@ -289,13 +316,13 @@ export class TreeLayout extends LayoutEngine {
       (childCentres[0] + childCentres[childCentres.length - 1]) / 2;
 
     const y = -depth * TreeLayout.LEVEL_HEIGHT;
-    if (spouse) {
-      // Couple spans `SPOUSE_GAP_X` and is centred over the children.
-      const coupleCentre = childrenCentre;
-      const left = coupleCentre - TreeLayout.SPOUSE_GAP_X / 2;
-      const right = coupleCentre + TreeLayout.SPOUSE_GAP_X / 2;
+    if (peer) {
+      // Pair spans `PAIR_GAP_X` and is centred over the children.
+      const pairCentre = childrenCentre;
+      const left = pairCentre - TreeLayout.PAIR_GAP_X / 2;
+      const right = pairCentre + TreeLayout.PAIR_GAP_X / 2;
       this.positions.set(nodeId, { x: left, y, z: 0 });
-      this.positions.set(spouse, { x: right, y, z: 0 });
+      this.positions.set(peer, { x: right, y, z: 0 });
     } else {
       this.positions.set(nodeId, { x: childrenCentre, y, z: 0 });
     }
@@ -305,16 +332,16 @@ export class TreeLayout extends LayoutEngine {
 
   /**
    * Half the rendered width of a node when it might be paired with a
-   * spouse. Returns 0 for a solo node, `SPOUSE_GAP_X / 2` for a paired
+   * peer. Returns 0 for a solo node, `PAIR_GAP_X / 2` for a paired
    * node — this is used so {@link layoutSubtree} can compute the
-   * children-centre relative to the paired couple's bounding box rather
+   * children-centre relative to the paired pair's bounding box rather
    * than the primary node's centre alone.
    */
   private computeRenderedHalfWidth(
     nodeId: NodeId,
-    spousesOf: Map<NodeId, Set<NodeId>>,
+    pairsOf: Map<NodeId, Set<NodeId>>,
   ): number {
-    const candidates = spousesOf.get(nodeId);
+    const candidates = pairsOf.get(nodeId);
     if (!candidates) return 0;
     for (const s of candidates) {
       if (this.positions.has(s)) {
