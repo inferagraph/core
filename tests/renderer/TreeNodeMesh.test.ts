@@ -250,7 +250,7 @@ describe('TreeNodeMesh', () => {
       });
     });
 
-    it('updates the outline colour when a colour is supplied', () => {
+    it('updates the outline color when a color is supplied', () => {
       mesh.build(sampleEntries);
       mesh.updateCard('adam', { x: 0, y: 0, z: 0 }, '#abcdef');
       const targets = mesh.getRaycastTargets();

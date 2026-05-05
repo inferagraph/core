@@ -125,7 +125,7 @@ export function mergeInferences(
     if (e) rrf += 1 / (k + e.rank);
     if (l) rrf += 1 / (k + l.rank);
 
-    // Normalise to [0, 1]: max theoretical RRF when ALL three signals rank
+    // Normalize to [0, 1]: max theoretical RRF when ALL three signals rank
     // this pair first. We divide so single-signal pairs land near 1/3 and
     // triple-signal pairs near 1.0.
     const maxRrf = 3 * (1 / (k + 1));

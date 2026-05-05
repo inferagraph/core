@@ -170,7 +170,7 @@ describe('EdgeColorMap', () => {
 });
 
 describe('blendEdgeColors', () => {
-  it('returns the source colour verbatim when both endpoints share a colour', () => {
+  it('returns the source color verbatim when both endpoints share a color', () => {
     const result = blendEdgeColors(edge('father_of'), {
       sourceColor: '#3b82f6',
       targetColor: '#3b82f6',

@@ -63,7 +63,7 @@ describe('Tween', () => {
     expect(tween.getCurrent().x).toBeCloseTo(100);
   });
 
-  it('should set state to cancelled and return false on update after cancel()', () => {
+  it('should set state to canceled and return false on update after cancel()', () => {
     const tween = new Tween({
       from: { x: 0 },
       to: { x: 100 },
@@ -71,7 +71,7 @@ describe('Tween', () => {
     });
     tween.start();
     tween.cancel();
-    expect(tween.getState()).toBe('cancelled');
+    expect(tween.getState()).toBe('canceled');
     const stillRunning = tween.update(100);
     expect(stillRunning).toBe(false);
   });

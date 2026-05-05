@@ -10,7 +10,7 @@ export const Easings = {
   spring: (t: number) => 1 - Math.cos(t * Math.PI * 0.5) * Math.exp(-6 * t),
 } as const;
 
-export type TweenState = 'idle' | 'running' | 'completed' | 'cancelled';
+export type TweenState = 'idle' | 'running' | 'completed' | 'canceled';
 
 export class Tween<T extends Record<string, number>> {
   private from: T;
@@ -71,7 +71,7 @@ export class Tween<T extends Record<string, number>> {
   }
 
   cancel(): void {
-    this.state = 'cancelled';
+    this.state = 'canceled';
   }
 
   getState(): TweenState { return this.state; }

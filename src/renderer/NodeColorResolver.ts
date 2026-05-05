@@ -12,7 +12,7 @@ import {
  */
 export const DEFAULT_NODE_COLOR = '#3b82f6';
 
-/** Function form: read the node, return a CSS hex/rgb colour. */
+/** Function form: read the node, return a CSS hex/rgb color. */
 export type NodeColorFn = (node: NodeData) => string | undefined;
 
 export interface NodeColorResolverOptions {

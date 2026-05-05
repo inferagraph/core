@@ -71,7 +71,7 @@ export function useInferaGraphContent(
 
   // Reset-and-fetch counter so refetch + idOrSlug changes both kick a new
   // run. The latest counter wins; older runs early-out when they see a
-  // cancelled token.
+  // canceled token.
   const [refetchTick, setRefetchTick] = useState(0);
 
   useEffect(() => {
@@ -89,7 +89,7 @@ export function useInferaGraphContent(
       return;
     }
 
-    let cancelled = false;
+    let canceled = false;
     setLoading(true);
     setError(undefined);
 
@@ -111,7 +111,7 @@ export function useInferaGraphContent(
         } else {
           nodeId = idOrSlug;
         }
-        if (cancelled) return;
+        if (canceled) return;
 
         // Cache hit?
         if (contentCacheRef.current.has(nodeId)) {
@@ -125,14 +125,14 @@ export function useInferaGraphContent(
         }
 
         const result = await dataManager.getContent(nodeId);
-        if (cancelled) return;
+        if (canceled) return;
 
         contentCacheRef.current.set(nodeId, result);
         memoryManager.touch(nodeId);
         setData(result);
         setLoading(false);
       } catch (err) {
-        if (cancelled) return;
+        if (canceled) return;
         const e = err instanceof Error ? err : new Error(String(err));
         setError(e);
         setData(undefined);
@@ -143,7 +143,7 @@ export function useInferaGraphContent(
     void run();
 
     return () => {
-      cancelled = true;
+      canceled = true;
     };
   }, [idOrSlug, dataManager, memoryManager, slugResolver, slugCache, refetchTick]);
 

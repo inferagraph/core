@@ -163,7 +163,7 @@ export class CameraController {
    *     `duration` ms (default 600ms).
    *   - Lerps the orbit radius from its current value to `radius`
    *     (default = current radius * 0.6 — frames the focused node and
-   *     its 1-hop neighbourhood without excessive zoom).
+   *     its 1-hop neighborhood without excessive zoom).
    *   - Uses cubic in/out easing.
    *
    * Calling `focusOn` mid-animation resets the animation's start state

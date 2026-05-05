@@ -149,7 +149,7 @@ describe('PulseController', () => {
   });
 
   describe('computeColor', () => {
-    it('returns the base colour when colorAmplitude is 0', () => {
+    it('returns the base color when colorAmplitude is 0', () => {
       const p = new PulseController({ period: 1000, amplitude: 0.1 });
       expect(p.computeColor('id', '#3D8DAF', 0)).toBe('#3D8DAF');
     });
@@ -157,7 +157,7 @@ describe('PulseController', () => {
     it('lifts the lightness when colorAmplitude > 0', () => {
       const p = new PulseController({ period: 1000, amplitude: 0.1, colorAmplitude: 0.2 });
       // Sample multiple times — at least one frame should produce a
-      // brighter colour than the base.
+      // brighter color than the base.
       let saw = false;
       for (let t = 0; t < 1000; t += 50) {
         const c = p.computeColor('id', '#3D8DAF', t);

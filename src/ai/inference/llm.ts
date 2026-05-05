@@ -10,7 +10,7 @@ import { SchemaInspector, type SchemaSummary } from '../SchemaInspector.js';
  * and provides any cancellation signal.
  */
 export interface LLMInferenceContext {
-  /** The graph being analysed. Used for source enumeration + target validation. */
+  /** The graph being analyzed. Used for source enumeration + target validation. */
   store: GraphStore;
   /** LLM provider. We call `provider.complete()` once per source node. */
   provider: LLMProvider;

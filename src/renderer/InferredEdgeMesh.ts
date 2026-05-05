@@ -74,7 +74,7 @@ export class InferredEdgeMesh {
    * we pre-allocate to the next power-of-two-ish size to avoid
    * thrashing geometry on every recompute, but we never reuse a buffer
    * across builds in v1: each `setInferredEdges` call disposes and
-   * rebuilds. (Pool-based reuse is a Phase 6 optimisation.)
+   * rebuilds. (Pool-based reuse is a Phase 6 optimization.)
    */
   private segmentCount = 0;
   /** Last edges seen — kept for introspection / debugging. */

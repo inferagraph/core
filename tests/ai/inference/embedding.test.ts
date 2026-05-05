@@ -18,7 +18,7 @@ function l2(v: Vector): Vector {
 }
 
 /**
- * Build a store with `n` nodes and a vector map. Vectors are L2-normalised
+ * Build a store with `n` nodes and a vector map. Vectors are L2-normalized
  * by this helper so cosine similarity reduces to a dot product.
  */
 function buildFixture(): {

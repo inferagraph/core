@@ -400,21 +400,21 @@ function InferaGraphInner({
       return;
     }
 
-    let cancelled = false;
+    let canceled = false;
     aiEngine
       .compileFilter(trimmed)
       .then((predicate) => {
-        if (cancelled) return;
+        if (canceled) return;
         setQueryPredicate(() => predicate);
       })
       .catch((err) => {
         // eslint-disable-next-line no-console
         console.warn('[InferaGraph] compileFilter failed:', err);
-        if (!cancelled) setQueryPredicate(null);
+        if (!canceled) setQueryPredicate(null);
       });
 
     return () => {
-      cancelled = true;
+      canceled = true;
     };
   }, [aiEngine, llm, query]);
 

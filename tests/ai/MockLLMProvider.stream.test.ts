@@ -43,7 +43,7 @@ describe('mockLLMProvider.stream', () => {
     expect(dones).toHaveLength(1);
   });
 
-  it('honours a pre-aborted signal', async () => {
+  it('honors a pre-aborted signal', async () => {
     const provider = mockLLMProvider(() => 'never');
     const ac = new AbortController();
     ac.abort();

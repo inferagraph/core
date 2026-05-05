@@ -44,7 +44,7 @@ export interface StreamOptions extends CompleteOptions {
    * Optional cancellation signal. When aborted mid-stream the provider must
    * stop yielding events and emit a final `{type: 'done', reason: 'aborted'}`
    * if the stream is still alive — providers may choose to throw an
-   * `AbortError` instead, but {@link AIEngine.chat} normalises both shapes.
+   * `AbortError` instead, but {@link AIEngine.chat} normalizes both shapes.
    */
   signal?: AbortSignal;
   /**

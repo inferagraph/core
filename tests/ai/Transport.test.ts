@@ -74,7 +74,7 @@ describe('httpTransport', () => {
   function buildSSE(events: ChatEvent[]): string {
     return events
       .map((ev) => {
-        // Cannot serialise predicate functions; strip before write.
+        // Cannot serialize predicate functions; strip before write.
         const stripped = { ...ev } as Record<string, unknown>;
         if ('predicate' in stripped) delete stripped.predicate;
         if ('ids' in stripped && stripped.ids instanceof Set) {
@@ -191,7 +191,7 @@ describe('httpTransport', () => {
     // Headers are stored case-insensitively when sourced from a Headers
     // instance. The transport always sets Content-Type itself.
     expect(capturedHeaders?.['Content-Type']).toBe('application/json');
-    // Custom headers come through; the case may be normalised by Headers.
+    // Custom headers come through; the case may be normalized by Headers.
     const auth =
       capturedHeaders?.['Authorization'] ?? capturedHeaders?.['authorization'];
     expect(auth).toBe('Bearer xyz');
@@ -207,7 +207,7 @@ describe('httpTransport', () => {
 
   it('emits aborted done when the signal aborts before fetch resolves', async () => {
     const fetch = vi.fn(async (_url, init?: RequestInit) => {
-      // Honour the signal — real fetches do.
+      // Honor the signal — real fetches do.
       if (init?.signal?.aborted) {
         const err = new Error('abort');
         err.name = 'AbortError';

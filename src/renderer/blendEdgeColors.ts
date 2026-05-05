@@ -20,13 +20,13 @@ export const blendEdgeColors: EdgeColorFn = (_edge, { sourceColor, targetColor }
   mixHexColors(sourceColor, targetColor, 0.5);
 
 /**
- * Linear-RGB mix of two hex colours. `t` is the weight applied to the
- * SECOND colour — `t=0` returns `a`, `t=1` returns `b`, `t=0.5` (the
+ * Linear-RGB mix of two hex colors. `t` is the weight applied to the
+ * SECOND color — `t=0` returns `a`, `t=1` returns `b`, `t=0.5` (the
  * default) is the midpoint.
  *
  * Inputs may be six-digit hex with or without a leading `#`. Anything
  * else (including `rgb(...)` strings or short-form `#abc`) returns `a`
- * unchanged — this is a small utility, not a full CSS colour parser.
+ * unchanged — this is a small utility, not a full CSS color parser.
  */
 export function mixHexColors(a: string, b: string, t: number = 0.5): string {
   const ra = parseHex(a);

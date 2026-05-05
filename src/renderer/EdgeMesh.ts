@@ -15,9 +15,9 @@ const EDGE_DIM_ALPHA = 0.15;
  * @implements {HighlightHost}
  *
  * Per-edge line geometry. Internally a single `THREE.LineSegments` whose
- * vertex-color attribute carries one colour-and-alpha quad per vertex —
+ * vertex-color attribute carries one color-and-alpha quad per vertex —
  * this keeps the draw count at 1 while still letting the consumer paint
- * each edge with its own resolved colour (e.g. `father_of` cyan,
+ * each edge with its own resolved color (e.g. `father_of` cyan,
  * `married_to` blue) AND hide individual edges via {@link setVisibility}
  * by writing alpha=0 to both endpoints.
  *
@@ -38,7 +38,7 @@ const EDGE_DIM_ALPHA = 0.15;
 export class EdgeMesh implements VisibilityHost, HighlightHost {
   private source: Vector3 = { x: 0, y: 0, z: 0 };
   private target: Vector3 = { x: 0, y: 0, z: 0 };
-  /** Default tint used for any segment that hasn't been given an explicit colour. */
+  /** Default tint used for any segment that hasn't been given an explicit color. */
   private color: string = '#8a92b2';
   private opacity: number = 0.55;
   private lineSegments: THREE.LineSegments | null = null;
@@ -85,15 +85,15 @@ export class EdgeMesh implements VisibilityHost, HighlightHost {
     this.dispose();
     this.segmentCount = count;
     // Each segment has 2 vertices, each vertex has 3 position components
-    // (x, y, z) and 4 colour components (r, g, b, a). The alpha channel
+    // (x, y, z) and 4 color components (r, g, b, a). The alpha channel
     // is the visibility hook used by `setVisibility` — alpha=0 hides the
     // edge entirely, alpha=1 leaves it visible (modulated by the
     // material's base opacity).
     const positions = new Float32Array(count * 2 * 3);
     const colors = new Float32Array(count * 2 * 4);
-    // Pre-fill the colour buffer with the default colour + alpha=1 so
+    // Pre-fill the color buffer with the default color + alpha=1 so
     // newly-created segments are visible even before the consumer
-    // assigns per-edge colours.
+    // assigns per-edge colors.
     this._scratch.set(this.color);
     for (let i = 0; i < count * 2; i++) {
       colors[i * 4 + 0] = this._scratch.r;
@@ -119,7 +119,7 @@ export class EdgeMesh implements VisibilityHost, HighlightHost {
     this.lineSegments = new THREE.LineSegments(this.geometry, this.material);
   }
 
-  /** Override the edge colour. Must be called before `createLineSegments`. */
+  /** Override the edge color. Must be called before `createLineSegments`. */
   setColorOverride(color: string): void {
     this.color = color;
   }
@@ -149,7 +149,7 @@ export class EdgeMesh implements VisibilityHost, HighlightHost {
   }
 
   /**
-   * Set the colour of a single segment by writing to both endpoint vertices
+   * Set the color of a single segment by writing to both endpoint vertices
    * in the `color` buffer attribute. Preserves the alpha channel — to
    * hide a segment, use {@link setVisibility} (or the lower-level
    * {@link setSegmentAlpha}). No-op if `createLineSegments` hasn't run
@@ -166,9 +166,9 @@ export class EdgeMesh implements VisibilityHost, HighlightHost {
     const offset = index * 8; // 2 vertices * 4 components (rgba)
 
     this._scratch.set(color);
-    // Both endpoint vertices share the same colour so the line is
+    // Both endpoint vertices share the same color so the line is
     // uniform. Alpha is left untouched so a previously-hidden segment
-    // stays hidden when its colour is repainted.
+    // stays hidden when its color is repainted.
     array[offset + 0] = this._scratch.r;
     array[offset + 1] = this._scratch.g;
     array[offset + 2] = this._scratch.b;
@@ -228,8 +228,8 @@ export class EdgeMesh implements VisibilityHost, HighlightHost {
   /**
    * Toggle per-edge visibility WITHOUT rebuild. For each segment index,
    * if the corresponding edge id is in `visibleIds` we set alpha to 1.0;
-   * otherwise 0.0. The vertex-colour shader path multiplies the
-   * fragment colour by the per-vertex alpha, so alpha=0 segments
+   * otherwise 0.0. The vertex-color shader path multiplies the
+   * fragment color by the per-vertex alpha, so alpha=0 segments
    * disappear completely.
    *
    * No-op if the mesh hasn't been built yet, or if the edge id mapping

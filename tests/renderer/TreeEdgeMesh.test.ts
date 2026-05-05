@@ -99,7 +99,7 @@ describe('TreeEdgeMesh', () => {
       expect(positions.array[5]).toBeCloseTo(sampleSegments[0].b.z);
     });
 
-    it('writes the per-segment colour to both endpoints (vertex-colour attribute, RGBA)', () => {
+    it('writes the per-segment color to both endpoints (vertex-color attribute, RGBA)', () => {
       mesh.build(sampleSegments);
       const result = mesh.getMesh() as { geometry: { getAttribute: (n: string) => { array: Float32Array; itemSize: number } } };
       const colors = result.geometry.getAttribute('color');
@@ -117,7 +117,7 @@ describe('TreeEdgeMesh', () => {
       expect(colors.array[offset + 7]).toBeCloseTo(1, 5); // alpha
     });
 
-    it('uses a translucent vertex-coloured LineBasicMaterial', () => {
+    it('uses a translucent vertex-colored LineBasicMaterial', () => {
       mesh.build(sampleSegments);
       const result = mesh.getMesh() as { material: { vertexColors: boolean; transparent: boolean; opacity: number } };
       expect(result.material.vertexColors).toBe(true);

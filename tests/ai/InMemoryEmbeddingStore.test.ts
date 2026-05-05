@@ -109,7 +109,7 @@ describe('inMemoryEmbeddingStore', () => {
       expect(hits[1].score).toBeGreaterThan(hits[2].score);
     });
 
-    it('honours k', async () => {
+    it('honors k', async () => {
       await store.set(record('a', [1, 0, 0]));
       await store.set(record('b', [0.9, 0.1, 0]));
       await store.set(record('c', [0, 1, 0]));

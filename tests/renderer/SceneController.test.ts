@@ -295,7 +295,7 @@ function makeContainer(width = 800, height = 600): HTMLElement {
   Object.defineProperty(el, 'clientWidth', { value: width, configurable: true });
   Object.defineProperty(el, 'clientHeight', { value: height, configurable: true });
   // jsdom's getBoundingClientRect returns zeros — that's fine for our tests
-  // because pointer-event handlers normalise relative to the container.
+  // because pointer-event handlers normalize relative to the container.
   return el;
 }
 
@@ -744,7 +744,7 @@ describe('SceneController', () => {
     // the camera. When biblegraph switched graph→tree, the layout effect
     // ran first (frameToFit on stale visibility) then the filter effect
     // updated visibility — leaving the tree shifted off-screen because
-    // the camera was centred on all 18 nodes while only 13 were visible.
+    // the camera was centered on all 18 nodes while only 13 were visible.
     // Fix: setFilter must call frameToFit on the visible subset after
     // applyFilterMask. (Not from inside applyFilterMask itself, which is
     // also invoked by syncFromStore / setLayout / build* — those callers
@@ -755,7 +755,7 @@ describe('SceneController', () => {
       ctrl.attach(container);
       ctrl.syncFromStore();
 
-      // @ts-expect-error — accessing private for a behaviour assertion
+      // @ts-expect-error — accessing private for a behavior assertion
       const frameSpy = vi.spyOn(ctrl, 'frameToFit');
 
       ctrl.setFilter((n) => n.attributes.type === 'person');
@@ -778,7 +778,7 @@ describe('SceneController', () => {
       ctrl.attach(container);
       ctrl.syncFromStore();
 
-      // @ts-expect-error — accessing private for a behaviour assertion
+      // @ts-expect-error — accessing private for a behavior assertion
       const frameSpy = vi.spyOn(ctrl, 'frameToFit');
 
       ctrl.setFilter((n) => n.attributes.type === 'person');
@@ -798,7 +798,7 @@ describe('SceneController', () => {
       // returns nothing, so the reframe must be skipped — the eventual
       // syncFromStore frames using the now-correct visibleNodeIds.
       const ctrl = new SceneController({ store });
-      // @ts-expect-error — accessing private for a behaviour assertion
+      // @ts-expect-error — accessing private for a behavior assertion
       const frameSpy = vi.spyOn(ctrl, 'frameToFit');
 
       expect(() => ctrl.setFilter((n) => n.attributes.type === 'person')).not.toThrow();
@@ -920,7 +920,7 @@ describe('SceneController', () => {
     });
   });
 
-  describe('per-type colours', () => {
+  describe('per-type colors', () => {
     it('auto-assigns deterministic palette colors via the resolver', () => {
       const ctrl = new SceneController({ store });
       const resolver = ctrl.getColorResolver();
@@ -930,7 +930,7 @@ describe('SceneController', () => {
         .toBe(autoFor('place'));
     });
 
-    it('falls back to the default colour when palette is empty AND nothing matches', () => {
+    it('falls back to the default color when palette is empty AND nothing matches', () => {
       const ctrl = new SceneController({
         store,
         palette: [],
@@ -959,7 +959,7 @@ describe('SceneController', () => {
       expect(resolver.resolve({ id: 'p', attributes: { type: 'person' } })).toBe('#deadbe');
     });
 
-    it('writes per-instance colours when building the node mesh', () => {
+    it('writes per-instance colors when building the node mesh', () => {
       seedStore(store, sample);
       const ctrl = new SceneController({ store });
       ctrl.attach(container);
@@ -973,7 +973,7 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('exposes hover colours via brightness lift', () => {
+    it('exposes hover colors via brightness lift', () => {
       const ctrl = new SceneController({ store });
       const resolver = ctrl.getColorResolver();
       const node = { id: 'p', attributes: { type: 'person' } };
@@ -1253,7 +1253,7 @@ describe('SceneController', () => {
       // The tick is invoked from the rAF loop; for the test, dispatch via
       // resize→nothing. Instead invoke the renderer's tick callback list.
       // A simpler check: after sync, the controller has captured base
-      // colours. We assert that the pulse controller is reachable + enabled.
+      // colors. We assert that the pulse controller is reachable + enabled.
       expect(ctrl.getPulseController().isEnabled()).toBe(true);
       // Force a manual apply to make sure the wiring works.
       const positions = ctrl.getLayoutEngine().getPositions();
@@ -1740,7 +1740,7 @@ describe('SceneController', () => {
       ctrl.syncFromStore();
 
       // syncFromStore framed graph mode once. Spy on the framer from now on.
-      // @ts-expect-error — accessing private for a behaviour assertion
+      // @ts-expect-error — accessing private for a behavior assertion
       const frameSpy = vi.spyOn(ctrl, 'frameToFit');
 
       // First entry to tree — should call frameToFit (default path).
@@ -1858,7 +1858,7 @@ describe('SceneController', () => {
     });
 
     it('preserves graph camera state across a tree round-trip even after CameraController.update() runs', () => {
-      // Same fix, behavioural angle: the user's pose must survive
+      // Same fix, behavioral angle: the user's pose must survive
       // post-restore `update()` ticks. The mock controls don't simulate
       // damping (so an accidentally-missing sync wouldn't drift the
       // mock camera), but pumping update() at all exercises the path
@@ -1919,7 +1919,7 @@ describe('SceneController', () => {
       // The tree node mesh built from the cache, however, has a card
       // for every node. Capture the as-built position of the first card
       // and assert that hovering it does NOT move it.
-      // @ts-expect-error — internal access for a behavioural assertion
+      // @ts-expect-error — internal access for a behavioral assertion
       const treeMesh = ctrl['treeNodeMesh'];
       expect(treeMesh).toBeTruthy();
 
@@ -1939,7 +1939,7 @@ describe('SceneController', () => {
       // call paintNode directly through the index-based shortcut the
       // hover loop uses internally.
       const idx = 0; // 'adam' is the first node in `family`.
-      // @ts-expect-error — internal access for a behavioural assertion
+      // @ts-expect-error — internal access for a behavioral assertion
       ctrl['paintNode'](idx, true);
 
       const positionAfter = {
@@ -1955,7 +1955,7 @@ describe('SceneController', () => {
     it('clears snapshots on syncFromStore so stale frames do not leak across data changes', () => {
       // syncFromStore invalidates layout positions; the saved snapshots
       // reference the old coordinate space. After a sync, the next entry
-      // into a mode must re-initialise via frameToFit (first-entry path).
+      // into a mode must re-initialize via frameToFit (first-entry path).
       seedStore(store, family);
       const ctrl = new SceneController({ store });
       ctrl.attach(container);
@@ -1992,7 +1992,7 @@ describe('SceneController', () => {
     //
     // Fix: in frameToFit, when the active camera is OrthographicCamera,
     // resize left/right/top/bottom from the same framedRadius math (the
-    // 95th-percentile distance from the centroid) honouring the container
+    // 95th-percentile distance from the centroid) honoring the container
     // aspect ratio, then call updateProjectionMatrix().
 
     const family: GraphData = {
@@ -2065,7 +2065,7 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('honours the container aspect ratio when resizing the orthographic frustum', async () => {
+    it('honors the container aspect ratio when resizing the orthographic frustum', async () => {
       // 1200 x 400 → aspect 3:1. The frustum width must equal frustum
       // height × 3 within rounding.
       const wide = makeContainer(1200, 400);
@@ -2098,7 +2098,7 @@ describe('SceneController', () => {
     it('does not affect the perspective camera dimensions in graph mode', async () => {
       // Regression guard: the orthographic branch must not run for the
       // perspective camera. Graph mode keeps its existing setRadius-only
-      // behaviour.
+      // behavior.
       seedStore(store, family);
       const ctrl = new SceneController({ store, layout: 'graph' });
       ctrl.attach(container);

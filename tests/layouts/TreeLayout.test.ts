@@ -73,7 +73,7 @@ describe('TreeLayout', () => {
     ).not.toThrow();
   });
 
-  it('pairs same-depth peers and centres them over their shared child', () => {
+  it('pairs same-depth peers and centers them over their shared child', () => {
     const layout = new TreeLayout({
       parentEdgeTypes: ['parent_of'],
       pairedEdgeTypes: ['paired_with'],
@@ -143,8 +143,8 @@ describe('TreeLayout', () => {
 
   it('parental drop line extends from the pair-line Y to the sibling-bar Y with no gap', () => {
     // A paired pair (p1 + p2) at the top; three shared children
-    // beneath. The horizontal pair-line is drawn at p1's centre-y (=
-    // p2's centre-y); the parent -> children drop must start at the
+    // beneath. The horizontal pair-line is drawn at p1's center-y (=
+    // p2's center-y); the parent -> children drop must start at the
     // *same* y so the pair-line and the drop visually connect. Prior to
     // this fix the drop started at the parents' card-bottom
     // (`pa.y - halfH`), leaving a halfH-sized gap between the pair-line
@@ -257,8 +257,8 @@ describe('TreeLayout', () => {
   // particular domain.
 
   it('treats only parentEdgeTypes as parent->child (default ["parent_of"])', () => {
-    // Two disjoint parent->child relations: one labelled `parent_of` (the
-    // generic CS-textbook term, the new default) and one labelled
+    // Two disjoint parent->child relations: one labeled `parent_of` (the
+    // generic CS-textbook term, the new default) and one labeled
     // `father_of` (a domain-specific kinship term that is NOT in the
     // default set). The layout should treat the first as hierarchy and
     // ignore the second; the second pair therefore lays out as two
@@ -287,7 +287,7 @@ describe('TreeLayout', () => {
 
   it('uses configured parentEdgeTypes when provided (org chart)', () => {
     // Org chart: edges are `manages`. With the new option the layout
-    // recognises them as parent->child.
+    // recognizes them as parent->child.
     const layout = new TreeLayout({ parentEdgeTypes: ['manages'] });
     const positions = layout.compute(
       ['director', 'engineer1', 'engineer2'],
@@ -312,7 +312,7 @@ describe('TreeLayout', () => {
   it('pairedEdgeTypes opts in to same-depth pairing (default empty)', () => {
     // Two roots linked by `married_to`, each with their own kid. Under
     // default options the paired list is empty and the two roots are
-    // independent forest entries; the kid of `x` sits centred under
+    // independent forest entries; the kid of `x` sits centered under
     // `x`, not under the `x`/`y` midpoint.
     const noPair = new TreeLayout();
     const noPairPositions = noPair.compute(
@@ -325,14 +325,14 @@ describe('TreeLayout', () => {
     const xNo = noPairPositions.get('x')!;
     const yNo = noPairPositions.get('y')!;
     const kidNo = noPairPositions.get('kid')!;
-    // No pairing — kid is centred under `x` alone, not the x/y midpoint.
+    // No pairing — kid is centered under `x` alone, not the x/y midpoint.
     expect(kidNo.x).toBeCloseTo(xNo.x, 5);
     // Without pairing, `y` is laid out as a separate forest entry off to
-    // the side; its centre does not coincide with the kid's column.
+    // the side; its center does not coincide with the kid's column.
     expect(Math.abs(yNo.x - kidNo.x)).toBeGreaterThan(1);
 
     // Now opt in: the same `married_to` link pairs `x` and `y` at the
-    // shared depth so the kid sits centred between the pair.
+    // shared depth so the kid sits centered between the pair.
     const paired = new TreeLayout({ pairedEdgeTypes: ['married_to'] });
     const pairedPositions = paired.compute(
       ['x', 'y', 'kid'],
@@ -346,16 +346,16 @@ describe('TreeLayout', () => {
     const kid = pairedPositions.get('kid')!;
     // Pair share a row.
     expect(x.y).toBe(y.y);
-    // Kid sits centred between the pair, not under either alone.
+    // Kid sits centered between the pair, not under either alone.
     expect(kid.x).toBeCloseTo((x.x + y.x) / 2, 5);
     expect(kid.x).not.toBeCloseTo(x.x, 5);
     expect(kid.x).not.toBeCloseTo(y.x, 5);
   });
 
   it('still protects against cycles + lays out a forest after the rename (regression)', () => {
-    // Reproduces the existing cycle + forest behaviour using the new
+    // Reproduces the existing cycle + forest behavior using the new
     // generic `parent_of` edge type, to confirm the algorithmic
-    // behaviour is unchanged after the family-bias is removed.
+    // behavior is unchanged after the family-bias is removed.
     const layout = new TreeLayout();
     const nodeIds = ['a', 'b', 'c', 'lone'];
     const edges = [
