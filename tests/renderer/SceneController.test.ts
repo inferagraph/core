@@ -1980,4 +1980,139 @@ describe('SceneController', () => {
       ctrl.detach();
     });
   });
+
+  describe('frameToFit — orthographic frustum resize (tree mode)', () => {
+    // Regression: 0.6.2 frameToFit only adjusted the camera DISTANCE via
+    // setRadius, which is a no-op for an orthographic projection — the
+    // visible world rectangle is set by camera.left/right/top/bottom on
+    // the camera object. Without resizing the frustum, tree mode rendered
+    // at the seeded 600-unit world height regardless of the actual tree
+    // extent, leaving large trees scrunched into a fraction of the
+    // viewport.
+    //
+    // Fix: in frameToFit, when the active camera is OrthographicCamera,
+    // resize left/right/top/bottom from the same framedRadius math (the
+    // 95th-percentile distance from the centroid) honouring the container
+    // aspect ratio, then call updateProjectionMatrix().
+
+    const family: GraphData = {
+      nodes: [
+        { id: 'a', attributes: { name: 'A', type: 'person' } },
+        { id: 'b', attributes: { name: 'B', type: 'person' } },
+        { id: 'c', attributes: { name: 'C', type: 'person' } },
+        { id: 'd', attributes: { name: 'D', type: 'person' } },
+        { id: 'e', attributes: { name: 'E', type: 'person' } },
+      ],
+      edges: [
+        { id: 'p1', sourceId: 'a', targetId: 'b', attributes: { type: 'father_of' } },
+        { id: 'p2', sourceId: 'a', targetId: 'c', attributes: { type: 'father_of' } },
+        { id: 'p3', sourceId: 'a', targetId: 'd', attributes: { type: 'father_of' } },
+        { id: 'p4', sourceId: 'a', targetId: 'e', attributes: { type: 'father_of' } },
+      ],
+    };
+
+    /**
+     * Stub the active layout so positions are deterministic and the
+     * 95th-percentile distance from centroid is exactly `radius` (== 400
+     * by default). Centroid is at origin; nodes sit on +/-x at +/-radius.
+     */
+    function stubLayoutPositions(radius: number, count: number): void {
+      // count must match the seeded family node count so all ids resolve.
+      const ids = ['a', 'b', 'c', 'd', 'e'].slice(0, count);
+      const positions = new Map<string, { x: number; y: number; z: number }>();
+      ids.forEach((id, i) => {
+        // Spread evenly along x so the centroid is roughly origin and the
+        // 95th-percentile distance from centroid == radius.
+        const sign = i % 2 === 0 ? 1 : -1;
+        positions.set(id, { x: sign * radius, y: 0, z: 0 });
+      });
+      // computeActiveLayout uses compute() directly (and caches the result).
+      // getPositions() is consulted later by per-frame paths. Stub both so
+      // either codepath returns the same controlled positions.
+      vi.spyOn(TreeLayout.prototype, 'compute').mockReturnValue(
+        positions as unknown as Map<string, import('three').Vector3>,
+      );
+      vi.spyOn(TreeLayout.prototype, 'getPositions').mockReturnValue(
+        positions as unknown as Map<string, import('three').Vector3>,
+      );
+    }
+
+    it('resizes the orthographic frustum to fit the tree extent on first entry to tree mode', async () => {
+      seedStore(store, family);
+      stubLayoutPositions(400, 5);
+
+      const ctrl = new SceneController({ store, layout: 'tree' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      const THREE = await import('three');
+      const cam = ctrl.getRenderer().getCamera() as InstanceType<
+        typeof THREE.OrthographicCamera
+      >;
+      // Sanity: tree mode must have an orthographic camera.
+      expect(cam).toBeInstanceOf(THREE.OrthographicCamera);
+
+      // The framedRadius is ~400 (95th-percentile distance from origin
+      // for our stubbed positions). With a 0.8 fill factor, the half-
+      // height of the frustum should be ~400 / 0.8 = 500, i.e. the
+      // top-bottom span should be at least 1000 world units. The seeded
+      // default of 600 (top=300, bottom=-300) would FAIL this check.
+      const fillFactor = 0.8;
+      const expectedMinSpan = 2 * (400 / fillFactor); // 1000
+      const span = cam.top - cam.bottom;
+      expect(span).toBeGreaterThanOrEqual(expectedMinSpan);
+
+      ctrl.detach();
+    });
+
+    it('honours the container aspect ratio when resizing the orthographic frustum', async () => {
+      // 1200 x 400 → aspect 3:1. The frustum width must equal frustum
+      // height × 3 within rounding.
+      const wide = makeContainer(1200, 400);
+      document.body.innerHTML = '';
+      document.body.appendChild(wide);
+
+      seedStore(store, family);
+      stubLayoutPositions(400, 5);
+
+      const ctrl = new SceneController({ store, layout: 'tree' });
+      ctrl.attach(wide);
+      ctrl.syncFromStore();
+
+      const THREE = await import('three');
+      const cam = ctrl.getRenderer().getCamera() as InstanceType<
+        typeof THREE.OrthographicCamera
+      >;
+      expect(cam).toBeInstanceOf(THREE.OrthographicCamera);
+
+      const horizontal = cam.right - cam.left;
+      const vertical = cam.top - cam.bottom;
+      // Confirm we are NOT looking at the seeded 600-unit default.
+      // framedRadius=400 / fillFactor=0.8 → vertical span >= 1000.
+      expect(vertical).toBeGreaterThanOrEqual(1000);
+      expect(horizontal / vertical).toBeCloseTo(3, 1);
+
+      ctrl.detach();
+    });
+
+    it('does not affect the perspective camera dimensions in graph mode', async () => {
+      // Regression guard: the orthographic branch must not run for the
+      // perspective camera. Graph mode keeps its existing setRadius-only
+      // behaviour.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      const THREE = await import('three');
+      const cam = ctrl.getRenderer().getCamera();
+      expect(cam).toBeInstanceOf(THREE.PerspectiveCamera);
+      // PerspectiveCamera has no left/right/top/bottom; verify the test
+      // is exercising the right branch (no crash, fov unchanged).
+      const persp = cam as InstanceType<typeof THREE.PerspectiveCamera>;
+      expect(persp.fov).toBe(60);
+
+      ctrl.detach();
+    });
+  });
 });

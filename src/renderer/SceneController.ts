@@ -2164,6 +2164,40 @@ export class SceneController implements InferredEdgeHost {
     this.cameraController.setTarget({ x: cx, y: cy, z: cz });
     this.cameraController.setRadius(radius);
 
+    // Orthographic projection: setRadius alone is a no-op because the
+    // visible world rectangle is set by camera.left/right/top/bottom on
+    // the camera object — moving the camera further along its forward
+    // axis does not zoom an orthographic projection. Resize the frustum
+    // from the same `framedRadius` math so the framed cluster fills
+    // ~80% of the viewport, mirroring the perspective fill factor.
+    //
+    // The frustum stays CENTRED ON THE CAMERA-LOCAL ORIGIN (not on the
+    // world centroid). cameraController.setTarget already shifted the
+    // view target above; the orthographic camera positions itself
+    // relative to that target, so a centred frustum keeps panning
+    // gestures consistent with the perspective path.
+    if (camera instanceof THREE.OrthographicCamera) {
+      const halfHeight = framedRadius / fillFactor;
+      // Container aspect (with 0-protection). Fall back to the camera's
+      // existing aspect (right - left) / (top - bottom), and finally to
+      // 1.0 so we never produce a degenerate zero-width frustum.
+      const w = this.container?.clientWidth ?? 0;
+      const h = this.container?.clientHeight ?? 0;
+      let aspect = w > 0 && h > 0 ? w / h : 0;
+      if (!Number.isFinite(aspect) || aspect <= 0) {
+        const camWidth = camera.right - camera.left;
+        const camHeight = camera.top - camera.bottom;
+        aspect = camHeight > 0 ? camWidth / camHeight : 1;
+        if (!Number.isFinite(aspect) || aspect <= 0) aspect = 1;
+      }
+      const halfWidth = halfHeight * aspect;
+      camera.top = halfHeight;
+      camera.bottom = -halfHeight;
+      camera.left = -halfWidth;
+      camera.right = halfWidth;
+      camera.updateProjectionMatrix();
+    }
+
     // Axis-alignment for tree mode is owned by the FIRST-ENTRY default
     // path in `setLayout` / `syncFromStore`, which calls
     // `resetCameraOrientation` BEFORE this method. On subsequent entries
