@@ -261,6 +261,17 @@ export interface SceneControllerOptions {
    * Default: `() => true` (no filter).
    */
   filter?: (node: NodeData) => boolean;
+  /**
+   * Whether to show the hover "+" drilldown affordance on node hover.
+   * Default `true`. Set to `false` for embeds, marketing demos, or any
+   * host that doesn't wire drilldown via `setOnExpandRequest`.
+   *
+   * When `false`, the affordance overlay is never mounted into the
+   * container (no `.ig-affordance-overlay` / `.ig-expand-affordance`
+   * elements appear in the DOM) and hover events do not call
+   * `show()` on the affordance instance.
+   */
+  showExpandAffordance?: boolean;
 }
 
 /**
@@ -387,6 +398,15 @@ export class SceneController implements InferredEdgeHost {
 
   private showLabels: boolean;
   private enableHover: boolean;
+  /**
+   * Construction-time flag for the hover "+" drilldown affordance. When
+   * `false`, the affordance is never `attach()`-ed (no DOM nodes
+   * created) and hover events skip the affordance's `show()` call. The
+   * `expandAffordance` instance itself is still constructed so internal
+   * call sites that reference it (e.g. `getExpandAffordance()`) keep
+   * working without null checks.
+   */
+  private readonly showExpandAffordance: boolean;
 
   private nodeIdsByIndex: string[] = [];
   private nodesByIndex: NodeData[] = [];
@@ -462,6 +482,7 @@ export class SceneController implements InferredEdgeHost {
     this.nodeFilter = options.filter ?? (() => true);
     this.showLabels = options.showLabels ?? true;
     this.enableHover = options.enableHover ?? true;
+    this.showExpandAffordance = options.showExpandAffordance ?? true;
 
     // Color resolution — applies to both backends. Short-form fields win
     // over the legacy `nodeColorOptions` bag where they overlap.
@@ -585,14 +606,21 @@ export class SceneController implements InferredEdgeHost {
     // (`.ig-affordance-overlay`, z-index 6 — above labels at 5, below
     // tooltip at 100) so its pointer-events policy stays independent
     // of labels + annotations.
-    this.expandAffordance.attach(container);
-    this.expandAffordance.setOnExpand((nodeId) => {
-      // Forward to the consumer-registered handler (if any). Keeping
-      // this as a closure means setOnExpandRequest can be called at
-      // any time after attach without re-registering on the
-      // affordance itself.
-      this.onExpandRequest?.(nodeId);
-    });
+    //
+    // Gated on `showExpandAffordance` (default true). Hosts that opt
+    // out skip the entire attach so no DOM is created — no orphan
+    // overlay, no hidden button. The hover code path also skips
+    // `show()` on the same flag.
+    if (this.showExpandAffordance) {
+      this.expandAffordance.attach(container);
+      this.expandAffordance.setOnExpand((nodeId) => {
+        // Forward to the consumer-registered handler (if any). Keeping
+        // this as a closure means setOnExpandRequest can be called at
+        // any time after attach without re-registering on the
+        // affordance itself.
+        this.onExpandRequest?.(nodeId);
+      });
+    }
 
     // Tooltip overlay sits on top.
     this.tooltipOverlay.attach(container);
@@ -1651,7 +1679,13 @@ export class SceneController implements InferredEdgeHost {
     this.showTooltip(this.nodesByIndex[newIndex]);
     // Reveal the "+" affordance for the newly-hovered node. Position
     // is pushed by `tick()` on the next frame via `updatePosition`.
-    this.expandAffordance.show(this.nodeIdsByIndex[newIndex]);
+    // Gated on `showExpandAffordance` (default true) — hosts that opt
+    // out also skipped the affordance's `attach()` above, so calling
+    // `show()` here would only set internal state on a non-mounted
+    // instance.
+    if (this.showExpandAffordance) {
+      this.expandAffordance.show(this.nodeIdsByIndex[newIndex]);
+    }
   }
 
   private clearHover(): void {
