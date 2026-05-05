@@ -41,7 +41,7 @@ describe('AnimationManager', () => {
     manager.add('test', tween2);
 
     expect(manager.get('test')).toBe(tween2);
-    expect(tween1.getState()).toBe('cancelled');
+    expect(tween1.getState()).toBe('canceled');
     expect(manager.size).toBe(1);
   });
 
@@ -51,7 +51,7 @@ describe('AnimationManager', () => {
     manager.add('test', tween);
     manager.remove('test');
 
-    expect(tween.getState()).toBe('cancelled');
+    expect(tween.getState()).toBe('canceled');
     expect(manager.get('test')).toBeUndefined();
     expect(manager.size).toBe(0);
   });
@@ -70,8 +70,8 @@ describe('AnimationManager', () => {
 
     manager.cancelAll();
 
-    expect(tween1.getState()).toBe('cancelled');
-    expect(tween2.getState()).toBe('cancelled');
+    expect(tween1.getState()).toBe('canceled');
+    expect(tween2.getState()).toBe('canceled');
     expect(manager.size).toBe(0);
   });
 
@@ -130,7 +130,7 @@ describe('AnimationManager', () => {
     expect(manager.size).toBe(0);
   });
 
-  it('should remove cancelled tweens during update()', () => {
+  it('should remove canceled tweens during update()', () => {
     const tween = createTween();
     tween.start();
     manager.add('test', tween);
@@ -229,7 +229,7 @@ describe('AnimationManager', () => {
     manager.add('idle', tween);
     manager.update(500);
     // Idle tweens are not running, update returns false, but state is 'idle'
-    // They should NOT be removed since they are not completed/cancelled
+    // They should NOT be removed since they are not completed/canceled
     expect(manager.size).toBe(1);
     expect(manager.get('idle')).toBe(tween);
   });

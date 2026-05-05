@@ -110,7 +110,7 @@ describe('useInferaGraphSearch', () => {
     expect(provider.getEmbedCallCount()).toBeGreaterThanOrEqual(1);
   });
 
-  it('honours k', async () => {
+  it('honors k', async () => {
     const handle: { current: ChildHandle | null } = { current: null };
     render(
       <InferaGraph

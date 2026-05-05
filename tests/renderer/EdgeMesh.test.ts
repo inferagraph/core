@@ -23,7 +23,7 @@ vi.mock('three', () => {
 
   // Buffer attribute mock — itemSize is whatever the caller passes
   // through `Float32BufferAttribute(arr, size)`, so position (3) and
-  // colour (4) attributes can coexist in the same fake geometry.
+  // color (4) attributes can coexist in the same fake geometry.
   type Attr = { array: Float32Array; itemSize: number; needsUpdate: boolean };
 
   return {
@@ -147,7 +147,7 @@ describe('EdgeMesh', () => {
       expect(threeMesh!.geometry.setAttribute).toHaveBeenCalled();
     });
 
-    it('uses vertexColors so per-edge colours render through the shared mesh', () => {
+    it('uses vertexColors so per-edge colors render through the shared mesh', () => {
       mesh.createLineSegments(3);
       const threeMesh = mesh.getMesh() as unknown as {
         material: { vertexColors?: boolean };

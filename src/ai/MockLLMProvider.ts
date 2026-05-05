@@ -131,7 +131,7 @@ export function mockLLMProvider(
       lastPrompt = prompt;
       lastStreamOptions = opts;
 
-      // Honour pre-aborted signals: emit a single `done` and stop.
+      // Honor pre-aborted signals: emit a single `done` and stop.
       if (opts?.signal?.aborted) {
         yield { type: 'done', reason: 'aborted' };
         return;
@@ -272,7 +272,7 @@ export function deterministicVector(text: string, dim = 32): Vector {
     const signed = (lo | 0) / 0x80000000;
     out[d] = signed;
   }
-  // L2-normalise so cosine similarity behaves on a unit-sphere scale.
+  // L2-normalize so cosine similarity behaves on a unit-sphere scale.
   let mag = 0;
   for (const x of out) mag += x * x;
   mag = Math.sqrt(mag);

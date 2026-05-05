@@ -7,7 +7,7 @@ const TREE_EDGE_DIM_ALPHA = 0.15;
 
 /**
  * Single straight line segment fed to {@link TreeEdgeMesh.build}. Each
- * segment carries its own colour so different connector kinds (marriage
+ * segment carries its own color so different connector kinds (marriage
  * line, sibling bar, parent-to-child drop) can be tinted independently.
  *
  * Optional `sourceNodeId` / `targetNodeId` annotate which graph nodes
@@ -16,7 +16,7 @@ const TREE_EDGE_DIM_ALPHA = 0.15;
  * don't correspond to a single pair of nodes (e.g. a sibling-bar that
  * spans multiple children) typically pass the parent + the bar's
  * "anchor" child here; if either endpoint is hidden the bar disappears,
- * which is the correct behaviour for the standard family-tree view.
+ * which is the correct behavior for the standard family-tree view.
  */
 export interface TreeEdgeSegment {
   a: Vector3;
@@ -39,7 +39,7 @@ export interface TreeEdgeSegment {
  *   - one vertical drop from the bar to each child's top edge
  *
  * The mesh holds a single `THREE.LineSegments` so the GPU draws every
- * segment in one call. Per-segment colours go through the vertex-colour
+ * segment in one call. Per-segment colors go through the vertex-color
  * attribute, identical to the EdgeMesh implementation.
  */
 /**
@@ -47,16 +47,16 @@ export interface TreeEdgeSegment {
  * a typed edge list into the orthogonal-connector line-segments expected
  * by {@link TreeEdgeMesh.build}. Output composition (per parent / couple):
  *
- *   - 1 horizontal marriage line per couple, drawn at the parents' centre-y.
+ *   - 1 horizontal marriage line per couple, drawn at the parents' center-y.
  *   - 1 vertical drop from the parents down to a sibling-bar y, midway
  *     between the parents' bottom edge and the children's top edge.
  *     For a couple (≥2 parents at the same y) the drop starts at the
- *     parents' centre-y so it meets the marriage line exactly. For a
+ *     parents' center-y so it meets the marriage line exactly. For a
  *     single parent it starts at the card's bottom edge.
  *   - 1 horizontal sibling bar across the children at the bar y.
  *   - 1 vertical drop from the bar to each child's top edge.
  *
- * Edges with a missing or unrecognised type are ignored — the tree view
+ * Edges with a missing or unrecognized type are ignored — the tree view
  * cannot render arbitrary relations as hierarchy.
  */
 export function buildTreeEdgeSegments(
@@ -158,7 +158,7 @@ export function buildTreeEdgeSegments(
 
     // 1) Vertical from the parents down to the sibling bar.
     //    For a couple (≥2 parents at the same y) the marriage line is
-    //    drawn at the parents' centre-y, so the drop must start there
+    //    drawn at the parents' center-y, so the drop must start there
     //    too — otherwise there's a `halfH` gap between the marriage line
     //    and the top of the drop. For a single parent there is no
     //    marriage line, so the drop starts at the card's bottom edge.
@@ -234,7 +234,7 @@ export class TreeEdgeMesh implements VisibilityHost, HighlightHost {
    * mesh — caller is responsible for removing the previous instance from
    * the scene before calling `build` again.
    *
-   * Colour buffer layout is RGBA (4 components per vertex, 2 vertices
+   * Color buffer layout is RGBA (4 components per vertex, 2 vertices
    * per segment) so {@link setVisibility} can drive alpha to 0 to hide
    * connectors without rebuilding the mesh.
    */

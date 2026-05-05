@@ -15,7 +15,7 @@ import type { InferredEdge } from '../ai/InferredEdge.js';
  * Implementations differ in mechanism:
  *   - {@link NodeMesh} flips the alpha channel of `instanceColor`.
  *   - {@link EdgeMesh} flips alpha on both endpoints of each line segment
- *     in the vertex-colour buffer.
+ *     in the vertex-color buffer.
  *   - {@link TreeNodeMesh} flips `group.visible` on each per-node card.
  *   - {@link TreeEdgeMesh} flips alpha on each connector segment based on
  *     whether BOTH of its endpoint nodes are visible (so the predicate

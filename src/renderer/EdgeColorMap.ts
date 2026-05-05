@@ -8,7 +8,7 @@ export const DEFAULT_EDGE_COLOR = '#6366f1';
  * Per-call context handed to {@link EdgeColorFn}. Carries the resolved
  * resting colors of the edge's source + target nodes (the same hex values
  * {@link NodeColorResolver.resolve} would return for those nodes) so the
- * function can derive a colour from its endpoints — for example by
+ * function can derive a color from its endpoints — for example by
  * blending them, picking one side, or treating same-vs-different as a
  * boolean.
  *
@@ -25,7 +25,7 @@ export interface EdgeColorContext {
 }
 
 /**
- * Function form: read the edge + its endpoint colours, return a CSS
+ * Function form: read the edge + its endpoint colors, return a CSS
  * hex/rgb color (or `undefined` to fall through to the type-keyed map /
  * palette).
  *
@@ -94,11 +94,11 @@ export class EdgeColorMap {
   /**
    * Resting color for `edge`.
    *
-   * `ctx` carries the resolved endpoint colours so a {@link EdgeColorFn}
-   * can derive the edge colour from its endpoints (see
+   * `ctx` carries the resolved endpoint colors so a {@link EdgeColorFn}
+   * can derive the edge color from its endpoints (see
    * {@link blendEdgeColors}). The argument is defaulted to the fallback
-   * colour on both sides so legacy call sites that don't yet plumb
-   * endpoint colours through still produce a sensible result.
+   * color on both sides so legacy call sites that don't yet plumb
+   * endpoint colors through still produce a sensible result.
    */
   resolve(
     edge: EdgeData,

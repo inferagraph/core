@@ -43,7 +43,7 @@ export interface GraphInferenceCandidate {
   sourceId: NodeId;
   targetId: NodeId;
   /**
-   * Composite score in `[0, 1]`. Each signal normalises to `[0, 1]` before
+   * Composite score in `[0, 1]`. Each signal normalizes to `[0, 1]` before
    * we emit; the merger may further re-rank but the per-signal score is
    * already comparable across signals.
    */

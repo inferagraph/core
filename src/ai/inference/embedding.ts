@@ -18,7 +18,7 @@ import {
  *  - When neither is set → returns `[]` (Tier 1 — no embeddings available).
  */
 export interface EmbeddingInferenceContext {
-  /** The graph being analysed. Used for the source-node enumeration. */
+  /** The graph being analyzed. Used for the source-node enumeration. */
   store: GraphStore;
   /**
    * Tier-3 dedicated vector store. When set, takes precedence over
@@ -47,7 +47,7 @@ export interface EmbeddingInferenceContext {
 
 /**
  * One embedding-similarity candidate. The score is cosine similarity in
- * `[-1, 1]`; the merger normalises into `[0, 1]` by clamping (negative
+ * `[-1, 1]`; the merger normalizes into `[0, 1]` by clamping (negative
  * similarities never survive the threshold by default).
  */
 export interface EmbeddingInferenceCandidate {

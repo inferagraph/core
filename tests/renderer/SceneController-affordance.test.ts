@@ -37,7 +37,7 @@ vi.mock('three', () => {
     // Project to a deterministic NDC-space value so screen coords are
     // computable in tests. We just zero out z and leave x/y alone (they
     // start at the world coords and we'd normally apply the camera matrix —
-    // for tests the identity-ish behaviour is enough).
+    // for tests the identity-ish behavior is enough).
     self.project = vi.fn().mockImplementation(() => {
       this.z = 0;
       return this;

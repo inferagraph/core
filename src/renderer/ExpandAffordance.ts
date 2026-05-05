@@ -26,7 +26,7 @@ import type { NodeId } from '../types.js';
  * translate(var(--ig-expand-offset-x), var(--ig-expand-offset-y))` so
  * consumers can fine-tune offset placement via CSS.
  *
- * Visual styling — colour, size, radius, shadow, offset — is owned by
+ * Visual styling — color, size, radius, shadow, offset — is owned by
  * the consumer via 11 CSS custom properties on `.ig-expand-affordance`.
  * See `src/themes/default.css` for the defaults.
  */
@@ -97,7 +97,7 @@ export class ExpandAffordance {
     if (!this.button) return;
     this.currentNodeId = nodeId;
     this.button.dataset.nodeId = nodeId;
-    // `flex` to honour the centring `align-items` / `justify-content`
+    // `flex` to honor the centering `align-items` / `justify-content`
     // declared in CSS. Falls through to the consumer's value if they
     // override `display`.
     this.button.style.display = 'flex';

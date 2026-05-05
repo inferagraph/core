@@ -55,7 +55,7 @@ export class AnimationManager {
     const toRemove: string[] = [];
     for (const [id, tween] of this.tweens) {
       const stillRunning = tween.update(deltaMs);
-      if (!stillRunning && (tween.getState() === 'completed' || tween.getState() === 'cancelled')) {
+      if (!stillRunning && (tween.getState() === 'completed' || tween.getState() === 'canceled')) {
         toRemove.push(id);
       }
     }

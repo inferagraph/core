@@ -29,7 +29,7 @@ export interface EmbedOptions {
    * (e.g. `text-embedding-3-small` for OpenAI, `voyage-3.5` for Voyage).
    */
   model?: string;
-  /** Optional cancellation signal. Providers that don't honour signals fall back to ignoring it. */
+  /** Optional cancellation signal. Providers that don't honor signals fall back to ignoring it. */
   signal?: AbortSignal;
 }
 

@@ -320,7 +320,7 @@ export class AIEngine {
    * The LLM source is skipped if no provider is configured, matching the
    * progressive-enhancement contract elsewhere in the AI surface.
    *
-   * Honours `opts.signal`: when aborted mid-compute, the in-flight
+   * Honors `opts.signal`: when aborted mid-compute, the in-flight
    * sub-helpers stop and the function returns without touching the store.
    */
   async computeInferredEdges(opts?: ComputeInferredEdgesOptions): Promise<void> {
@@ -628,7 +628,7 @@ export class AIEngine {
         }
         if (ev.type === 'done') break;
         if (signal?.aborted) {
-          // Provider didn't honour signal yet; emit our own done.
+          // Provider didn't honor signal yet; emit our own done.
           if (!sawDone) {
             const aborted: LLMStreamEvent = { type: 'done', reason: 'aborted' };
             collected.push(aborted);
@@ -659,7 +659,7 @@ export class AIEngine {
     }
 
     // Successful stream — persist for replay. Aborted streams are
-    // intentionally not cached (the user cancelled before completion).
+    // intentionally not cached (the user canceled before completion).
     if (!signal?.aborted) {
       await this.persistChatCache(cacheKey, collected);
     }
@@ -1120,7 +1120,7 @@ const EMBED_INDEX_KEY = '__inferagraph_embed_index__';
 
 /**
  * Cache key for a Tier 2 embedding entry. The key prefix lets callers
- * recognise our entries vs other consumer-owned cache slots, and the
+ * recognize our entries vs other consumer-owned cache slots, and the
  * composite suffix matches {@link EmbeddingStore.get}'s contract.
  */
 function embedCacheKey(

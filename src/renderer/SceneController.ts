@@ -68,7 +68,7 @@ function escapeHtml(s: string): string {
  *   - `zoom`: orthographic zoom factor. The perspective camera ignores
  *     this on restore (its zoom is always 1) but we still capture it so
  *     the snapshot type is uniform between modes.
- *   - `target`: the trackball look-at point (== orbit centre).
+ *   - `target`: the trackball look-at point (== orbit center).
  */
 export interface CameraSnapshot {
   position: { x: number; y: number; z: number };
@@ -80,7 +80,7 @@ export interface CameraSnapshot {
 /**
  * Capture the live camera + controls target into a {@link CameraSnapshot}.
  * Reads the orientation off the camera's quaternion (kept in sync by Three's
- * `lookAt` and the trackball gestures) and the orbit centre from
+ * `lookAt` and the trackball gestures) and the orbit center from
  * `CameraController.getTarget()`.
  *
  * Only public properties are touched; the camera is not mutated.
@@ -150,7 +150,7 @@ function applyCameraState(
     updateProjectionMatrix?: () => void;
   };
 
-  // 1. Push the orbit centre into the trackball + the controller's cached
+  // 1. Push the orbit center into the trackball + the controller's cached
   //    target. We do NOT use `setTarget` because its `placeCameraAtRadius`
   //    side-effect would clobber the camera position we're about to restore.
   const controls = cameraController.getControls();
@@ -199,7 +199,7 @@ export interface SceneControllerOptions {
   nodeRender?: NodeRenderConfig;
   tooltip?: TooltipConfig;
   /**
-   * Custom resolver for per-node colours. Wins over `nodeColors` /
+   * Custom resolver for per-node colors. Wins over `nodeColors` /
    * auto-assignment. Domain-specific logic lives here.
    */
   nodeColorFn?: NodeColorFn;
@@ -211,7 +211,7 @@ export interface SceneControllerOptions {
    * back-compat with consumers that build resolver options programmatically.
    */
   nodeColorOptions?: NodeColorResolverOptions;
-  /** Custom resolver for per-edge colours. */
+  /** Custom resolver for per-edge colors. */
   edgeColorFn?: EdgeColorFn;
   /** Explicit type→color map for edges. */
   edgeColors?: Record<string, string>;
@@ -219,11 +219,11 @@ export interface SceneControllerOptions {
   palette?: readonly string[];
   /** Toggle visible labels per node. Default: true. */
   showLabels?: boolean;
-  /** Toggle hover tooltip + colour change. Default: true. */
+  /** Toggle hover tooltip + color change. Default: true. */
   enableHover?: boolean;
   /**
    * Pulse animation: `false` disables, `true` (or omitted) uses defaults,
-   * an object lets the host tune period / amplitude / colour amplitude.
+   * an object lets the host tune period / amplitude / color amplitude.
    * Hovered nodes are automatically excluded from the pulse so the active
    * node feels stable while interacted with.
    */
@@ -387,7 +387,7 @@ export class SceneController implements InferredEdgeHost {
   /**
    * Per-mode camera snapshots. Captured on the way OUT of a mode so the
    * next entry into that mode can restore the user's prior pan / zoom /
-   * (graph-mode) rotation. `null` means "no prior state — initialise via
+   * (graph-mode) rotation. `null` means "no prior state — initialize via
    * frameToFit on next entry".
    *
    * The two views are completely independent: mutating the live camera
@@ -559,12 +559,12 @@ export class SceneController implements InferredEdgeHost {
     return this.tooltipOverlay;
   }
 
-  /** The colour resolver (exposed for tests + advanced consumers). */
+  /** The color resolver (exposed for tests + advanced consumers). */
   getColorResolver(): NodeColorResolver {
     return this.colorResolver;
   }
 
-  /** The edge colour map (exposed for tests + advanced consumers). */
+  /** The edge color map (exposed for tests + advanced consumers). */
   getEdgeColorMap(): EdgeColorMap {
     return this.edgeColorMap;
   }
@@ -814,7 +814,7 @@ export class SceneController implements InferredEdgeHost {
     // without an extra round-trip to the host.
     this.applyFilterMask();
     // Frame to the visible nodes only — the consumer's `filter` may
-    // have hidden a chunk of the data set; centring the camera on the
+    // have hidden a chunk of the data set; centering the camera on the
     // unfiltered centroid would leave the visible cluster off-axis.
     this.frameToFit(this.framingPositions(positions));
     // Tree first-entry: re-assert axis-alignment AFTER frameToFit so the
@@ -832,7 +832,7 @@ export class SceneController implements InferredEdgeHost {
   /**
    * Restrict a positions map to the nodes that are actually visible
    * under the current filter predicate. The same predicate applies
-   * across modes, so framing always centres on the visible subset
+   * across modes, so framing always centers on the visible subset
    * regardless of which layout is active. When the predicate accepts
    * everything (the default), the input positions map is returned
    * verbatim without allocation.
@@ -898,7 +898,7 @@ export class SceneController implements InferredEdgeHost {
         })),
       );
       // Index endpoint nodes by id so we can hand the resolver the
-      // already-resolved source / target colours from `baseColorsByIndex`
+      // already-resolved source / target colors from `baseColorsByIndex`
       // — picking the same hex {@link NodeColorResolver.resolve} returned
       // for those nodes. This keeps `edgeColorFn` consumers (notably
       // {@link blendEdgeColors}) consistent with the rendered node hues.
@@ -909,7 +909,7 @@ export class SceneController implements InferredEdgeHost {
         const source = positions.get(endpoints.sourceId) ?? { x: 0, y: 0, z: 0 };
         const target = positions.get(endpoints.targetId) ?? { x: 0, y: 0, z: 0 };
         edgeMesh.updateSegment(index, source, target);
-        // Per-edge colour via the resolver — pushes a vertex-colour pair into
+        // Per-edge color via the resolver — pushes a vertex-color pair into
         // the underlying buffer so each edge can carry its own hue without
         // adding another draw call.
         const data = {
@@ -959,7 +959,7 @@ export class SceneController implements InferredEdgeHost {
   /**
    * Build the tree-view meshes:
    *   - A {@link TreeNodeMesh} (one rounded-rect card per node, fill
-   *     translucent dark, outline = node colour, with the node's title
+   *     translucent dark, outline = node color, with the node's title
    *     rasterised inside).
    *   - A {@link TreeEdgeMesh} containing the orthogonal connectors
    *     (marriage line, parent-to-bar drop, sibling bar, drops to
@@ -1019,7 +1019,7 @@ export class SceneController implements InferredEdgeHost {
     // Build the orthogonal connectors from the tree topology + positions.
     // ALL connectors are built; the post-build `applyFilterMask` call
     // hides those whose endpoint nodes are filtered out by setting
-    // alpha=0 on the appropriate vertex-colour-buffer slots.
+    // alpha=0 on the appropriate vertex-color-buffer slots.
     const segments = this.computeTreeEdgeSegments(positions);
     if (segments.length > 0) {
       const treeEdgeMesh = new TreeEdgeMesh();
@@ -1168,7 +1168,7 @@ export class SceneController implements InferredEdgeHost {
    *      last visit to that mode survives the round-trip.
    *   4. If no snapshot exists (first-ever entry to that mode in this
    *      controller's lifetime, or a `syncFromStore` cleared them),
-   *      `frameToFit` initialises a sensible default. Tree's first-entry
+   *      `frameToFit` initializes a sensible default. Tree's first-entry
    *      default also calls `resetCameraOrientation` so the orthographic
    *      projection is axis-aligned.
    *
@@ -1306,7 +1306,7 @@ export class SceneController implements InferredEdgeHost {
     }
   }
 
-  /** Toggle hover (raycast + tooltip + colour change) at runtime. */
+  /** Toggle hover (raycast + tooltip + color change) at runtime. */
   setEnableHover(enable: boolean): void {
     if (this.enableHover === enable) return;
     this.enableHover = enable;
@@ -1330,12 +1330,12 @@ export class SceneController implements InferredEdgeHost {
   /**
    * Reconfigure the pulse animation at runtime. Pass `false` to disable,
    * `true` (or `undefined`) to use defaults, or a partial config to tune
-   * period / amplitude / colour amplitude.
+   * period / amplitude / color amplitude.
    */
   setPulse(option: PulseOption): void {
     this.pulseController.setConfig(option);
     if (!this.pulseController.isEnabled() && this.nodeMesh) {
-      // Snap every instance back to its resting position + colour so we
+      // Snap every instance back to its resting position + color so we
       // don't leave nodes frozen mid-pulse.
       const positions = this.layoutEngine.getPositions();
       this.applyPositions(positions);
@@ -1456,7 +1456,7 @@ export class SceneController implements InferredEdgeHost {
   }
 
   /**
-   * Push pulse-driven scale + (optional) colour to every non-hovered node
+   * Push pulse-driven scale + (optional) color to every non-hovered node
    * instance. Uses the most recent layout positions so the underlying
    * physics tick + pulse stay in sync.
    */
@@ -1756,7 +1756,7 @@ export class SceneController implements InferredEdgeHost {
       : this.baseColorsByIndex[index] ?? this.colorResolver.resolve(node);
 
     if (this.nodeMesh) {
-      // updateInstance writes both matrix + colour; keep matrix unchanged by
+      // updateInstance writes both matrix + color; keep matrix unchanged by
       // re-using the current position. Reset scale to the resting radius so
       // a hovered node doesn't inherit a mid-pulse size.
       this.nodeMesh.updateInstance(index, pos, color, this.nodeMesh.getRadius());
@@ -1774,7 +1774,7 @@ export class SceneController implements InferredEdgeHost {
     const y = this.pointerY + 12;
 
     // If the consumer supplied a custom renderer we delegate to the overlay
-    // (which honours `tooltip.renderTooltip` / `tooltip.component`). Otherwise
+    // (which honors `tooltip.renderTooltip` / `tooltip.component`). Otherwise
     // we fill the overlay element with a multi-line natural-language summary
     // produced by `describeNode`, so the user sees prose like
     // "Son of Abraham and Sarah" instead of just the node's title.
@@ -1790,7 +1790,7 @@ export class SceneController implements InferredEdgeHost {
     });
 
     if (description.lines.length === 0) {
-      // Single-line tooltip — preserves the original behaviour for nodes
+      // Single-line tooltip — preserves the original behavior for nodes
       // without relationships.
       this.tooltipOverlay.showNode(node, x, y);
       return;
@@ -2023,7 +2023,7 @@ export class SceneController implements InferredEdgeHost {
    * it onto the freshly-built mesh.
    *
    * Tree mode is a deliberate no-op in v1 per the Phase 5 plan; the
-   * cache still updates so a later graph-mode re-entry honours the
+   * cache still updates so a later graph-mode re-entry honors the
    * latest visibility intent.
    *
    * Implements {@link InferredEdgeHost.setInferredEdgeVisibility}.
@@ -2198,10 +2198,10 @@ export class SceneController implements InferredEdgeHost {
     // from the same `framedRadius` math so the framed cluster fills
     // ~80% of the viewport, mirroring the perspective fill factor.
     //
-    // The frustum stays CENTRED ON THE CAMERA-LOCAL ORIGIN (not on the
+    // The frustum stays CENTERED ON THE CAMERA-LOCAL ORIGIN (not on the
     // world centroid). cameraController.setTarget already shifted the
     // view target above; the orthographic camera positions itself
-    // relative to that target, so a centred frustum keeps panning
+    // relative to that target, so a centered frustum keeps panning
     // gestures consistent with the perspective path.
     if (camera instanceof THREE.OrthographicCamera) {
       const halfHeight = framedRadius / fillFactor;

@@ -80,7 +80,7 @@ describe('AIEngine.search()', () => {
       expect(results[0].matchedField).toBe('name');
     });
 
-    it('honours k', async () => {
+    it('honors k', async () => {
       // Substring "a" appears in Adam, Abraham, Eden, Eve aliases, etc.
       // We want at least 2 hits; assert k=1 trims to 1.
       const all = await engine.search('a');
@@ -151,7 +151,7 @@ describe('AIEngine.search()', () => {
       expect(hits.length).toBeLessThanOrEqual(2);
     });
 
-    it('honours pre-aborted signals', async () => {
+    it('honors pre-aborted signals', async () => {
       const provider = mockLLMProvider({});
       engine.setProvider(provider);
       engine.setEmbeddingStore(inMemoryEmbeddingStore());

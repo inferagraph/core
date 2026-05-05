@@ -12,14 +12,14 @@ const TREE_DIM_FACTOR = 0.3;
  * @implements {VisibilityHost}
  *
  * Per-node "card" mesh used by the tree view. Each node renders as a
- * rounded-rectangle plane (translucent dark fill) with a coloured outline
- * matching the node's resolved colour, plus a centred CanvasTexture-backed
+ * rounded-rectangle plane (translucent dark fill) with a colored outline
+ * matching the node's resolved color, plus a centered CanvasTexture-backed
  * text plane that displays the node's title. A single `THREE.Group`
  * aggregates fill + outline + label so the SceneController can swap one
  * Object3D per node into the scene.
  *
  * Why not InstancedMesh? Because each card needs a per-instance border
- * colour, and instancing-with-vertex-colour would require a custom
+ * color, and instancing-with-vertex-color would require a custom
  * shader. With typical family-tree sizes (≤ ~200 nodes) the overhead of
  * one mesh per node is well below 1ms per frame and dramatically simpler
  * to maintain. Instancing is reserved for the graph view's sphere mesh
@@ -45,12 +45,12 @@ export class TreeNodeMesh implements VisibilityHost, HighlightHost {
   static readonly DEFAULT_FILL_COLOR = '#1e1e2e';
   static readonly DEFAULT_FILL_OPACITY = 0.8;
 
-  /** Default label colour — zinc-200, matches the marketing-site spec. */
+  /** Default label color — zinc-200, matches the marketing-site spec. */
   static readonly DEFAULT_LABEL_COLOR = '#e4e4e7';
 
   /**
    * Pixel density for the label canvas. The card is sized in world units
-   * but the canvas it textures is rasterised at a fixed pixels-per-unit so
+   * but the canvas it textures is rasterized at a fixed pixels-per-unit so
    * the resulting glyphs stay crisp at the orthographic camera's typical
    * zoom range. Roughly matches a 1.5× DPR-adjusted CSS pixel.
    */
@@ -117,7 +117,7 @@ export class TreeNodeMesh implements VisibilityHost, HighlightHost {
   }
 
   /**
-   * Update an existing card's position + outline colour. Cheap — reuses
+   * Update an existing card's position + outline color. Cheap — reuses
    * the existing geometry.
    */
   updateCard(id: string, position: Vector3, color?: string): void {

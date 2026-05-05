@@ -9,7 +9,7 @@ import { LayoutEngine, type LayoutEdgeInput } from './LayoutEngine.js';
  * is_a Animal), citation graphs (PaperA cites PaperB), family trees
  * (Parent parent_of Child), and so on.
  *
- * The layout is domain-agnostic. It does NOT recognise any particular
+ * The layout is domain-agnostic. It does NOT recognize any particular
  * edge-type vocabulary; the host configures which edge types form
  * hierarchy via {@link TreeLayoutOptions.parentEdgeTypes} and (optionally)
  * which edge types pair two nodes at the same depth via
@@ -20,7 +20,7 @@ import { LayoutEngine, type LayoutEdgeInput } from './LayoutEngine.js';
  *   - `edges`: each entry carries `{ sourceId, targetId, type? }`. The
  *     layout consults `type` to decide whether an edge represents a
  *     parent->child relation, a same-depth pair, or neither. Edges with
- *     a missing or unrecognised `type` are ignored — this is intentional:
+ *     a missing or unrecognized `type` are ignored — this is intentional:
  *     a tree view can't render arbitrary relations as hierarchy without
  *     misleading the reader.
  *
@@ -78,12 +78,12 @@ export class TreeLayout extends LayoutEngine {
   static readonly LEVEL_HEIGHT = 100;
 
   /**
-   * Horizontal distance between two sibling card centres. Slightly wider
+   * Horizontal distance between two sibling card centers. Slightly wider
    * than the SVG mockup's `90` card width so cards don't touch.
    */
   static readonly NODE_SPACING_X = 110;
 
-  /** Horizontal gap between two paired peers (centre-to-centre). */
+  /** Horizontal gap between two paired peers (center-to-center). */
   static readonly PAIR_GAP_X = 110;
 
   /** Horizontal gap between disconnected sub-trees (forest layout). */
@@ -196,7 +196,7 @@ export class TreeLayout extends LayoutEngine {
     }
 
     // Recentre horizontally so the whole tree is symmetric around x=0.
-    this.recentre();
+    this.recenter();
 
     return this.positions;
   }
@@ -288,9 +288,9 @@ export class TreeLayout extends LayoutEngine {
       return TreeLayout.NODE_SPACING_X;
     }
 
-    // ---- Internal node: lay out children first, then centre parents above ----
+    // ---- Internal node: lay out children first, then center parents above ----
     let childCursor = xOffset;
-    const childCentres: number[] = [];
+    const childCenters: number[] = [];
     for (const childId of childIds) {
       const subtreeWidth = this.layoutSubtree(
         childId,
@@ -301,30 +301,30 @@ export class TreeLayout extends LayoutEngine {
         visited,
         placedAsPeerOf,
       );
-      // The child subtree may have been a pair — its rendered centre is
+      // The child subtree may have been a pair — its rendered center is
       // the midpoint of its first node and the previous cursor + width.
       const childPos = this.positions.get(childId);
-      const childCentre = childPos
+      const childCenter = childPos
         ? childPos.x + (this.computeRenderedHalfWidth(childId, pairsOf) ?? 0)
         : childCursor;
-      childCentres.push(childCentre);
+      childCenters.push(childCenter);
       childCursor += subtreeWidth;
     }
 
     const childrenSpan = childCursor - xOffset;
-    const childrenCentre =
-      (childCentres[0] + childCentres[childCentres.length - 1]) / 2;
+    const childrenCenter =
+      (childCenters[0] + childCenters[childCenters.length - 1]) / 2;
 
     const y = -depth * TreeLayout.LEVEL_HEIGHT;
     if (peer) {
-      // Pair spans `PAIR_GAP_X` and is centred over the children.
-      const pairCentre = childrenCentre;
-      const left = pairCentre - TreeLayout.PAIR_GAP_X / 2;
-      const right = pairCentre + TreeLayout.PAIR_GAP_X / 2;
+      // Pair spans `PAIR_GAP_X` and is centered over the children.
+      const pairCenter = childrenCenter;
+      const left = pairCenter - TreeLayout.PAIR_GAP_X / 2;
+      const right = pairCenter + TreeLayout.PAIR_GAP_X / 2;
       this.positions.set(nodeId, { x: left, y, z: 0 });
       this.positions.set(peer, { x: right, y, z: 0 });
     } else {
-      this.positions.set(nodeId, { x: childrenCentre, y, z: 0 });
+      this.positions.set(nodeId, { x: childrenCenter, y, z: 0 });
     }
 
     return Math.max(childrenSpan, TreeLayout.NODE_SPACING_X);
@@ -334,8 +334,8 @@ export class TreeLayout extends LayoutEngine {
    * Half the rendered width of a node when it might be paired with a
    * peer. Returns 0 for a solo node, `PAIR_GAP_X / 2` for a paired
    * node — this is used so {@link layoutSubtree} can compute the
-   * children-centre relative to the paired pair's bounding box rather
-   * than the primary node's centre alone.
+   * children-center relative to the paired pair's bounding box rather
+   * than the primary node's center alone.
    */
   private computeRenderedHalfWidth(
     nodeId: NodeId,
@@ -348,7 +348,7 @@ export class TreeLayout extends LayoutEngine {
         const a = this.positions.get(nodeId)!;
         const b = this.positions.get(s)!;
         if (Math.abs(a.y - b.y) < 1) {
-          // Paired at the same row — half-width is half the centre-to-centre gap.
+          // Paired at the same row — half-width is half the center-to-center gap.
           return Math.abs(b.x - a.x) / 2;
         }
       }
@@ -357,12 +357,12 @@ export class TreeLayout extends LayoutEngine {
   }
 
   /**
-   * Translate the entire layout so the centre of mass sits at x=0. Tree
-   * placement starts at x=0 and grows rightward; without recentring the
+   * Translate the entire layout so the center of mass sits at x=0. Tree
+   * placement starts at x=0 and grows rightward; without recentering the
    * camera framing would have to compensate. We do it here so consumers
    * (and the SceneController's `frameToFit`) get a predictable origin.
    */
-  private recentre(): void {
+  private recenter(): void {
     if (this.positions.size === 0) return;
     let xMin = Infinity;
     let xMax = -Infinity;

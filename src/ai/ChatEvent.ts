@@ -68,7 +68,7 @@ export type ChatEvent =
     }
   | {
       type: 'done';
-      /** Why the stream ended. `'aborted'` = cancelled via AbortSignal. */
+      /** Why the stream ended. `'aborted'` = canceled via AbortSignal. */
       reason?: 'stop' | 'length' | 'aborted';
       /**
        * Optional error message when the stream ended due to provider

@@ -26,7 +26,7 @@ export interface PulseConfig {
   amplitude?: number;
   /**
    * Optional secondary HSL lightness lift (0..1). Each pulse cycle the
-   * node's colour brightens by up to `colorAmplitude`. Default: 0
+   * node's color brightens by up to `colorAmplitude`. Default: 0
    * (disabled — keep the renderer cheap by default).
    */
   colorAmplitude?: number;
@@ -95,12 +95,12 @@ function phaseOffsetFor(id: string): number {
     h ^= id.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
-  // Normalise to [0, 2π).
+  // Normalize to [0, 2π).
   const u = (h >>> 0) / 0xffffffff;
   return u * Math.PI * 2;
 }
 
-/** Lift a `#rrggbb` colour's HSL lightness by `delta` (0..1). */
+/** Lift a `#rrggbb` color's HSL lightness by `delta` (0..1). */
 function liftLightness(hex: string, delta: number): string {
   if (delta === 0) return hex;
   const m = /^#?([0-9a-f]{6})$/i.exec(hex);
@@ -157,7 +157,7 @@ function liftLightness(hex: string, delta: number): string {
 
 /**
  * Drives the per-frame pulse. Stateless w.r.t. the layout; reads the
- * supplied positions + base colours each tick.
+ * supplied positions + base colors each tick.
  */
 export class PulseController {
   private config: ResolvedPulseConfig;
@@ -206,7 +206,7 @@ export class PulseController {
     return 1 + amplitude * Math.sin(phase);
   }
 
-  /** Compute the (lightness-lifted) colour for `nodeId` at time `now`. */
+  /** Compute the (lightness-lifted) color for `nodeId` at time `now`. */
   computeColor(nodeId: string, baseColor: string, now: number, isHighlighted = false): string {
     if (!this.config.enabled || this.config.colorAmplitude === 0) return baseColor;
     const period = isHighlighted ? this.config.period / this.config.highlightMultiplier : this.config.period;
@@ -218,9 +218,9 @@ export class PulseController {
   }
 
   /**
-   * Apply pulse-driven scale / colour to every entry in `nodeIds`, skipping
+   * Apply pulse-driven scale / color to every entry in `nodeIds`, skipping
    * the configured hover index. Caller supplies layout positions and the
-   * resting colour; PulseController handles the rest.
+   * resting color; PulseController handles the rest.
    */
   apply(
     mesh: NodeMesh,
@@ -245,7 +245,7 @@ export class PulseController {
 
   /**
    * For nodes that ARE in the excluded set, write the resting position
-   * + base colour without a scale modulation. Used to "snap back" a
+   * + base color without a scale modulation. Used to "snap back" a
    * formerly-pulsing node when hover starts so it doesn't freeze mid-pulse.
    */
   applyResting(
