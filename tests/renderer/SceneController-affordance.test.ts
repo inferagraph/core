@@ -363,3 +363,65 @@ describe('SceneController "+" affordance integration', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 });
+
+describe('SceneController showExpandAffordance option', () => {
+  let store: GraphStore;
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    store = new GraphStore();
+    store.loadData(sample);
+    container = makeContainer();
+    document.body.innerHTML = '';
+    document.body.appendChild(container);
+  });
+
+  it('defaults to true: hover shows the affordance (existing behavior preserved)', () => {
+    const ctrl = new SceneController({ store });
+    ctrl.attach(container);
+    ctrl.syncFromStore();
+
+    const aff = ctrl.getExpandAffordance();
+    const showSpy = vi.spyOn(aff, 'show');
+
+    const raycaster = ctrl.getRaycaster();
+    vi.spyOn(raycaster, 'hitTest').mockReturnValue('a');
+    (ctrl as unknown as { pointerActive: boolean }).pointerActive = true;
+    (ctrl as unknown as { pointerX: number }).pointerX = 100;
+    (ctrl as unknown as { pointerY: number }).pointerY = 100;
+    (ctrl as unknown as { tick: () => void }).tick();
+
+    expect(showSpy).toHaveBeenCalledWith('a');
+  });
+
+  it('showExpandAffordance: false skips show() on hover', () => {
+    const ctrl = new SceneController({ store, showExpandAffordance: false });
+    ctrl.attach(container);
+    ctrl.syncFromStore();
+
+    const aff = ctrl.getExpandAffordance();
+    const showSpy = vi.spyOn(aff, 'show');
+
+    const raycaster = ctrl.getRaycaster();
+    vi.spyOn(raycaster, 'hitTest').mockReturnValue('a');
+    (ctrl as unknown as { pointerActive: boolean }).pointerActive = true;
+    (ctrl as unknown as { pointerX: number }).pointerX = 100;
+    (ctrl as unknown as { pointerY: number }).pointerY = 100;
+    (ctrl as unknown as { tick: () => void }).tick();
+
+    expect(showSpy).not.toHaveBeenCalled();
+  });
+
+  it('showExpandAffordance: false skips attach() so no DOM button is created', () => {
+    const ctrl = new SceneController({ store, showExpandAffordance: false });
+    const aff = ctrl.getExpandAffordance();
+    const attachSpy = vi.spyOn(aff, 'attach');
+
+    ctrl.attach(container);
+    ctrl.syncFromStore();
+
+    expect(attachSpy).not.toHaveBeenCalled();
+    expect(container.querySelector('.ig-affordance-overlay')).toBeNull();
+    expect(container.querySelector('.ig-expand-affordance')).toBeNull();
+  });
+});
