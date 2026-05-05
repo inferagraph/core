@@ -23,6 +23,7 @@ import {
 } from './TreeEdgeMesh.js';
 import { LabelRenderer } from './LabelRenderer.js';
 import { AnnotationRenderer } from './AnnotationRenderer.js';
+import { ExpandAffordance } from './ExpandAffordance.js';
 import { Raycaster } from './Raycaster.js';
 import { TooltipOverlay } from '../overlay/TooltipOverlay.js';
 import {
@@ -281,6 +282,7 @@ export class SceneController implements InferredEdgeHost {
   private readonly cameraController = new CameraController();
   private readonly labelRenderer = new LabelRenderer();
   private readonly annotationRenderer = new AnnotationRenderer();
+  private readonly expandAffordance = new ExpandAffordance();
   private readonly raycaster = new Raycaster();
   private readonly tooltipOverlay = new TooltipOverlay();
   private readonly colorResolver: NodeColorResolver;
@@ -290,6 +292,14 @@ export class SceneController implements InferredEdgeHost {
   private container: HTMLElement | null = null;
   private labelOverlay: HTMLElement | null = null;
   private annotationOverlay: HTMLElement | null = null;
+  /**
+   * Optional handler installed via {@link setOnExpandRequest}. When
+   * the user clicks the "+" affordance the affordance fires this
+   * handler with the node id, and the React layer dispatches the
+   * neighbor expansion. `null` means "no consumer wired up" — the
+   * click is silently dropped.
+   */
+  private onExpandRequest: ((nodeId: string) => void) | null = null;
   /**
    * Highlight set dispatched to every mounted mesh's `setHighlight`
    * each time {@link applyHighlightMask} runs. Empty = baseline (no
@@ -415,9 +425,27 @@ export class SceneController implements InferredEdgeHost {
   private pointerY: number = 0;
   private pointerActive: boolean = false;
 
+  /**
+   * Phase 6 — node-body click handler. Fired by the pointerdown/pointerup
+   * pair when the user releases a click on a node body (not on the "+"
+   * affordance). `null` means "no consumer wired up" — clicks become a
+   * no-op for the host but still feed the camera controls underneath.
+   */
+  private onNodeClick: ((nodeId: string) => void) | null = null;
+  /** Pointer-down screen coords + node id (when a node was hit). */
+  private pointerDown: { x: number; y: number; nodeId: string | null } | null = null;
+  /**
+   * Maximum drift between pointerdown and pointerup (in CSS pixels) before
+   * we treat the gesture as a drag and suppress the click. Matches the
+   * threshold most browsers use internally.
+   */
+  private static readonly CLICK_DRIFT_THRESHOLD = 6;
+
   // Bound handlers (so we can remove them).
   private onPointerMoveBound = this.onPointerMove.bind(this);
   private onPointerLeaveBound = this.onPointerLeave.bind(this);
+  private onPointerDownBound = this.onPointerDown.bind(this);
+  private onPointerUpBound = this.onPointerUp.bind(this);
   private tickBound = this.tick.bind(this);
 
   // Reusable Three.js scratch — avoid GC churn in the hot loop.
@@ -553,6 +581,19 @@ export class SceneController implements InferredEdgeHost {
     container.appendChild(this.annotationOverlay);
     this.annotationRenderer.attach(this.annotationOverlay);
 
+    // "+" hover affordance. Mounts its own sibling overlay
+    // (`.ig-affordance-overlay`, z-index 6 — above labels at 5, below
+    // tooltip at 100) so its pointer-events policy stays independent
+    // of labels + annotations.
+    this.expandAffordance.attach(container);
+    this.expandAffordance.setOnExpand((nodeId) => {
+      // Forward to the consumer-registered handler (if any). Keeping
+      // this as a closure means setOnExpandRequest can be called at
+      // any time after attach without re-registering on the
+      // affordance itself.
+      this.onExpandRequest?.(nodeId);
+    });
+
     // Tooltip overlay sits on top.
     this.tooltipOverlay.attach(container);
     if (this.tooltip) {
@@ -564,6 +605,13 @@ export class SceneController implements InferredEdgeHost {
       container.addEventListener('pointermove', this.onPointerMoveBound);
       container.addEventListener('pointerleave', this.onPointerLeaveBound);
     }
+
+    // Phase 6 — node-body click. Dispatches the consumer-registered
+    // `onNodeClick` handler when the user releases a click directly on
+    // a node (not on the "+" affordance, which has its own handler).
+    // Listens for `pointerdown`/`pointerup` so we can suppress drags.
+    container.addEventListener('pointerdown', this.onPointerDownBound);
+    container.addEventListener('pointerup', this.onPointerUpBound);
 
     // Per-frame tick: settle physics, project labels, run hover raycast.
     this.renderer.addTickCallback(this.tickBound);
@@ -581,11 +629,14 @@ export class SceneController implements InferredEdgeHost {
       this.container.removeEventListener('pointermove', this.onPointerMoveBound);
       this.container.removeEventListener('pointerleave', this.onPointerLeaveBound);
     }
+    this.container.removeEventListener('pointerdown', this.onPointerDownBound);
+    this.container.removeEventListener('pointerup', this.onPointerUpBound);
 
     this.renderer.removeTickCallback(this.tickBound);
     this.cameraController.detach();
     this.labelRenderer.clear();
     this.annotationRenderer.detach();
+    this.expandAffordance.detach();
     this.tooltipOverlay.detach();
 
     if (this.labelOverlay) {
@@ -627,6 +678,11 @@ export class SceneController implements InferredEdgeHost {
     // longer exists. Clear them so the next attach starts fresh.
     this.graphCameraSnapshot = null;
     this.treeCameraSnapshot = null;
+
+    // The expand-affordance click handler captures `this` via the
+    // `setOnExpand` closure installed in `attach()`; the next attach
+    // re-installs it. The consumer-registered handler outlives detach
+    // (the React layer re-wires on remount), so we leave it intact.
 
     this.container = null;
   }
@@ -1337,6 +1393,11 @@ export class SceneController implements InferredEdgeHost {
 
     // Update hover state if pointer is over the canvas.
     if (this.enableHover && this.pointerActive) this.updateHover();
+
+    // Sync the "+" affordance with the hovered node's screen position.
+    // We project ONLY the hovered node, never every node in the graph,
+    // so this is O(1) per frame regardless of graph size.
+    if (this.hoveredIndex !== null) this.projectAffordance();
   }
 
   /**
@@ -1428,6 +1489,43 @@ export class SceneController implements InferredEdgeHost {
     }
   }
 
+  /**
+   * Project the world-space position of the currently-hovered node
+   * into screen space and push it into {@link ExpandAffordance.updatePosition}.
+   * Called from {@link tick} only when {@link hoveredIndex} is non-null,
+   * so this is O(1) per frame regardless of graph size.
+   *
+   * Mirrors {@link projectAnnotations} in shape (camera-agnostic
+   * `Vector3.project`, layout-source selection by `animated`) but
+   * targets exactly one node.
+   */
+  private projectAffordance(): void {
+    if (!this.container) return;
+    if (this.hoveredIndex === null) return;
+    const camera = this.renderer.getCamera();
+    if (!camera) return;
+
+    const id = this.nodeIdsByIndex[this.hoveredIndex];
+    if (!id) return;
+
+    const positions = this.layoutEngine.animated
+      ? this.layoutEngine.getPositions()
+      : this.layoutCache.get(this.layoutMode);
+    const pos = positions?.get(id);
+    if (!pos) return;
+
+    const width = this.container.clientWidth || 1;
+    const height = this.container.clientHeight || 1;
+    const halfW = width / 2;
+    const halfH = height / 2;
+
+    this._projectVec.set(pos.x, pos.y, pos.z);
+    this._projectVec.project(camera);
+    const x = this._projectVec.x * halfW + halfW;
+    const y = -this._projectVec.y * halfH + halfH;
+    this.expandAffordance.updatePosition(x, y);
+  }
+
   private onPointerMove(event: Event): void {
     if (!this.container) return;
     // PointerEvent extends MouseEvent; we only care about client coords.
@@ -1443,6 +1541,79 @@ export class SceneController implements InferredEdgeHost {
   private onPointerLeave(): void {
     this.pointerActive = false;
     this.clearHover();
+  }
+
+  /**
+   * Capture the pointerdown anchor + the node currently under the cursor
+   * (if any). Used by `onPointerUp` to decide whether the gesture was a
+   * click or a drag.
+   *
+   * Affordance clicks are routed through the affordance overlay's own
+   * pointer handlers (the affordance has `pointer-events: auto` in CSS
+   * while the node mesh container does not), so we don't see them here.
+   */
+  private onPointerDown(event: Event): void {
+    if (!this.container) return;
+    const me = event as MouseEvent;
+    // Only react to primary button presses.
+    if (me.button !== undefined && me.button !== 0) {
+      this.pointerDown = null;
+      return;
+    }
+    const rect = this.container.getBoundingClientRect();
+    const x = me.clientX - rect.left;
+    const y = me.clientY - rect.top;
+    const width = this.container.clientWidth || 1;
+    const height = this.container.clientHeight || 1;
+    const nodeId = this.raycaster.hitTest(x, y, width, height);
+    this.pointerDown = { x, y, nodeId };
+  }
+
+  /**
+   * Decide whether the gesture is a click (small drift, same node) and
+   * fire the host-registered `onNodeClick` handler. Drags suppress the
+   * click — without this guard, dragging the camera would always fire
+   * a click on the start node.
+   */
+  private onPointerUp(event: Event): void {
+    if (!this.container || !this.pointerDown) return;
+    const anchor = this.pointerDown;
+    this.pointerDown = null;
+    if (!anchor.nodeId) return;
+    if (!this.onNodeClick) return;
+
+    const me = event as MouseEvent;
+    const rect = this.container.getBoundingClientRect();
+    const x = me.clientX - rect.left;
+    const y = me.clientY - rect.top;
+    const dx = x - anchor.x;
+    const dy = y - anchor.y;
+    const drift = Math.hypot(dx, dy);
+    if (drift > SceneController.CLICK_DRIFT_THRESHOLD) return;
+
+    // Confirm we're still over the same node (in case the user nudged the
+    // mouse over to a neighbor mid-click).
+    const width = this.container.clientWidth || 1;
+    const height = this.container.clientHeight || 1;
+    const upNodeId = this.raycaster.hitTest(x, y, width, height);
+    if (upNodeId !== anchor.nodeId) return;
+
+    try {
+      this.onNodeClick(anchor.nodeId);
+    } catch (err) {
+      // Host callbacks must not break the scene.
+      // eslint-disable-next-line no-console
+      console.warn('[InferaGraph SceneController] onNodeClick handler threw:', err);
+    }
+  }
+
+  /**
+   * Register the click handler for node bodies. Receives the canonical
+   * NodeId. Pass `null` to clear. Distinct from
+   * {@link setOnExpandRequest} which fires for "+" affordance clicks.
+   */
+  setOnNodeClick(handler: ((nodeId: string) => void) | null): void {
+    this.onNodeClick = handler;
   }
 
   private updateHover(): void {
@@ -1478,6 +1649,9 @@ export class SceneController implements InferredEdgeHost {
     this.hoveredIndex = newIndex;
     this.paintNode(newIndex, /* hovered */ true);
     this.showTooltip(this.nodesByIndex[newIndex]);
+    // Reveal the "+" affordance for the newly-hovered node. Position
+    // is pushed by `tick()` on the next frame via `updatePosition`.
+    this.expandAffordance.show(this.nodeIdsByIndex[newIndex]);
   }
 
   private clearHover(): void {
@@ -1486,6 +1660,7 @@ export class SceneController implements InferredEdgeHost {
       this.hoveredIndex = null;
     }
     this.tooltipOverlay.hide();
+    this.expandAffordance.hide();
   }
 
   private paintNode(index: number, hovered: boolean): void {
@@ -1868,6 +2043,23 @@ export class SceneController implements InferredEdgeHost {
   /** The annotation renderer (exposed for tests + advanced consumers). */
   getAnnotationRenderer(): AnnotationRenderer {
     return this.annotationRenderer;
+  }
+
+  /** The "+" hover affordance (exposed for tests + advanced consumers). */
+  getExpandAffordance(): ExpandAffordance {
+    return this.expandAffordance;
+  }
+
+  /**
+   * Register the click handler for the "+" affordance. The handler
+   * receives the node id of the affordance that was clicked. The
+   * React layer wires this to its neighbor-expansion dispatch
+   * (`useInferaGraphNeighbors().expand`).
+   *
+   * Pass `null` to clear the handler.
+   */
+  setOnExpandRequest(handler: ((nodeId: string) => void) | null): void {
+    this.onExpandRequest = handler;
   }
 
   /**

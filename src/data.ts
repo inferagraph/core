@@ -248,6 +248,11 @@ export type { DataAdapter, DataAdapterConfig } from './data/DataAdapter.js';
 export { StaticDataAdapter } from './data/StaticDataAdapter.js';
 export { DataManager } from './data/DataManager.js';
 export { Datasource } from './data/Datasource.js';
+export { MemoryManager } from './data/MemoryManager.js';
+export type {
+  MemoryManagedStore,
+  MemoryManagedAIEngine,
+} from './data/MemoryManager.js';
 
 // Plugins
 export { PluginInterface } from './plugins/PluginInterface.js';

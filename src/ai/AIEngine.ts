@@ -219,6 +219,14 @@ export class AIEngine {
    * swap, etc.) we drop {@link warmupPromise} on next ensure call.
    */
   private warmupSignature: string | undefined;
+  /**
+   * Monotonic token issued at the start of each {@link computeInferredEdges}
+   * call. Mid-flight checks compare the captured token against this field;
+   * a mismatch means a newer compute superseded the in-flight one, so the
+   * old call bails before persisting. Mirrors the Phase 5 pattern used by
+   * {@link ensureEmbeddings} to avoid stale writes from racing computes.
+   */
+  private currentInferredEdgesRun = 0;
 
   constructor(
     store: GraphStore,
@@ -319,6 +327,15 @@ export class AIEngine {
     if (!this.inferredEdgeStore) return;
     if (opts?.signal?.aborted) return;
 
+    // Token-guard: stamp this run with a monotonically-increasing id and
+    // bail out at every async boundary if a newer call has started since.
+    // Mirrors the Phase 5 pattern in `ensureEmbeddings` — without it, a
+    // fast-fired second compute could be overtaken by the slower first one
+    // and clobber the freshest signal set with stale data.
+    const myRun = ++this.currentInferredEdgesRun;
+    const isStale = (): boolean =>
+      myRun !== this.currentInferredEdgesRun || !!opts?.signal?.aborted;
+
     const requested = opts?.sources;
     const enabled = (s: InferredEdgeSource): boolean =>
       requested === undefined || requested.includes(s);
@@ -330,7 +347,7 @@ export class AIEngine {
     const graphCandidates = enabled('graph')
       ? computeGraphInferences(this.store, { limitPerNode })
       : [];
-    if (opts?.signal?.aborted) return;
+    if (isStale()) return;
 
     // -- Embedding signals -------------------------------------------------
     let embeddingCandidates: Awaited<
@@ -365,7 +382,7 @@ export class AIEngine {
       }
       // Tier 1: skip embedding source entirely.
     }
-    if (opts?.signal?.aborted) return;
+    if (isStale()) return;
 
     // -- LLM signals -------------------------------------------------------
     let llmCandidates: Awaited<ReturnType<typeof computeLLMInferences>> = [];
@@ -380,7 +397,7 @@ export class AIEngine {
         signal: opts?.signal,
       });
     }
-    if (opts?.signal?.aborted) return;
+    if (isStale()) return;
 
     // -- Merge + persist ---------------------------------------------------
     const merged = mergeInferences(
@@ -390,8 +407,93 @@ export class AIEngine {
       llmCandidates,
       { excludeExplicit },
     );
-    if (opts?.signal?.aborted) return;
+    if (isStale()) return;
     await this.inferredEdgeStore.set(merged);
+  }
+
+  /**
+   * Drop the cached embedding(s) for `nodeId`. Called by {@link MemoryManager}
+   * when an LRU eviction kicks in. No-op when no embedding storage is wired
+   * (Tier 1) — there's nothing to drop.
+   *
+   * Tier 3: delegates to the embedding store's per-node bulk-delete pattern.
+   * Since the {@link EmbeddingStore} contract doesn't expose a per-node
+   * delete primitive, we fall back to the closest available API: re-set the
+   * record to an empty placeholder is wrong, so we instead instruct stores
+   * that implement an optional `delete(nodeId)` method (added by host
+   * implementations) when present. Hosts that don't implement deletion still
+   * benefit because the store removal closes the references.
+   *
+   * Tier 2: walks the cache index and removes any entry for `nodeId`. Cache
+   * implementations expose `delete(key)` so we can do this directly.
+   */
+  async dropEmbedding(nodeId: string): Promise<void> {
+    // Tier 3 — best-effort: store implementations may expose `delete(nodeId)`
+    // even though it's not part of the v1 contract.
+    if (this.embeddingStore) {
+      const maybeDelete = (
+        this.embeddingStore as unknown as {
+          delete?: (nodeId: string) => void | Promise<void>;
+        }
+      ).delete;
+      if (typeof maybeDelete === 'function') {
+        try {
+          await maybeDelete.call(this.embeddingStore, nodeId);
+        } catch {
+          // Eviction must never throw upstream.
+        }
+      }
+    }
+    // Tier 2 — walk the sidecar index, drop matching entries from it.
+    // The {@link CacheProvider} contract has no per-key `delete` (only
+    // bulk `clear`), so we only update the index here. Stale entries
+    // remain in the cache until they age out via TTL or are bumped by the
+    // cache's max-entries LRU. The index update is the canonical truth so
+    // future `loadCachedEmbeddings()` calls won't surface them.
+    if (this.cache) {
+      try {
+        const raw = await this.cache.get(EMBED_INDEX_KEY);
+        const list: string[] = raw ? (JSON.parse(raw) as string[]) : [];
+        const remaining = list.filter((entry) => {
+          const [entryNodeId] = entry.split('|');
+          return entryNodeId !== nodeId;
+        });
+        if (remaining.length !== list.length) {
+          await this.cache.set(EMBED_INDEX_KEY, JSON.stringify(remaining));
+        }
+      } catch {
+        // Cache failures must not block eviction.
+      }
+    }
+    // Drop any in-flight warmup signature so the next ensureEmbeddings()
+    // re-evaluates the surface (the dropped node would otherwise stay
+    // missing from the warmup view until the signature changes for an
+    // unrelated reason).
+    this.warmupSignature = undefined;
+    this.warmupPromise = undefined;
+  }
+
+  /**
+   * Drop every inferred edge incident to `nodeId`. Called by
+   * {@link MemoryManager} when an LRU eviction kicks in so the inferred-edge
+   * overlay doesn't keep dangling references to vanished nodes.
+   *
+   * No-op when no inferred-edge store is wired. Other inferred edges are
+   * preserved; we re-`set` the filtered list so the store's invariants
+   * (single composite-key entry per pair) still hold.
+   */
+  async dropInferredEdgesFor(nodeId: string): Promise<void> {
+    if (!this.inferredEdgeStore) return;
+    try {
+      const all = await this.inferredEdgeStore.getAll();
+      const remaining = all.filter(
+        (e) => e.sourceId !== nodeId && e.targetId !== nodeId,
+      );
+      if (remaining.length === all.length) return;
+      await this.inferredEdgeStore.set(remaining);
+    } catch {
+      // Eviction must never throw upstream.
+    }
   }
 
   /**

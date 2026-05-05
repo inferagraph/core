@@ -24,6 +24,65 @@
   z-index: 5;
 }
 
+.ig-affordance-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 6;
+}
+
+.ig-expand-affordance {
+  --ig-expand-bg: var(--ig-panel-bg, #ffffff);
+  --ig-expand-color: var(--ig-panel-color, #333333);
+  --ig-expand-border: 1px solid var(--ig-card-border, rgba(0, 0, 0, 0.15));
+  --ig-expand-radius: 50%;
+  --ig-expand-size: 20px;
+  --ig-expand-font-size: 14px;
+  --ig-expand-font-weight: 600;
+  --ig-expand-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  --ig-expand-offset-x: 12px;
+  --ig-expand-offset-y: -12px;
+  --ig-expand-hover-bg: color-mix(in srgb, var(--ig-expand-bg) 80%, var(--ig-expand-color));
+  --ig-expand-active-scale: 0.92;
+
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--ig-expand-size);
+  height: var(--ig-expand-size);
+  display: none; /* shown by ExpandAffordance.show() (flipped to flex) */
+  align-items: center;
+  justify-content: center;
+  background: var(--ig-expand-bg);
+  color: var(--ig-expand-color);
+  border: var(--ig-expand-border);
+  border-radius: var(--ig-expand-radius);
+  font-size: var(--ig-expand-font-size);
+  font-weight: var(--ig-expand-font-weight);
+  line-height: 1;
+  box-shadow: var(--ig-expand-shadow);
+  cursor: pointer;
+  user-select: none;
+  pointer-events: auto;
+  will-change: transform;
+  padding: 0;
+}
+
+.ig-expand-affordance:hover {
+  background: var(--ig-expand-hover-bg);
+}
+
+.ig-expand-affordance:active {
+  transform-origin: center;
+  transform: scale(var(--ig-expand-active-scale));
+}
+
+.ig-expand-affordance:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
 .ig-label {
   position: absolute;
   top: 0;
