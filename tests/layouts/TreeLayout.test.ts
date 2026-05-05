@@ -14,8 +14,8 @@ describe('TreeLayout', () => {
     const positions = layout.compute(
       ['root', 'child1', 'child2'],
       [
-        { sourceId: 'root', targetId: 'child1', type: 'father_of' },
-        { sourceId: 'root', targetId: 'child2', type: 'father_of' },
+        { sourceId: 'root', targetId: 'child1', type: 'parent_of' },
+        { sourceId: 'root', targetId: 'child2', type: 'parent_of' },
       ],
     );
     expect(positions.size).toBe(3);
@@ -49,17 +49,16 @@ describe('TreeLayout', () => {
   });
 
   it('should not blow the stack on bidirectional edges (cycle)', () => {
-    // Bible Graph emits gender-specific reciprocal edges, e.g.
-    //   adam -> father_of -> cain
-    //   cain -> son_of    -> adam
+    // Hosts can emit reciprocal edges (X parent_of Y AND Y parent_of X)
     // which forms a cycle in the directed graph the layout traverses.
+    // The visited-set guard absorbs it.
     const layout = new TreeLayout();
     const nodeIds = ['a', 'b', 'c'];
     const edges = [
-      { sourceId: 'a', targetId: 'b', type: 'father_of' },
-      { sourceId: 'b', targetId: 'a', type: 'son_of' },
-      { sourceId: 'b', targetId: 'c', type: 'father_of' },
-      { sourceId: 'c', targetId: 'b', type: 'son_of' },
+      { sourceId: 'a', targetId: 'b', type: 'parent_of' },
+      { sourceId: 'b', targetId: 'a', type: 'parent_of' },
+      { sourceId: 'b', targetId: 'c', type: 'parent_of' },
+      { sourceId: 'c', targetId: 'b', type: 'parent_of' },
     ];
 
     expect(() => layout.compute(nodeIds, edges)).not.toThrow();
@@ -70,47 +69,50 @@ describe('TreeLayout', () => {
   it('should not blow the stack on a self-loop', () => {
     const layout = new TreeLayout();
     expect(() =>
-      layout.compute(['x'], [{ sourceId: 'x', targetId: 'x', type: 'father_of' }]),
+      layout.compute(['x'], [{ sourceId: 'x', targetId: 'x', type: 'parent_of' }]),
     ).not.toThrow();
   });
 
-  it('pairs spouses at the same y and centres them over their child', () => {
-    const layout = new TreeLayout();
+  it('pairs same-depth peers and centres them over their shared child', () => {
+    const layout = new TreeLayout({
+      parentEdgeTypes: ['parent_of'],
+      pairedEdgeTypes: ['paired_with'],
+    });
     const positions = layout.compute(
-      ['abe', 'sarah', 'isaac'],
+      ['p1', 'p2', 'kid'],
       [
-        { sourceId: 'abe', targetId: 'sarah', type: 'husband_of' },
-        { sourceId: 'sarah', targetId: 'abe', type: 'wife_of' },
-        { sourceId: 'abe', targetId: 'isaac', type: 'father_of' },
-        { sourceId: 'sarah', targetId: 'isaac', type: 'mother_of' },
+        { sourceId: 'p1', targetId: 'p2', type: 'paired_with' },
+        { sourceId: 'p2', targetId: 'p1', type: 'paired_with' },
+        { sourceId: 'p1', targetId: 'kid', type: 'parent_of' },
+        { sourceId: 'p2', targetId: 'kid', type: 'parent_of' },
       ],
     );
 
-    const abe = positions.get('abe')!;
-    const sarah = positions.get('sarah')!;
-    const isaac = positions.get('isaac')!;
-    // Spouses share a row.
-    expect(abe.y).toBe(sarah.y);
-    // Spouses are horizontally separated.
-    expect(Math.abs(abe.x - sarah.x)).toBeGreaterThan(0);
+    const p1 = positions.get('p1')!;
+    const p2 = positions.get('p2')!;
+    const kid = positions.get('kid')!;
+    // Pair share a row.
+    expect(p1.y).toBe(p2.y);
+    // Pair are horizontally separated.
+    expect(Math.abs(p1.x - p2.x)).toBeGreaterThan(0);
     // Child is below the parents.
-    expect(isaac.y).toBeLessThan(abe.y);
+    expect(kid.y).toBeLessThan(p1.y);
     // Child sits at the midpoint of the parent pair.
-    expect(isaac.x).toBeCloseTo((abe.x + sarah.x) / 2, 5);
+    expect(kid.x).toBeCloseTo((p1.x + p2.x) / 2, 5);
     // 2D plane.
-    expect(abe.z).toBe(0);
-    expect(sarah.z).toBe(0);
-    expect(isaac.z).toBe(0);
+    expect(p1.z).toBe(0);
+    expect(p2.z).toBe(0);
+    expect(kid.z).toBe(0);
   });
 
   it('produces deterministic positions for the same input', () => {
-    const layout = new TreeLayout();
+    const layout = new TreeLayout({ pairedEdgeTypes: ['paired_with'] });
     const data = {
       ids: ['a', 'b', 'c', 'd'],
       edges: [
-        { sourceId: 'a', targetId: 'b', type: 'husband_of' },
-        { sourceId: 'a', targetId: 'c', type: 'father_of' },
-        { sourceId: 'a', targetId: 'd', type: 'father_of' },
+        { sourceId: 'a', targetId: 'b', type: 'paired_with' },
+        { sourceId: 'a', targetId: 'c', type: 'parent_of' },
+        { sourceId: 'a', targetId: 'd', type: 'parent_of' },
       ],
     };
     const first = new Map(layout.compute(data.ids, data.edges));
@@ -125,9 +127,9 @@ describe('TreeLayout', () => {
     const positions = layout.compute(
       ['p', 'c1', 'c2', 'c3'],
       [
-        { sourceId: 'p', targetId: 'c1', type: 'father_of' },
-        { sourceId: 'p', targetId: 'c2', type: 'father_of' },
-        { sourceId: 'p', targetId: 'c3', type: 'father_of' },
+        { sourceId: 'p', targetId: 'c1', type: 'parent_of' },
+        { sourceId: 'p', targetId: 'c2', type: 'parent_of' },
+        { sourceId: 'p', targetId: 'c3', type: 'parent_of' },
       ],
     );
     const c1 = positions.get('c1')!;
@@ -139,14 +141,18 @@ describe('TreeLayout', () => {
     expect(c2.x).toBeLessThan(c3.x);
   });
 
-  it('parental drop line extends from the marriage-line Y to the sibling-bar Y with no gap', () => {
-    // Adam + Eve as a couple, Cain / Abel / Seth as their children. The
-    // marriage line is drawn at Adam's centre-y (= Eve's centre-y); the
-    // parent → children drop must start at the *same* y so the marriage
-    // line and the drop visually connect. Prior to this fix the drop
-    // started at the parents' card-bottom (`pa.y - halfH`), leaving a
-    // halfH-sized gap between the marriage line and the top of the drop.
-    const layout = new TreeLayout();
+  it('parental drop line extends from the pair-line Y to the sibling-bar Y with no gap', () => {
+    // A paired pair (p1 + p2) at the top; three shared children
+    // beneath. The horizontal pair-line is drawn at p1's centre-y (=
+    // p2's centre-y); the parent -> children drop must start at the
+    // *same* y so the pair-line and the drop visually connect. Prior to
+    // this fix the drop started at the parents' card-bottom
+    // (`pa.y - halfH`), leaving a halfH-sized gap between the pair-line
+    // and the top of the drop.
+    const layout = new TreeLayout({
+      parentEdgeTypes: ['father_of', 'mother_of', 'parent_of'],
+      pairedEdgeTypes: ['husband_of', 'wife_of', 'married_to', 'spouse_of'],
+    });
     const positions = layout.compute(
       ['adam', 'eve', 'cain', 'abel', 'seth'],
       [
@@ -228,17 +234,140 @@ describe('TreeLayout', () => {
     expect(dropTopY).toBeCloseTo(marriageSeg!.a.y, 6);
   });
 
-  it('ignores edges whose type is not parent or spouse', () => {
-    // `lived_in` should not contribute to hierarchy.
+  it('ignores edges whose type is neither a parent nor a paired type', () => {
+    // `lived_in` is neither a configured parent type nor a paired type,
+    // so it should not contribute to hierarchy.
     const layout = new TreeLayout();
     const positions = layout.compute(
-      ['abe', 'beersheba'],
-      [{ sourceId: 'abe', targetId: 'beersheba', type: 'lived_in' }],
+      ['a', 'b'],
+      [{ sourceId: 'a', targetId: 'b', type: 'lived_in' }],
     );
     // Both nodes still get a position (they fall into the disconnected-mop-up
     // pass), but they sit on the same row because no parent edge ties
     // them.
     expect(positions.size).toBe(2);
-    expect(positions.get('abe')!.y).toBe(positions.get('beersheba')!.y);
+    expect(positions.get('a')!.y).toBe(positions.get('b')!.y);
+  });
+
+  // ---- Domain-agnostic edge type configuration -----------------------------
+  // Tree view is generic: org charts, supply chains, taxonomies, citation
+  // graphs, family trees, etc. The layout consults configurable
+  // `parentEdgeTypes` / `pairedEdgeTypes` to decide which edges form
+  // hierarchy and which form same-depth pairs; nothing is hard-coded to a
+  // particular domain.
+
+  it('treats only parentEdgeTypes as parent->child (default ["parent_of"])', () => {
+    // Two disjoint parent->child relations: one labelled `parent_of` (the
+    // generic CS-textbook term, the new default) and one labelled
+    // `father_of` (a domain-specific kinship term that is NOT in the
+    // default set). The layout should treat the first as hierarchy and
+    // ignore the second; the second pair therefore lays out as two
+    // disconnected single-node trees on the same row.
+    const layout = new TreeLayout();
+    const positions = layout.compute(
+      ['gp', 'gc', 'fp', 'fc'],
+      [
+        { sourceId: 'gp', targetId: 'gc', type: 'parent_of' },
+        { sourceId: 'fp', targetId: 'fc', type: 'father_of' },
+      ],
+    );
+
+    const gp = positions.get('gp')!;
+    const gc = positions.get('gc')!;
+    const fp = positions.get('fp')!;
+    const fc = positions.get('fc')!;
+
+    // `parent_of` forms a 2-level tree.
+    expect(gp.y).toBeGreaterThan(gc.y);
+    // `father_of` is ignored: both nodes are roots, share the same row.
+    expect(fp.y).toBe(fc.y);
+    // ...and that row is the same as `gp` (the other root).
+    expect(fp.y).toBe(gp.y);
+  });
+
+  it('uses configured parentEdgeTypes when provided (org chart)', () => {
+    // Org chart: edges are `manages`. With the new option the layout
+    // recognises them as parent->child.
+    const layout = new TreeLayout({ parentEdgeTypes: ['manages'] });
+    const positions = layout.compute(
+      ['director', 'engineer1', 'engineer2'],
+      [
+        { sourceId: 'director', targetId: 'engineer1', type: 'manages' },
+        { sourceId: 'director', targetId: 'engineer2', type: 'manages' },
+      ],
+    );
+
+    const dir = positions.get('director')!;
+    const e1 = positions.get('engineer1')!;
+    const e2 = positions.get('engineer2')!;
+
+    // Director sits above the engineers.
+    expect(dir.y).toBeGreaterThan(e1.y);
+    expect(dir.y).toBeGreaterThan(e2.y);
+    // Engineers are siblings on the same row, separated horizontally.
+    expect(e1.y).toBe(e2.y);
+    expect(e1.x).not.toBe(e2.x);
+  });
+
+  it('pairedEdgeTypes opts in to same-depth pairing (default empty)', () => {
+    // Two roots linked by `married_to`, each with their own kid. Under
+    // default options the paired list is empty and the two roots are
+    // independent forest entries; the kid of `x` sits centred under
+    // `x`, not under the `x`/`y` midpoint.
+    const noPair = new TreeLayout();
+    const noPairPositions = noPair.compute(
+      ['x', 'y', 'kid'],
+      [
+        { sourceId: 'x', targetId: 'y', type: 'married_to' },
+        { sourceId: 'x', targetId: 'kid', type: 'parent_of' },
+      ],
+    );
+    const xNo = noPairPositions.get('x')!;
+    const yNo = noPairPositions.get('y')!;
+    const kidNo = noPairPositions.get('kid')!;
+    // No pairing — kid is centred under `x` alone, not the x/y midpoint.
+    expect(kidNo.x).toBeCloseTo(xNo.x, 5);
+    // Without pairing, `y` is laid out as a separate forest entry off to
+    // the side; its centre does not coincide with the kid's column.
+    expect(Math.abs(yNo.x - kidNo.x)).toBeGreaterThan(1);
+
+    // Now opt in: the same `married_to` link pairs `x` and `y` at the
+    // shared depth so the kid sits centred between the pair.
+    const paired = new TreeLayout({ pairedEdgeTypes: ['married_to'] });
+    const pairedPositions = paired.compute(
+      ['x', 'y', 'kid'],
+      [
+        { sourceId: 'x', targetId: 'y', type: 'married_to' },
+        { sourceId: 'x', targetId: 'kid', type: 'parent_of' },
+      ],
+    );
+    const x = pairedPositions.get('x')!;
+    const y = pairedPositions.get('y')!;
+    const kid = pairedPositions.get('kid')!;
+    // Pair share a row.
+    expect(x.y).toBe(y.y);
+    // Kid sits centred between the pair, not under either alone.
+    expect(kid.x).toBeCloseTo((x.x + y.x) / 2, 5);
+    expect(kid.x).not.toBeCloseTo(x.x, 5);
+    expect(kid.x).not.toBeCloseTo(y.x, 5);
+  });
+
+  it('still protects against cycles + lays out a forest after the rename (regression)', () => {
+    // Reproduces the existing cycle + forest behaviour using the new
+    // generic `parent_of` edge type, to confirm the algorithmic
+    // behaviour is unchanged after the family-bias is removed.
+    const layout = new TreeLayout();
+    const nodeIds = ['a', 'b', 'c', 'lone'];
+    const edges = [
+      { sourceId: 'a', targetId: 'b', type: 'parent_of' },
+      { sourceId: 'b', targetId: 'a', type: 'parent_of' }, // cycle
+      { sourceId: 'b', targetId: 'c', type: 'parent_of' },
+      // `lone` has no edges -> separate forest entry.
+    ];
+    expect(() => layout.compute(nodeIds, edges)).not.toThrow();
+    const positions = layout.compute(nodeIds, edges);
+    expect(positions.size).toBe(4);
+    // `lone` is a separate forest entry: it shares the top row with `a`.
+    expect(positions.get('lone')!.y).toBe(positions.get('a')!.y);
   });
 });
