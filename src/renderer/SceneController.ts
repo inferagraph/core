@@ -14,6 +14,7 @@ import { WebGLRenderer } from './WebGLRenderer.js';
 import { CameraController } from './CameraController.js';
 import { NodeMesh } from './NodeMesh.js';
 import { EdgeMesh } from './EdgeMesh.js';
+import { InferredEdgeMesh } from './InferredEdgeMesh.js';
 import { TreeNodeMesh } from './TreeNodeMesh.js';
 import {
   TreeEdgeMesh,
@@ -22,6 +23,7 @@ import {
 } from './TreeEdgeMesh.js';
 import { LabelRenderer } from './LabelRenderer.js';
 import { AnnotationRenderer } from './AnnotationRenderer.js';
+import { ExpandAffordance } from './ExpandAffordance.js';
 import { Raycaster } from './Raycaster.js';
 import { TooltipOverlay } from '../overlay/TooltipOverlay.js';
 import {
@@ -37,6 +39,8 @@ import {
 import { PulseController, type PulseOption } from './PulseController.js';
 import { describeNode } from '../utils/describeNode.js';
 import type { EdgeLabelMap } from '../utils/aggregateEdges.js';
+import type { InferredEdge } from '../ai/InferredEdge.js';
+import type { InferredEdgeHost } from './types.js';
 
 /**
  * Minimal HTML escape used to safely embed dynamic strings (node titles,
@@ -272,12 +276,13 @@ export interface SceneControllerOptions {
  *   ctrl.setLayout('tree');
  *   ctrl.detach();
  */
-export class SceneController {
+export class SceneController implements InferredEdgeHost {
   private readonly store: GraphStore;
   private readonly renderer = new WebGLRenderer();
   private readonly cameraController = new CameraController();
   private readonly labelRenderer = new LabelRenderer();
   private readonly annotationRenderer = new AnnotationRenderer();
+  private readonly expandAffordance = new ExpandAffordance();
   private readonly raycaster = new Raycaster();
   private readonly tooltipOverlay = new TooltipOverlay();
   private readonly colorResolver: NodeColorResolver;
@@ -288,6 +293,14 @@ export class SceneController {
   private labelOverlay: HTMLElement | null = null;
   private annotationOverlay: HTMLElement | null = null;
   /**
+   * Optional handler installed via {@link setOnExpandRequest}. When
+   * the user clicks the "+" affordance the affordance fires this
+   * handler with the node id, and the React layer dispatches the
+   * neighbor expansion. `null` means "no consumer wired up" — the
+   * click is silently dropped.
+   */
+  private onExpandRequest: ((nodeId: string) => void) | null = null;
+  /**
    * Highlight set dispatched to every mounted mesh's `setHighlight`
    * each time {@link applyHighlightMask} runs. Empty = baseline (no
    * dim). Same shape as visibility — uniform across modes.
@@ -296,6 +309,30 @@ export class SceneController {
 
   private nodeMesh: NodeMesh | null = null;
   private edgeMesh: EdgeMesh | null = null;
+  /**
+   * Phase 5 inferred-edge overlay mesh. Mounted in graph mode (built
+   * inside {@link buildGraphMeshes} as an empty mesh, populated by the
+   * first {@link setInferredEdges} call). Tree mode does not mount one
+   * — `setInferredEdges` / `setInferredEdgeVisibility` are no-ops with
+   * `console.debug` notes per the Phase 5 plan's tree-mode-deferred
+   * decision.
+   */
+  private inferredEdgeMesh: InferredEdgeMesh | null = null;
+  /**
+   * Cached inferred edges from the most recent
+   * {@link setInferredEdges} call. Replayed onto the freshly-built
+   * {@link inferredEdgeMesh} after a graph-mode rebuild (e.g. the user
+   * toggles `layout` from 'tree' back to 'graph') so the overlay
+   * survives the round-trip.
+   */
+  private lastInferredEdges: ReadonlyArray<InferredEdge> = [];
+  /**
+   * Cached visibility flag for the inferred-edge overlay. Default
+   * `false` matches the {@link InferredEdgeMesh} default + the
+   * `showInferredEdges` prop default. Replayed onto the freshly-built
+   * mesh on graph-mode re-entry alongside {@link lastInferredEdges}.
+   */
+  private inferredEdgesVisible: boolean = false;
 
   /**
    * Tree-mode meshes. Mounted only when {@link layoutMode} === 'tree'
@@ -388,9 +425,27 @@ export class SceneController {
   private pointerY: number = 0;
   private pointerActive: boolean = false;
 
+  /**
+   * Phase 6 — node-body click handler. Fired by the pointerdown/pointerup
+   * pair when the user releases a click on a node body (not on the "+"
+   * affordance). `null` means "no consumer wired up" — clicks become a
+   * no-op for the host but still feed the camera controls underneath.
+   */
+  private onNodeClick: ((nodeId: string) => void) | null = null;
+  /** Pointer-down screen coords + node id (when a node was hit). */
+  private pointerDown: { x: number; y: number; nodeId: string | null } | null = null;
+  /**
+   * Maximum drift between pointerdown and pointerup (in CSS pixels) before
+   * we treat the gesture as a drag and suppress the click. Matches the
+   * threshold most browsers use internally.
+   */
+  private static readonly CLICK_DRIFT_THRESHOLD = 6;
+
   // Bound handlers (so we can remove them).
   private onPointerMoveBound = this.onPointerMove.bind(this);
   private onPointerLeaveBound = this.onPointerLeave.bind(this);
+  private onPointerDownBound = this.onPointerDown.bind(this);
+  private onPointerUpBound = this.onPointerUp.bind(this);
   private tickBound = this.tick.bind(this);
 
   // Reusable Three.js scratch — avoid GC churn in the hot loop.
@@ -526,6 +581,19 @@ export class SceneController {
     container.appendChild(this.annotationOverlay);
     this.annotationRenderer.attach(this.annotationOverlay);
 
+    // "+" hover affordance. Mounts its own sibling overlay
+    // (`.ig-affordance-overlay`, z-index 6 — above labels at 5, below
+    // tooltip at 100) so its pointer-events policy stays independent
+    // of labels + annotations.
+    this.expandAffordance.attach(container);
+    this.expandAffordance.setOnExpand((nodeId) => {
+      // Forward to the consumer-registered handler (if any). Keeping
+      // this as a closure means setOnExpandRequest can be called at
+      // any time after attach without re-registering on the
+      // affordance itself.
+      this.onExpandRequest?.(nodeId);
+    });
+
     // Tooltip overlay sits on top.
     this.tooltipOverlay.attach(container);
     if (this.tooltip) {
@@ -537,6 +605,13 @@ export class SceneController {
       container.addEventListener('pointermove', this.onPointerMoveBound);
       container.addEventListener('pointerleave', this.onPointerLeaveBound);
     }
+
+    // Phase 6 — node-body click. Dispatches the consumer-registered
+    // `onNodeClick` handler when the user releases a click directly on
+    // a node (not on the "+" affordance, which has its own handler).
+    // Listens for `pointerdown`/`pointerup` so we can suppress drags.
+    container.addEventListener('pointerdown', this.onPointerDownBound);
+    container.addEventListener('pointerup', this.onPointerUpBound);
 
     // Per-frame tick: settle physics, project labels, run hover raycast.
     this.renderer.addTickCallback(this.tickBound);
@@ -554,11 +629,14 @@ export class SceneController {
       this.container.removeEventListener('pointermove', this.onPointerMoveBound);
       this.container.removeEventListener('pointerleave', this.onPointerLeaveBound);
     }
+    this.container.removeEventListener('pointerdown', this.onPointerDownBound);
+    this.container.removeEventListener('pointerup', this.onPointerUpBound);
 
     this.renderer.removeTickCallback(this.tickBound);
     this.cameraController.detach();
     this.labelRenderer.clear();
     this.annotationRenderer.detach();
+    this.expandAffordance.detach();
     this.tooltipOverlay.detach();
 
     if (this.labelOverlay) {
@@ -574,6 +652,15 @@ export class SceneController {
 
     this.nodeMesh = null;
     this.edgeMesh = null;
+    if (this.inferredEdgeMesh) {
+      this.inferredEdgeMesh.dispose();
+      this.inferredEdgeMesh = null;
+    }
+    // Drop the inferred-edge cache too — a full detach is a hard
+    // reset. The next attach starts the overlay hidden + empty,
+    // matching the React prop default.
+    this.lastInferredEdges = [];
+    this.inferredEdgesVisible = false;
     this.nodeIdsByIndex = [];
     this.nodesByIndex = [];
     this.edgeIdsByIndex = [];
@@ -591,6 +678,11 @@ export class SceneController {
     // longer exists. Clear them so the next attach starts fresh.
     this.graphCameraSnapshot = null;
     this.treeCameraSnapshot = null;
+
+    // The expand-affordance click handler captures `this` via the
+    // `setOnExpand` closure installed in `attach()`; the next attach
+    // re-installs it. The consumer-registered handler outlives detach
+    // (the React layer re-wires on remount), so we leave it intact.
 
     this.container = null;
   }
@@ -786,6 +878,27 @@ export class SceneController {
       this.renderer.addEdgeMesh('__edges__', edgeMesh);
       this.edgeMesh = edgeMesh;
     }
+
+    // Phase 5: mount the inferred-edge overlay as an empty mesh. The
+    // first `setInferredEdges` call (driven by AIEngine /
+    // computeInferredEdges) resizes its geometry to fit. Building it
+    // empty here keeps the mount path on the same edges-built code
+    // path — visibility + replay are handled below.
+    const inferredEdgeMesh = new InferredEdgeMesh();
+    // Replay any cached overlay state captured before this build —
+    // e.g. user toggled `showInferredEdges` while in tree mode, or
+    // `setInferredEdges` arrived during a tree-mode session. The
+    // freshly-built mesh starts from the cached data so the overlay
+    // survives layout round-trips without the host re-pushing it.
+    if (this.lastInferredEdges.length > 0 && positions.size > 0) {
+      inferredEdgeMesh.setInferredEdges(this.lastInferredEdges, positions);
+    }
+    inferredEdgeMesh.setVisibility(this.inferredEdgesVisible);
+    const overlayMesh = inferredEdgeMesh.getMesh();
+    if (overlayMesh) {
+      this.renderer.addObject('__inferred_edges__', overlayMesh);
+    }
+    this.inferredEdgeMesh = inferredEdgeMesh;
   }
 
   /**
@@ -870,6 +983,11 @@ export class SceneController {
     if (this.edgeMesh) {
       this.renderer.removeEdgeMesh('__edges__');
       this.edgeMesh = null;
+    }
+    if (this.inferredEdgeMesh) {
+      this.renderer.removeObject('__inferred_edges__');
+      this.inferredEdgeMesh.dispose();
+      this.inferredEdgeMesh = null;
     }
   }
 
@@ -1275,6 +1393,11 @@ export class SceneController {
 
     // Update hover state if pointer is over the canvas.
     if (this.enableHover && this.pointerActive) this.updateHover();
+
+    // Sync the "+" affordance with the hovered node's screen position.
+    // We project ONLY the hovered node, never every node in the graph,
+    // so this is O(1) per frame regardless of graph size.
+    if (this.hoveredIndex !== null) this.projectAffordance();
   }
 
   /**
@@ -1366,6 +1489,43 @@ export class SceneController {
     }
   }
 
+  /**
+   * Project the world-space position of the currently-hovered node
+   * into screen space and push it into {@link ExpandAffordance.updatePosition}.
+   * Called from {@link tick} only when {@link hoveredIndex} is non-null,
+   * so this is O(1) per frame regardless of graph size.
+   *
+   * Mirrors {@link projectAnnotations} in shape (camera-agnostic
+   * `Vector3.project`, layout-source selection by `animated`) but
+   * targets exactly one node.
+   */
+  private projectAffordance(): void {
+    if (!this.container) return;
+    if (this.hoveredIndex === null) return;
+    const camera = this.renderer.getCamera();
+    if (!camera) return;
+
+    const id = this.nodeIdsByIndex[this.hoveredIndex];
+    if (!id) return;
+
+    const positions = this.layoutEngine.animated
+      ? this.layoutEngine.getPositions()
+      : this.layoutCache.get(this.layoutMode);
+    const pos = positions?.get(id);
+    if (!pos) return;
+
+    const width = this.container.clientWidth || 1;
+    const height = this.container.clientHeight || 1;
+    const halfW = width / 2;
+    const halfH = height / 2;
+
+    this._projectVec.set(pos.x, pos.y, pos.z);
+    this._projectVec.project(camera);
+    const x = this._projectVec.x * halfW + halfW;
+    const y = -this._projectVec.y * halfH + halfH;
+    this.expandAffordance.updatePosition(x, y);
+  }
+
   private onPointerMove(event: Event): void {
     if (!this.container) return;
     // PointerEvent extends MouseEvent; we only care about client coords.
@@ -1381,6 +1541,79 @@ export class SceneController {
   private onPointerLeave(): void {
     this.pointerActive = false;
     this.clearHover();
+  }
+
+  /**
+   * Capture the pointerdown anchor + the node currently under the cursor
+   * (if any). Used by `onPointerUp` to decide whether the gesture was a
+   * click or a drag.
+   *
+   * Affordance clicks are routed through the affordance overlay's own
+   * pointer handlers (the affordance has `pointer-events: auto` in CSS
+   * while the node mesh container does not), so we don't see them here.
+   */
+  private onPointerDown(event: Event): void {
+    if (!this.container) return;
+    const me = event as MouseEvent;
+    // Only react to primary button presses.
+    if (me.button !== undefined && me.button !== 0) {
+      this.pointerDown = null;
+      return;
+    }
+    const rect = this.container.getBoundingClientRect();
+    const x = me.clientX - rect.left;
+    const y = me.clientY - rect.top;
+    const width = this.container.clientWidth || 1;
+    const height = this.container.clientHeight || 1;
+    const nodeId = this.raycaster.hitTest(x, y, width, height);
+    this.pointerDown = { x, y, nodeId };
+  }
+
+  /**
+   * Decide whether the gesture is a click (small drift, same node) and
+   * fire the host-registered `onNodeClick` handler. Drags suppress the
+   * click — without this guard, dragging the camera would always fire
+   * a click on the start node.
+   */
+  private onPointerUp(event: Event): void {
+    if (!this.container || !this.pointerDown) return;
+    const anchor = this.pointerDown;
+    this.pointerDown = null;
+    if (!anchor.nodeId) return;
+    if (!this.onNodeClick) return;
+
+    const me = event as MouseEvent;
+    const rect = this.container.getBoundingClientRect();
+    const x = me.clientX - rect.left;
+    const y = me.clientY - rect.top;
+    const dx = x - anchor.x;
+    const dy = y - anchor.y;
+    const drift = Math.hypot(dx, dy);
+    if (drift > SceneController.CLICK_DRIFT_THRESHOLD) return;
+
+    // Confirm we're still over the same node (in case the user nudged the
+    // mouse over to a neighbor mid-click).
+    const width = this.container.clientWidth || 1;
+    const height = this.container.clientHeight || 1;
+    const upNodeId = this.raycaster.hitTest(x, y, width, height);
+    if (upNodeId !== anchor.nodeId) return;
+
+    try {
+      this.onNodeClick(anchor.nodeId);
+    } catch (err) {
+      // Host callbacks must not break the scene.
+      // eslint-disable-next-line no-console
+      console.warn('[InferaGraph SceneController] onNodeClick handler threw:', err);
+    }
+  }
+
+  /**
+   * Register the click handler for node bodies. Receives the canonical
+   * NodeId. Pass `null` to clear. Distinct from
+   * {@link setOnExpandRequest} which fires for "+" affordance clicks.
+   */
+  setOnNodeClick(handler: ((nodeId: string) => void) | null): void {
+    this.onNodeClick = handler;
   }
 
   private updateHover(): void {
@@ -1416,6 +1649,9 @@ export class SceneController {
     this.hoveredIndex = newIndex;
     this.paintNode(newIndex, /* hovered */ true);
     this.showTooltip(this.nodesByIndex[newIndex]);
+    // Reveal the "+" affordance for the newly-hovered node. Position
+    // is pushed by `tick()` on the next frame via `updatePosition`.
+    this.expandAffordance.show(this.nodeIdsByIndex[newIndex]);
   }
 
   private clearHover(): void {
@@ -1424,6 +1660,7 @@ export class SceneController {
       this.hoveredIndex = null;
     }
     this.tooltipOverlay.hide();
+    this.expandAffordance.hide();
   }
 
   private paintNode(index: number, hovered: boolean): void {
@@ -1674,6 +1911,101 @@ export class SceneController {
   }
 
   /**
+   * Replace the rendered set of inferred edges and dispatch them to
+   * the {@link InferredEdgeMesh}. Caches the input so a subsequent
+   * graph-mode rebuild (after a tree-mode round-trip) can replay
+   * them without the host re-pushing.
+   *
+   * Tree mode is a deliberate no-op in v1 per the Phase 5 plan
+   * (tree-mode dashed edges deferred to Phase 6). The cache is still
+   * updated so a later `setLayout('graph')` re-entry replays the
+   * latest edges + visibility.
+   *
+   * Implements {@link InferredEdgeHost.setInferredEdges}.
+   */
+  setInferredEdges(
+    edges: ReadonlyArray<InferredEdge>,
+    positions: ReadonlyMap<string, Vector3>,
+  ): void {
+    // Snapshot the input so the cache doesn't alias caller-mutable
+    // state. We only need a shallow copy — `InferredEdge` is `readonly`
+    // by contract.
+    this.lastInferredEdges = edges.slice();
+
+    if (this.layoutMode !== 'graph') {
+      // eslint-disable-next-line no-console
+      console.debug(
+        '[SceneController] setInferredEdges in tree mode is a no-op (overlay deferred to Phase 6); cached for graph-mode replay.',
+      );
+      return;
+    }
+
+    this.inferredEdgeMesh?.setInferredEdges(edges, positions);
+    // Adding a freshly-allocated mesh (the InferredEdgeMesh disposes
+    // and rebuilds on every setInferredEdges call) — re-register it
+    // on the renderer so the new geometry is part of the scene.
+    if (this.inferredEdgeMesh) {
+      const overlayMesh = this.inferredEdgeMesh.getMesh();
+      if (overlayMesh) {
+        this.renderer.addObject('__inferred_edges__', overlayMesh);
+      } else {
+        // Empty edge set — make sure the previous mesh, if any, is
+        // off the scene graph.
+        this.renderer.removeObject('__inferred_edges__');
+      }
+    }
+  }
+
+  /**
+   * Toggle inferred-edge overlay visibility. Caches the state so a
+   * later graph-mode rebuild (after a tree-mode round-trip) replays
+   * it onto the freshly-built mesh.
+   *
+   * Tree mode is a deliberate no-op in v1 per the Phase 5 plan; the
+   * cache still updates so a later graph-mode re-entry honours the
+   * latest visibility intent.
+   *
+   * Implements {@link InferredEdgeHost.setInferredEdgeVisibility}.
+   */
+  setInferredEdgeVisibility(visible: boolean): void {
+    this.inferredEdgesVisible = visible;
+
+    if (this.layoutMode !== 'graph') {
+      // eslint-disable-next-line no-console
+      console.debug(
+        '[SceneController] setInferredEdgeVisibility in tree mode is a no-op (overlay deferred to Phase 6); cached for graph-mode replay.',
+      );
+      return;
+    }
+
+    this.inferredEdgeMesh?.setVisibility(visible);
+  }
+
+  /** Active inferred-edge overlay visibility (for tests + introspection). */
+  getInferredEdgeVisibility(): boolean {
+    return this.inferredEdgesVisible;
+  }
+
+  /**
+   * Snapshot of the most recently dispatched inferred-edge set
+   * (cache only — not the buffer contents). Useful for tests + for
+   * inspecting "what's been pushed" without going through the mesh.
+   */
+  getInferredEdges(): ReadonlyArray<InferredEdge> {
+    return this.lastInferredEdges;
+  }
+
+  /**
+   * The active inferred-edge mesh (graph mode only). Exposed for
+   * tests + advanced consumers that need to drive the overlay
+   * directly. Returns `null` in tree mode or before
+   * {@link buildGraphMeshes} has run.
+   */
+  getInferredEdgeMesh(): InferredEdgeMesh | null {
+    return this.inferredEdgeMesh;
+  }
+
+  /**
    * Animate the camera to focus on `nodeId`. Looks up the node's
    * position from the active layout (live for animated layouts, cached
    * for static layouts) and hands it to
@@ -1711,6 +2043,23 @@ export class SceneController {
   /** The annotation renderer (exposed for tests + advanced consumers). */
   getAnnotationRenderer(): AnnotationRenderer {
     return this.annotationRenderer;
+  }
+
+  /** The "+" hover affordance (exposed for tests + advanced consumers). */
+  getExpandAffordance(): ExpandAffordance {
+    return this.expandAffordance;
+  }
+
+  /**
+   * Register the click handler for the "+" affordance. The handler
+   * receives the node id of the affordance that was clicked. The
+   * React layer wires this to its neighbor-expansion dispatch
+   * (`useInferaGraphNeighbors().expand`).
+   *
+   * Pass `null` to clear the handler.
+   */
+  setOnExpandRequest(handler: ((nodeId: string) => void) | null): void {
+    this.onExpandRequest = handler;
   }
 
   /**

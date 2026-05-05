@@ -1,14 +1,15 @@
-import React, { useRef, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useRef, useEffect, useMemo, useState } from 'react';
 import type {
   GraphData,
   LayoutMode,
   NodeData,
+  NodeId,
   NodeRenderConfig,
   NodeComponentProps,
   TooltipConfig,
   TooltipComponentProps,
 } from '../types.js';
-import { GraphProvider, useGraphContext } from './GraphProvider.js';
+import { GraphProvider, useGraphContext, type SlugResolver } from './GraphProvider.js';
 import { createReactNodeRenderFn, createReactTooltipRenderFn } from './ReactNodeRenderer.js';
 import { SceneController } from '../renderer/SceneController.js';
 import type { NodeColorFn } from '../renderer/NodeColorResolver.js';
@@ -20,6 +21,7 @@ import type { ChatEvent } from '../ai/ChatEvent.js';
 import type { EmbeddingStore } from '../ai/Embedding.js';
 import { inProcessTransport, type Transport } from '../ai/Transport.js';
 import { ChatContext, type InferaGraphChatContext } from './chatContext.js';
+import { useInferaGraphNeighbors } from './useInferaGraphNeighbors.js';
 
 export interface InferaGraphProps {
   data?: GraphData;
@@ -113,6 +115,20 @@ export interface InferaGraphProps {
    */
   transport?: Transport;
   /**
+   * Toggle visibility of the Phase 5 inferred-edge overlay (dashed
+   * lines between nodes the AI inference pipeline thinks are related).
+   * Defaults to `false` (overlay hidden) so the explicit graph reads
+   * cleanly out of the box. Hosts opt in either by setting this to
+   * `true` or by handing the LLM a `set_inferred_visibility` chat
+   * tool call.
+   *
+   * The actual inferred edges are computed by
+   * `aiEngine.computeInferredEdges()` and pushed to the renderer
+   * separately — toggling this prop only shows/hides whatever has
+   * already been computed.
+   */
+  showInferredEdges?: boolean;
+  /**
    * Host-facing chat callback. Called with `text` and `done` events
    * only — tool calls (`apply_filter` / `highlight` / `focus` /
    * `annotate`) are dispatched silently to the renderer.
@@ -122,6 +138,36 @@ export interface InferaGraphProps {
    * streaming / tool-routing logistics.
    */
   onChat?: (event: ChatEvent) => void;
+  /**
+   * Phase 6 — slug → nodeId resolver. When supplied, hooks like
+   * {@link useInferaGraphContent} translate the input through this
+   * resolver before calling into the {@link DataAdapter}. Hosts that
+   * route by raw UUIDs can omit it.
+   */
+  slugResolver?: SlugResolver;
+  /**
+   * Phase 6 — soft cap on the number of nodes retained in the store.
+   * When exceeded, the {@link MemoryManager} evicts the oldest
+   * non-protected nodes. `undefined` (default) disables the cap.
+   */
+  maxNodes?: number;
+  /**
+   * Phase 6 — fired when the user clicks a node body. The host typically
+   * opens a detail dialog. Receives the canonical NodeId (post-slug
+   * resolution) and the node's data snapshot.
+   *
+   * NOT fired for clicks on the "+" affordance — those go through
+   * {@link onExpandRequest} instead.
+   */
+  onNodeClick?: (nodeId: NodeId, node: NodeData) => void;
+  /**
+   * Phase 6 — fired when the user clicks the "+" hover affordance on a
+   * node. Receives the canonical NodeId. The host typically calls
+   * `useInferaGraphNeighbors().expand(nodeId)`. When omitted, the
+   * library installs a default handler that fires the built-in
+   * `expand(nodeId)` dispatch.
+   */
+  onExpandRequest?: (nodeId: NodeId) => void;
   className?: string;
   style?: React.CSSProperties;
   /**
@@ -152,7 +198,10 @@ interface InferaGraphInnerProps {
   embeddingStore?: EmbeddingStore;
   query?: string;
   transport?: Transport;
+  showInferredEdges?: boolean;
   onChat?: (event: ChatEvent) => void;
+  onNodeClick?: (nodeId: NodeId, node: NodeData) => void;
+  onExpandRequest?: (nodeId: NodeId) => void;
   className?: string;
   style?: React.CSSProperties;
   children?: React.ReactNode;
@@ -175,7 +224,10 @@ function InferaGraphInner({
   embeddingStore,
   query,
   transport,
+  showInferredEdges,
   onChat,
+  onNodeClick,
+  onExpandRequest,
   className,
   style,
   children,
@@ -183,6 +235,7 @@ function InferaGraphInner({
   const containerRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<SceneController | null>(null);
   const { store, aiEngine, isReady } = useGraphContext();
+  const neighbors = useInferaGraphNeighbors();
   // Predicate produced by the LLM from the `query` prop. `null` means "no
   // query has been compiled yet" → don't apply anything; an explicit
   // `() => true` means "compiled to match-everything".
@@ -364,6 +417,69 @@ function InferaGraphInner({
     controller.setFilter(effectiveFilter);
   }, [effectiveFilter]);
 
+  // Push inferred-edge overlay visibility into the controller. The
+  // controller caches the value internally and replays it onto a
+  // freshly-built mesh after layout-mode round-trips, so we don't have
+  // to re-fire on every store/layout change — only on prop change.
+  // Default `false` matches the prop default + the InferredEdgeMesh
+  // default + the Phase 5 plan's "hidden by default" decision.
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    controller.setInferredEdgeVisibility(showInferredEdges ?? false);
+  }, [showInferredEdges]);
+
+  // ---------- Phase 6 — click + expand wiring ----------
+
+  // Stable refs for the host callbacks so the effects below don't have to
+  // re-fire when the host accidentally passes a fresh function each render.
+  const onNodeClickRef = useRef(onNodeClick);
+  onNodeClickRef.current = onNodeClick;
+
+  // Push the node-click handler into the controller. The controller fires
+  // it ONLY for clicks on a node body — clicks on the "+" affordance go
+  // through `setOnExpandRequest` instead.
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    if (typeof controller.setOnNodeClick !== 'function') return;
+    if (!onNodeClick) {
+      controller.setOnNodeClick(null);
+      return;
+    }
+    controller.setOnNodeClick((nodeId: NodeId) => {
+      const node = store.getNode(nodeId);
+      if (!node) return;
+      onNodeClickRef.current?.(nodeId, {
+        id: node.id,
+        attributes: node.attributes,
+      });
+    });
+  }, [onNodeClick, store]);
+
+  // Default expand handler: when the host doesn't supply one, fire the
+  // built-in `useInferaGraphNeighbors().expand(nodeId)` so the "+"
+  // affordance "just works" out of the box.
+  const defaultExpandHandler = useCallback(
+    (nodeId: NodeId) => {
+      void neighbors.expand(nodeId);
+    },
+    [neighbors],
+  );
+
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    if (typeof controller.setOnExpandRequest !== 'function') return;
+    const handler = onExpandRequest ?? defaultExpandHandler;
+    controller.setOnExpandRequest(handler);
+    return () => {
+      if (typeof controller.setOnExpandRequest === 'function') {
+        controller.setOnExpandRequest(null);
+      }
+    };
+  }, [onExpandRequest, defaultExpandHandler]);
+
   // ---------- Chat: transport selection + dispatch + onChat callback ----------
 
   // The active chat transport. Explicit `transport` prop wins; otherwise
@@ -421,6 +537,13 @@ function InferaGraphInner({
           case 'annotate':
             controller.annotate(event.nodeId, event.text);
             return;
+          case 'set_inferred_visibility':
+            // Phase 5: route the LLM's overlay-toggle tool call to
+            // the renderer. Subagent A added the ChatEvent variant +
+            // `parseToolCall` mapping; Subagent B (this file) wires
+            // the dispatch.
+            controller.setInferredEdgeVisibility(event.visible);
+            return;
           default:
             return;
         }
@@ -459,13 +582,18 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     embeddingStore,
     query,
     transport,
+    showInferredEdges,
     onChat,
+    slugResolver,
+    maxNodes,
+    onNodeClick,
+    onExpandRequest,
     className,
     style,
     children,
   } = props;
   return (
-    <GraphProvider data={data}>
+    <GraphProvider data={data} slugResolver={slugResolver} maxNodes={maxNodes}>
       <InferaGraphInner
         layout={layout}
         nodeRender={nodeRender}
@@ -483,7 +611,10 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
         embeddingStore={embeddingStore}
         query={query}
         transport={transport}
+        showInferredEdges={showInferredEdges}
         onChat={onChat}
+        onNodeClick={onNodeClick}
+        onExpandRequest={onExpandRequest}
         className={className}
         style={style}
       >

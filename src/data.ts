@@ -88,6 +88,34 @@ export type {
   SimilarHit,
 } from './ai/Embedding.js';
 export { inMemoryEmbeddingStore } from './ai/InMemoryEmbeddingStore.js';
+export { inMemoryInferredEdgeStore } from './ai/InferredEdge.js';
+export type {
+  InferredEdge,
+  InferredEdgeSource,
+  InferredEdgeStore,
+} from './ai/InferredEdge.js';
+export { computeGraphInferences } from './ai/inference/graph.js';
+export type {
+  GraphInferenceCandidate,
+  GraphInferenceOptions,
+  GraphInferenceSignal,
+} from './ai/inference/graph.js';
+export { computeEmbeddingInferences } from './ai/inference/embedding.js';
+export type {
+  EmbeddingInferenceCandidate,
+  EmbeddingInferenceContext,
+} from './ai/inference/embedding.js';
+export {
+  buildLLMInferencePrompt,
+  computeLLMInferences,
+} from './ai/inference/llm.js';
+export type {
+  LLMInferenceCandidate,
+  LLMInferenceContext,
+} from './ai/inference/llm.js';
+export { mergeInferences } from './ai/inference/merge.js';
+export type { MergeOptions } from './ai/inference/merge.js';
+export type { ComputeInferredEdgesOptions } from './ai/AIEngine.js';
 export { SchemaInspector, embeddingText } from './ai/SchemaInspector.js';
 export type {
   SchemaSummary,
@@ -145,6 +173,7 @@ export type {
   HighlightHost,
   FocusHost,
   AnnotateHost,
+  InferredEdgeHost,
 } from './renderer/types.js';
 export { AnnotationRenderer } from './renderer/AnnotationRenderer.js';
 export {
@@ -176,6 +205,13 @@ export {
 } from './renderer/palette.js';
 export { NodeMesh } from './renderer/NodeMesh.js';
 export { EdgeMesh } from './renderer/EdgeMesh.js';
+export {
+  InferredEdgeMesh,
+  INFERRED_EDGE_DASH_SIZE,
+  INFERRED_EDGE_GAP_SIZE,
+  INFERRED_EDGE_ALPHA,
+  INFERRED_EDGE_COLOR,
+} from './renderer/InferredEdgeMesh.js';
 export { LabelRenderer } from './renderer/LabelRenderer.js';
 export { CustomNodeRenderer } from './renderer/CustomNodeRenderer.js';
 export { Raycaster } from './renderer/Raycaster.js';
@@ -212,6 +248,11 @@ export type { DataAdapter, DataAdapterConfig } from './data/DataAdapter.js';
 export { StaticDataAdapter } from './data/StaticDataAdapter.js';
 export { DataManager } from './data/DataManager.js';
 export { Datasource } from './data/Datasource.js';
+export { MemoryManager } from './data/MemoryManager.js';
+export type {
+  MemoryManagedStore,
+  MemoryManagedAIEngine,
+} from './data/MemoryManager.js';
 
 // Plugins
 export { PluginInterface } from './plugins/PluginInterface.js';

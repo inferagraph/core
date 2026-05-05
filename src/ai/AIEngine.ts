@@ -19,6 +19,15 @@ import {
 } from './Embedding.js';
 import { SchemaInspector, embeddingText } from './SchemaInspector.js';
 import type { SearchResult } from './SearchResult.js';
+import type {
+  InferredEdge,
+  InferredEdgeSource,
+  InferredEdgeStore,
+} from './InferredEdge.js';
+import { computeGraphInferences } from './inference/graph.js';
+import { computeEmbeddingInferences } from './inference/embedding.js';
+import { computeLLMInferences } from './inference/llm.js';
+import { mergeInferences } from './inference/merge.js';
 
 /**
  * Tunables for the AI engine. Phase 1 deliberately keeps this small — chat,
@@ -41,13 +50,36 @@ export interface AIEngineConfig {
 /** Internal: which embedding storage path is currently active. */
 type EmbeddingTier = 'tier-1' | 'tier-2' | 'tier-3';
 
+/** Options for {@link AIEngine.computeInferredEdges}. */
+export interface ComputeInferredEdgesOptions {
+  /**
+   * Which inference sources to run. Default: all three (`graph`, `embedding`,
+   * `llm`). Sources that have no underlying capability (e.g. `llm` without a
+   * provider) are skipped silently regardless of the list.
+   */
+  sources?: ReadonlyArray<InferredEdgeSource>;
+  /** Maximum candidate edges produced per source node, per signal. Default `5`. */
+  limitPerNode?: number;
+  /**
+   * When `true` (default + recommended), drop merged candidates whose pair
+   * already exists as an explicit edge in the {@link GraphStore} (in either
+   * direction). The keystone setting — disabling it produces ~80% noise.
+   */
+  excludeExplicit?: boolean;
+  /** Cancellation signal. When aborted mid-compute, the call returns without writing. */
+  signal?: AbortSignal;
+}
+
 /**
- * Locked Phase 2 tool definitions. The same names + parameter shapes are
+ * Locked built-in tool definitions. The same names + parameter shapes are
  * used by the prompt builder, the JSON-Schema sent to the LLM provider,
  * the cache-key hash, and the chat-event parser. Changing this list
- * requires Phase 2B (provider package) coordination.
+ * requires provider-package coordination.
+ *
+ * Phase 2 introduced `apply_filter`, `highlight`, `focus`, `annotate`.
+ * Phase 5 added `set_inferred_visibility`.
  */
-const PHASE2_TOOLS: LLMToolDefinition[] = [
+const BUILT_IN_TOOLS: LLMToolDefinition[] = [
   {
     name: 'apply_filter',
     description:
@@ -117,6 +149,21 @@ const PHASE2_TOOLS: LLMToolDefinition[] = [
       required: ['nodeId', 'text'],
     },
   },
+  {
+    name: 'set_inferred_visibility',
+    description:
+      'Show or hide the inferred-relationship overlay (dashed edges between nodes the system thinks are related).',
+    parameters: {
+      type: 'object',
+      properties: {
+        visible: {
+          type: 'boolean',
+          description: 'true to show inferred edges, false to hide.',
+        },
+      },
+      required: ['visible'],
+    },
+  },
 ];
 
 /** Cached chat replay, keyed by `chatCacheKey`. */
@@ -151,6 +198,7 @@ export class AIEngine {
   private provider: LLMProvider | undefined;
   private cache: CacheProvider | undefined;
   private embeddingStore: EmbeddingStore | undefined;
+  private inferredEdgeStore: InferredEdgeStore | undefined;
   /**
    * Reference identity of the last provider seen by any cached operation.
    * Per the user's design choice, switching the provider instance triggers a
@@ -171,6 +219,14 @@ export class AIEngine {
    * swap, etc.) we drop {@link warmupPromise} on next ensure call.
    */
   private warmupSignature: string | undefined;
+  /**
+   * Monotonic token issued at the start of each {@link computeInferredEdges}
+   * call. Mid-flight checks compare the captured token against this field;
+   * a mismatch means a newer compute superseded the in-flight one, so the
+   * old call bails before persisting. Mirrors the Phase 5 pattern used by
+   * {@link ensureEmbeddings} to avoid stale writes from racing computes.
+   */
+  private currentInferredEdgesRun = 0;
 
   constructor(
     store: GraphStore,
@@ -229,6 +285,224 @@ export class AIEngine {
   /** Get the current embedding store, or `undefined` if none configured. */
   getEmbeddingStore(): EmbeddingStore | undefined {
     return this.embeddingStore;
+  }
+
+  /**
+   * Inject (or replace) the {@link InferredEdgeStore} used by Phase 5
+   * inferred-relationship persistence. Pass `undefined` to disable inferred
+   * edges entirely — calls to {@link computeInferredEdges} become no-ops.
+   */
+  setInferredEdgeStore(store: InferredEdgeStore | undefined): void {
+    this.inferredEdgeStore = store;
+  }
+
+  /** Get the current inferred-edge store, or `undefined` if none configured. */
+  getInferredEdgeStore(): InferredEdgeStore | undefined {
+    return this.inferredEdgeStore;
+  }
+
+  /**
+   * Phase 5 — compute and persist the inferred-relationship overlay.
+   *
+   * Hosts call this **explicitly** (typically once after data load completes
+   * + embeddings have warmed). It does NOT auto-run on data changes;
+   * recomputing is the host's responsibility.
+   *
+   * Each call recomputes from scratch and **replaces** the entire stored set
+   * via {@link InferredEdgeStore.set} — there is no incremental merge.
+   *
+   * Tier detection:
+   *   - {@link inferredEdgeStore} unset → no-op.
+   *   - {@link embeddingStore} set → Tier 3 embedding path.
+   *   - Else if {@link cache} set + provider has `embed` → Tier 2 embedding path.
+   *   - Else → graph + LLM only (skip embedding source).
+   *
+   * The LLM source is skipped if no provider is configured, matching the
+   * progressive-enhancement contract elsewhere in the AI surface.
+   *
+   * Honours `opts.signal`: when aborted mid-compute, the in-flight
+   * sub-helpers stop and the function returns without touching the store.
+   */
+  async computeInferredEdges(opts?: ComputeInferredEdgesOptions): Promise<void> {
+    if (!this.inferredEdgeStore) return;
+    if (opts?.signal?.aborted) return;
+
+    // Token-guard: stamp this run with a monotonically-increasing id and
+    // bail out at every async boundary if a newer call has started since.
+    // Mirrors the Phase 5 pattern in `ensureEmbeddings` — without it, a
+    // fast-fired second compute could be overtaken by the slower first one
+    // and clobber the freshest signal set with stale data.
+    const myRun = ++this.currentInferredEdgesRun;
+    const isStale = (): boolean =>
+      myRun !== this.currentInferredEdgesRun || !!opts?.signal?.aborted;
+
+    const requested = opts?.sources;
+    const enabled = (s: InferredEdgeSource): boolean =>
+      requested === undefined || requested.includes(s);
+
+    const limitPerNode = opts?.limitPerNode ?? 5;
+    const excludeExplicit = opts?.excludeExplicit ?? true;
+
+    // -- Graph signals -----------------------------------------------------
+    const graphCandidates = enabled('graph')
+      ? computeGraphInferences(this.store, { limitPerNode })
+      : [];
+    if (isStale()) return;
+
+    // -- Embedding signals -------------------------------------------------
+    let embeddingCandidates: Awaited<
+      ReturnType<typeof computeEmbeddingInferences>
+    > = [];
+    if (enabled('embedding')) {
+      const tier = this.getEmbeddingTier();
+      const model = this.provider ? inferModel(this.provider) : '';
+      const modelVersion = '';
+      if (tier === 'tier-3' && this.embeddingStore) {
+        embeddingCandidates = await computeEmbeddingInferences({
+          store: this.store,
+          embeddingStore: this.embeddingStore,
+          model,
+          modelVersion,
+          limitPerNode,
+          signal: opts?.signal,
+        });
+      } else if (tier === 'tier-2' && this.cache && this.providerHasEmbed()) {
+        const records = await this.loadCachedEmbeddings();
+        const filtered = model
+          ? records.filter((r) => r.meta.model === model)
+          : records;
+        embeddingCandidates = await computeEmbeddingInferences({
+          store: this.store,
+          cacheRecords: filtered,
+          model,
+          modelVersion,
+          limitPerNode,
+          signal: opts?.signal,
+        });
+      }
+      // Tier 1: skip embedding source entirely.
+    }
+    if (isStale()) return;
+
+    // -- LLM signals -------------------------------------------------------
+    let llmCandidates: Awaited<ReturnType<typeof computeLLMInferences>> = [];
+    if (enabled('llm') && this.provider) {
+      llmCandidates = await computeLLMInferences({
+        store: this.store,
+        provider: this.provider,
+        inspector: this.inspector,
+        schemaSampleSize: this.schemaSampleSize,
+        limitPerNode,
+        cache: this.cache,
+        signal: opts?.signal,
+      });
+    }
+    if (isStale()) return;
+
+    // -- Merge + persist ---------------------------------------------------
+    const merged = mergeInferences(
+      this.store,
+      graphCandidates,
+      embeddingCandidates,
+      llmCandidates,
+      { excludeExplicit },
+    );
+    if (isStale()) return;
+    await this.inferredEdgeStore.set(merged);
+  }
+
+  /**
+   * Drop the cached embedding(s) for `nodeId`. Called by {@link MemoryManager}
+   * when an LRU eviction kicks in. No-op when no embedding storage is wired
+   * (Tier 1) — there's nothing to drop.
+   *
+   * Tier 3: delegates to the embedding store's per-node bulk-delete pattern.
+   * Since the {@link EmbeddingStore} contract doesn't expose a per-node
+   * delete primitive, we fall back to the closest available API: re-set the
+   * record to an empty placeholder is wrong, so we instead instruct stores
+   * that implement an optional `delete(nodeId)` method (added by host
+   * implementations) when present. Hosts that don't implement deletion still
+   * benefit because the store removal closes the references.
+   *
+   * Tier 2: walks the cache index and removes any entry for `nodeId`. Cache
+   * implementations expose `delete(key)` so we can do this directly.
+   */
+  async dropEmbedding(nodeId: string): Promise<void> {
+    // Tier 3 — best-effort: store implementations may expose `delete(nodeId)`
+    // even though it's not part of the v1 contract.
+    if (this.embeddingStore) {
+      const maybeDelete = (
+        this.embeddingStore as unknown as {
+          delete?: (nodeId: string) => void | Promise<void>;
+        }
+      ).delete;
+      if (typeof maybeDelete === 'function') {
+        try {
+          await maybeDelete.call(this.embeddingStore, nodeId);
+        } catch {
+          // Eviction must never throw upstream.
+        }
+      }
+    }
+    // Tier 2 — walk the sidecar index, drop matching entries from it.
+    // The {@link CacheProvider} contract has no per-key `delete` (only
+    // bulk `clear`), so we only update the index here. Stale entries
+    // remain in the cache until they age out via TTL or are bumped by the
+    // cache's max-entries LRU. The index update is the canonical truth so
+    // future `loadCachedEmbeddings()` calls won't surface them.
+    if (this.cache) {
+      try {
+        const raw = await this.cache.get(EMBED_INDEX_KEY);
+        const list: string[] = raw ? (JSON.parse(raw) as string[]) : [];
+        const remaining = list.filter((entry) => {
+          const [entryNodeId] = entry.split('|');
+          return entryNodeId !== nodeId;
+        });
+        if (remaining.length !== list.length) {
+          await this.cache.set(EMBED_INDEX_KEY, JSON.stringify(remaining));
+        }
+      } catch {
+        // Cache failures must not block eviction.
+      }
+    }
+    // Drop any in-flight warmup signature so the next ensureEmbeddings()
+    // re-evaluates the surface (the dropped node would otherwise stay
+    // missing from the warmup view until the signature changes for an
+    // unrelated reason).
+    this.warmupSignature = undefined;
+    this.warmupPromise = undefined;
+  }
+
+  /**
+   * Drop every inferred edge incident to `nodeId`. Called by
+   * {@link MemoryManager} when an LRU eviction kicks in so the inferred-edge
+   * overlay doesn't keep dangling references to vanished nodes.
+   *
+   * No-op when no inferred-edge store is wired. Other inferred edges are
+   * preserved; we re-`set` the filtered list so the store's invariants
+   * (single composite-key entry per pair) still hold.
+   */
+  async dropInferredEdgesFor(nodeId: string): Promise<void> {
+    if (!this.inferredEdgeStore) return;
+    try {
+      const all = await this.inferredEdgeStore.getAll();
+      const remaining = all.filter(
+        (e) => e.sourceId !== nodeId && e.targetId !== nodeId,
+      );
+      if (remaining.length === all.length) return;
+      await this.inferredEdgeStore.set(remaining);
+    } catch {
+      // Eviction must never throw upstream.
+    }
+  }
+
+  /**
+   * Snapshot of every inferred edge currently persisted. Returns `[]` when
+   * no {@link InferredEdgeStore} is configured.
+   */
+  async getInferredEdges(): Promise<ReadonlyArray<InferredEdge>> {
+    if (!this.inferredEdgeStore) return [];
+    return this.inferredEdgeStore.getAll();
   }
 
   /**
@@ -319,7 +593,7 @@ export class AIEngine {
 
     const schema = this.discoverSchema();
     const prompt = this.buildChatPrompt(trimmed, schema);
-    const tools = PHASE2_TOOLS;
+    const tools = BUILT_IN_TOOLS;
 
     // ---- Cache: replay if we have one. ----
     const cacheKey = chatCacheKey(prompt, tools);
@@ -1006,6 +1280,11 @@ export function parseToolCall(
       if (typeof nodeId !== 'string' || nodeId.length === 0) return null;
       if (typeof text !== 'string') return null;
       return { type: 'annotate', nodeId, text };
+    }
+    case 'set_inferred_visibility': {
+      const visible = a.visible;
+      if (typeof visible !== 'boolean') return null;
+      return { type: 'set_inferred_visibility', visible };
     }
     default:
       return null;

@@ -374,13 +374,79 @@ describe('AIEngine.chat()', () => {
       expect(prompt).toMatch(/era/);
     });
 
-    it('declares the four phase-2 tools to the provider', async () => {
+    it('declares the built-in tools (phase 2 + set_inferred_visibility) to the provider', async () => {
       const provider = mockLLMProvider(() => 'ok');
       engine.setProvider(provider);
       await collect(engine.chat('hi'));
       const opts = provider.getLastStreamOptions();
       const names = (opts?.tools ?? []).map((t) => t.name).sort();
-      expect(names).toEqual(['annotate', 'apply_filter', 'focus', 'highlight']);
+      expect(names).toEqual([
+        'annotate',
+        'apply_filter',
+        'focus',
+        'highlight',
+        'set_inferred_visibility',
+      ]);
+    });
+  });
+
+  describe('set_inferred_visibility tool', () => {
+    it('translates set_inferred_visibility(true) into a typed event', async () => {
+      const provider = mockLLMProvider((): LLMStreamEvent[] => [
+        {
+          type: 'tool_call',
+          name: 'set_inferred_visibility',
+          arguments: JSON.stringify({ visible: true }),
+        },
+        { type: 'done', reason: 'stop' },
+      ]);
+      engine.setProvider(provider);
+      const events = await collect(
+        engine.chat('show inferred', { emitToolCalls: true }),
+      );
+      const ev = events.find(
+        (e): e is Extract<ChatEvent, { type: 'set_inferred_visibility' }> =>
+          e.type === 'set_inferred_visibility',
+      );
+      expect(ev).toBeDefined();
+      expect(ev!.visible).toBe(true);
+    });
+
+    it('translates set_inferred_visibility(false)', async () => {
+      const provider = mockLLMProvider((): LLMStreamEvent[] => [
+        {
+          type: 'tool_call',
+          name: 'set_inferred_visibility',
+          arguments: JSON.stringify({ visible: false }),
+        },
+        { type: 'done', reason: 'stop' },
+      ]);
+      engine.setProvider(provider);
+      const events = await collect(
+        engine.chat('hide inferred', { emitToolCalls: true }),
+      );
+      const ev = events.find((e) => e.type === 'set_inferred_visibility');
+      expect(ev).toBeDefined();
+      if (ev && ev.type === 'set_inferred_visibility') {
+        expect(ev.visible).toBe(false);
+      }
+    });
+
+    it('drops set_inferred_visibility with non-boolean visible', async () => {
+      const provider = mockLLMProvider((): LLMStreamEvent[] => [
+        {
+          type: 'tool_call',
+          name: 'set_inferred_visibility',
+          arguments: JSON.stringify({ visible: 'yes' }),
+        },
+        { type: 'done', reason: 'stop' },
+      ]);
+      engine.setProvider(provider);
+      const events = await collect(
+        engine.chat('confused', { emitToolCalls: true }),
+      );
+      // The malformed tool call is silently dropped; only `done` survives.
+      expect(events.map((e) => e.type)).toEqual(['done']);
     });
   });
 });

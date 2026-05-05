@@ -10,5 +10,13 @@ export { useInferaGraphChat } from './react/useInferaGraphChat.js';
 export type { InferaGraphChatHook } from './react/useInferaGraphChat.js';
 export { useInferaGraphSearch } from './react/useInferaGraphSearch.js';
 export type { InferaGraphSearchHook } from './react/useInferaGraphSearch.js';
+export { useInferaGraphContent } from './react/useInferaGraphContent.js';
+export type { UseInferaGraphContentReturn } from './react/useInferaGraphContent.js';
+export { useInferaGraphNeighbors } from './react/useInferaGraphNeighbors.js';
+export type {
+  UseInferaGraphNeighborsReturn,
+  NeighborStatus,
+} from './react/useInferaGraphNeighbors.js';
 export { GraphProvider } from './react/GraphProvider.js';
+export type { SlugResolver, GraphContextValue, GraphProviderProps } from './react/GraphProvider.js';
 export { createReactNodeRenderFn, createReactTooltipRenderFn } from './react/ReactNodeRenderer.js';

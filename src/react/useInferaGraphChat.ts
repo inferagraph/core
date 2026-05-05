@@ -104,7 +104,8 @@ async function* runChat(
       ev.type === 'apply_filter' ||
       ev.type === 'highlight' ||
       ev.type === 'focus' ||
-      ev.type === 'annotate'
+      ev.type === 'annotate' ||
+      ev.type === 'set_inferred_visibility'
     ) {
       // Dispatch to the renderer; do NOT surface to the host.
       ctx.dispatch(ev);

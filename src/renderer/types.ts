@@ -5,6 +5,9 @@
  * without circular imports.
  */
 
+import type { NodeId, Vector3 } from '../types.js';
+import type { InferredEdge } from '../ai/InferredEdge.js';
+
 /**
  * Toggle per-element visibility on a mesh class WITHOUT teardown,
  * rebuild, or layout recompute.
@@ -116,4 +119,57 @@ export interface AnnotateHost {
   annotate(nodeId: string, text: string): void;
   /** Clear annotations for one node (or all when nodeId is omitted). */
   clearAnnotations(nodeId?: string): void;
+}
+
+/**
+ * Inferred-edge overlay contract. Implemented by {@link SceneController}
+ * (graph mode dispatches to {@link InferredEdgeMesh}; tree mode is a
+ * deliberate no-op in v1 — Phase 6 territory).
+ *
+ * Inferred edges are an *overlay* concept layered on top of the explicit
+ * graph: they are rendered as dashed, dimmer lines that the host can show
+ * or hide at will. The renderer never mutates the GraphStore; the edge set
+ * arrives via {@link setInferredEdges} from the AI inference pipeline.
+ *
+ * Same uniform-dispatch pattern as {@link VisibilityHost} /
+ * {@link HighlightHost}: the SceneController forwards calls to whichever
+ * mesh classes are mounted in the active mode. A future tree-mode
+ * implementation just adds a tree-edge inferred mesh and a single line
+ * to the dispatch helper.
+ *
+ * Contract:
+ *   - {@link setInferredEdges} REPLACES the entire stored edge set.
+ *     Hosts that incrementally accumulate inferences must merge before
+ *     calling.
+ *   - {@link setInferredEdgeVisibility} toggles the overlay's visibility
+ *     WITHOUT teardown or rebuild. Hidden state is the v1 default
+ *     (`showInferredEdges` defaults to `false` on the React prop).
+ *   - The `positions` map mirrors the layout positions of the graph's
+ *     explicit nodes — the same map already passed to
+ *     `updateInstance`/`updateSegment`. The inferred-edge renderer does
+ *     not own positions; it consumes them.
+ *   - Calling either method while no inferred-edge mesh exists (e.g.
+ *     before {@link SceneController.attach}, or in tree mode) is a
+ *     well-defined no-op.
+ */
+export interface InferredEdgeHost {
+  /**
+   * Replace the rendered set of inferred edges. The implementation
+   * (re)builds the underlying line geometry to fit `edges.length` and
+   * uses `positions` to look up each endpoint's world-space coordinate.
+   *
+   * Edges whose `sourceId` or `targetId` is missing from `positions`
+   * are dropped silently — the explicit-edge dedup in the merger should
+   * have removed them, but the renderer is defensive.
+   */
+  setInferredEdges(
+    edges: ReadonlyArray<InferredEdge>,
+    positions: ReadonlyMap<NodeId, Vector3>,
+  ): void;
+  /**
+   * Toggle the inferred-edge overlay's visibility. `false` hides the
+   * overlay entirely without disposing geometry; `true` reveals it.
+   * Default state on a freshly built mesh is `false` (hidden).
+   */
+  setInferredEdgeVisibility(visible: boolean): void;
 }
