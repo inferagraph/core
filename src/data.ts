@@ -17,8 +17,6 @@ export type {
   Vector3,
   FilterPredicate,
   KeywordSearchResult,
-  MessageRole,
-  LLMMessage,
   AIQueryResult,
   NodeStyle,
   NodeRenderFn,
@@ -66,6 +64,8 @@ export {
 export type { AIEngineConfig } from './ai/AIEngine.js';
 export type {
   LLMProvider,
+  LLMRole,
+  LLMMessage,
   CompleteOptions,
   StreamOptions,
   LLMStreamEvent,
