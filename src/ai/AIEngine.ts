@@ -5,9 +5,11 @@ import type { CacheProvider } from '../cache/lruCache.js';
 import { SearchEngine } from '../store/SearchEngine.js';
 import type {
   CompleteOptions,
+  LLMMessage,
   LLMProvider,
   LLMStreamEvent,
   LLMToolDefinition,
+  StreamOptions,
 } from './LLMProvider.js';
 import type { ChatEvent, ChatOptions, FilterSpec } from './ChatEvent.js';
 import {
@@ -45,6 +47,14 @@ export interface AIEngineConfig {
    * Per-call `opts.k` always wins.
    */
   defaultSearchK?: number;
+  /**
+   * Maximum number of nodes to include in the relevant-nodes catalog the
+   * chat prompt embeds in its system message. For graphs <= this size the
+   * full catalog is included; larger graphs are reduced via embedding
+   * search (or keyword search when embeddings are not yet warm) against
+   * the user's message. Default: 12.
+   */
+  chatContextSize?: number;
 }
 
 /** Internal: which embedding storage path is currently active. */
@@ -194,6 +204,7 @@ export class AIEngine {
   private readonly store: GraphStore;
   private readonly schemaSampleSize: number;
   private readonly defaultSearchK: number;
+  private readonly chatContextSize: number;
   private readonly inspector: SchemaInspector;
   private readonly keywordEngine: SearchEngine;
   private provider: LLMProvider | undefined;
@@ -237,6 +248,7 @@ export class AIEngine {
     this.store = store;
     this.schemaSampleSize = config?.schemaSampleSize ?? 10;
     this.defaultSearchK = config?.defaultSearchK ?? 25;
+    this.chatContextSize = config?.chatContextSize ?? 12;
     this.inspector = new SchemaInspector(store, {
       maxSamplesPerAttribute: this.schemaSampleSize,
     });
@@ -593,11 +605,14 @@ export class AIEngine {
     }
 
     const schema = this.discoverSchema();
-    const prompt = this.buildChatPrompt(trimmed, schema);
+    const relevantNodes = await this.collectRelevantNodes(trimmed);
+    const messages = this.buildChatMessages(trimmed, schema, relevantNodes);
     const tools = BUILT_IN_TOOLS;
 
-    // ---- Cache: replay if we have one. ----
-    const cacheKey = chatCacheKey(prompt, tools);
+    // ---- Cache: replay if we have one. The key hashes the structured
+    //      messages array deterministically so a system-message edit
+    //      invalidates cached replays automatically. ----
+    const cacheKey = chatCacheKey(messages, tools);
     const cached = await this.lookupChatCache(cacheKey);
     if (cached) {
       for (const ev of cached.events) {
@@ -616,36 +631,102 @@ export class AIEngine {
       return;
     }
 
-    // ---- Live stream. ----
+    // ---- Live stream. The malformed-tool-call retry loop runs at most
+    //      MAX_RETRIES + 1 = 2 invocations of the provider per chat turn. ----
+    const MAX_RETRIES = 1;
+    const provider = this.provider;
+    let activeMessages: LLMMessage[] = messages.slice();
     const collected: LLMStreamEvent[] = [];
-    let sawDone = false;
+    let attempt = 0;
+    let abortedDuringStream = false;
+
     try {
-      const iter = this.provider.stream(prompt, { signal, tools });
-      for await (const ev of iter) {
-        collected.push(ev);
-        if (ev.type === 'done') sawDone = true;
-        for await (const out of this.translateLLMEvent(ev, emitToolCalls)) {
-          yield out;
+      while (attempt <= MAX_RETRIES) {
+        const isFinalAttempt = attempt === MAX_RETRIES;
+        const attemptEvents: LLMStreamEvent[] = [];
+        const heldToolCalls: Array<
+          Extract<LLMStreamEvent, { type: 'tool_call' }>
+        > = [];
+        let invalidToolEvent:
+          | Extract<LLMStreamEvent, { type: 'tool_call' }>
+          | undefined;
+        let invalidReason: string | undefined;
+
+        for await (const ev of this.invokeProvider(
+          provider,
+          activeMessages,
+          { signal, tools },
+        )) {
+          attemptEvents.push(ev);
+          if (ev.type === 'tool_call') {
+            const validation = validateToolArgs(ev.name, ev.arguments);
+            if (validation.ok) {
+              heldToolCalls.push(ev);
+            } else if (!isFinalAttempt && invalidToolEvent === undefined) {
+              // Hold the bad call back so it never reaches the host. We
+              // will retry once with a corrective system message.
+              invalidToolEvent = ev;
+              invalidReason = validation.reason;
+            } else {
+              // Final attempt — drop the malformed call (translateLLMEvent
+              // would have done the same), no leak.
+            }
+            continue;
+          }
+          if (signal?.aborted) {
+            if (ev.type !== 'done') {
+              abortedDuringStream = true;
+            }
+            break;
+          }
         }
-        if (ev.type === 'done') break;
-        if (signal?.aborted) {
-          // Provider didn't honor signal yet; emit our own done.
-          if (!sawDone) {
+
+        // Did we trigger a retry? If so, build the corrective messages and
+        // loop without yielding anything from this attempt.
+        if (invalidToolEvent && !signal?.aborted) {
+          activeMessages = appendCorrectionForRetry(
+            activeMessages,
+            invalidToolEvent,
+            invalidReason ?? 'invalid arguments',
+            relevantNodes,
+          );
+          attempt += 1;
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[InferaGraph AIEngine] retrying chat after malformed tool call: ${invalidToolEvent.name} ${invalidToolEvent.arguments} — ${invalidReason}`,
+          );
+          continue;
+        }
+
+        // No retry needed — emit everything we collected this attempt.
+        let sawDone = false;
+        for (const ev of attemptEvents) {
+          collected.push(ev);
+          if (ev.type === 'done') sawDone = true;
+          for await (const out of this.translateLLMEvent(ev, emitToolCalls)) {
+            yield out;
+          }
+          if (signal?.aborted && !sawDone) {
             const aborted: LLMStreamEvent = { type: 'done', reason: 'aborted' };
             collected.push(aborted);
             yield { type: 'done', reason: 'aborted' };
             sawDone = true;
+            break;
           }
-          break;
         }
+        if (!sawDone) {
+          const synth: LLMStreamEvent = { type: 'done', reason: 'stop' };
+          collected.push(synth);
+          yield { type: 'done', reason: 'stop' };
+        }
+        break;
       }
-      if (!sawDone) {
-        const synth: LLMStreamEvent = { type: 'done', reason: 'stop' };
-        collected.push(synth);
-        yield { type: 'done', reason: 'stop' };
-      }
+
+      // Suppress unused-variable lints when the abort flag wasn't read in a
+      // particular code path; it is consumed by the cache-skip below.
+      void abortedDuringStream;
     } catch (err) {
-      const message =
+      const errMessage =
         err instanceof Error ? err.message : 'unknown stream error';
       const isAbort =
         signal?.aborted ||
@@ -654,7 +735,7 @@ export class AIEngine {
       yield {
         type: 'done',
         reason: isAbort ? 'aborted' : 'stop',
-        error: isAbort ? undefined : message,
+        error: isAbort ? undefined : errMessage,
       };
       return;
     }
@@ -663,6 +744,29 @@ export class AIEngine {
     // intentionally not cached (the user canceled before completion).
     if (!signal?.aborted) {
       await this.persistChatCache(cacheKey, collected);
+    }
+  }
+
+  /**
+   * Internal: invoke the provider with structured messages when supported,
+   * otherwise fall back to the legacy single-string `stream()`. The legacy
+   * path flattens the messages into `<system>\n\nUser: <user>` so older
+   * providers still receive both halves.
+   */
+  private async *invokeProvider(
+    provider: LLMProvider,
+    messages: LLMMessage[],
+    opts: StreamOptions,
+  ): AsyncGenerator<LLMStreamEvent, void, unknown> {
+    if (typeof provider.streamMessages === 'function') {
+      for await (const ev of provider.streamMessages(messages, opts)) {
+        yield ev;
+      }
+      return;
+    }
+    const flattened = flattenMessages(messages);
+    for await (const ev of provider.stream(flattened, opts)) {
+      yield ev;
     }
   }
 
@@ -1084,21 +1188,33 @@ export class AIEngine {
   }
 
   /**
-   * Build the system + user prompt sent to the LLM for `chat()`. The
-   * prompt teaches the LLM about the available tools (visual instructions)
-   * AND the dataset schema so it can construct valid `apply_filter` specs.
+   * Build the structured `messages` array sent to the LLM for `chat()`.
+   * The system message holds:
+   *   1. The hard "MUST emit text + highlight" contract.
+   *   2. The dataset schema (attribute keys and sample values).
+   *   3. The relevant-nodes catalog — one line per node, format
+   *      `id | title | type | <key=value>...`. The model can copy ids
+   *      verbatim into `highlight()` calls without guessing.
+   *
+   * The user message holds the literal user input, and only that. Mixing
+   * instructions into the user role is what caused tool-use-trained
+   * models to skip the text under tool-use pressure (instructions
+   * delivered as user content are weighted as user input, not directive).
    *
    * Contract: every graph-relevant response MUST emit BOTH a streamed text
    * answer AND a `highlight(ids)` tool call covering every node referenced
    * by the answer (the subject of the question PLUS the objects of the
    * answer). Soft "prefer" wording is forbidden — tool-use-trained models
-   * read it as permission to skip the text and emit only a tool call, which
-   * the host then filters out of its display path, leaving the user with
-   * nothing on screen.
+   * read it as permission to skip the text and emit only a tool call.
    */
-  private buildChatPrompt(message: string, schema: SchemaSummary): string {
+  buildChatMessages(
+    message: string,
+    schema: SchemaSummary,
+    relevantNodes: ReadonlyArray<NodeData>,
+  ): LLMMessage[] {
     const schemaBlock = renderSchemaBlock(schema, this.schemaSampleSize);
-    return [
+    const catalogBlock = renderCatalogBlock(relevantNodes);
+    const systemContent = [
       'You are an assistant embedded inside an interactive graph visualization.',
       'The host application renders the graph and shows your conversational text alongside it. Both halves matter — the text explains, the visual shows.',
       '',
@@ -1132,8 +1248,99 @@ export class AIEngine {
       'Dataset schema (attribute keys and a sample of observed values):',
       schemaBlock,
       '',
-      `User: ${message}`,
+      'Relevant nodes (use these ids verbatim in `highlight` / `focus` / `annotate`):',
+      catalogBlock,
     ].join('\n');
+
+    return [
+      { role: 'system', content: systemContent },
+      { role: 'user', content: message },
+    ];
+  }
+
+  /**
+   * Internal: pick the slice of nodes most relevant to the user's message
+   * for the chat catalog. Three paths:
+   *   - Graph fits in {@link chatContextSize} → return the full catalog.
+   *   - Embeddings warm + provider has `embed` → semantic top-K.
+   *   - Otherwise → keyword search (always available).
+   *
+   * The semantic path never blocks on a cold-start warmup — when no
+   * embeddings are available yet we fall through to keyword so chat
+   * doesn't hang.
+   */
+  private async collectRelevantNodes(
+    message: string,
+  ): Promise<NodeData[]> {
+    const all = this.store.getAllNodes();
+    const k = this.chatContextSize;
+    if (all.length <= k) {
+      return all.map((n) => ({ id: n.id, attributes: n.attributes }));
+    }
+
+    // Semantic path — only if embeddings are wired AND the provider can embed.
+    const tier = this.getEmbeddingTier();
+    if (tier !== 'tier-1') {
+      const haveAnyEmbedding = await this.hasAnyEmbedding();
+      if (haveAnyEmbedding) {
+        try {
+          const hits = await this.runSemanticSearch(message, k, undefined);
+          if (hits.length > 0) {
+            return this.materializeNodes(hits.map((h) => h.nodeId));
+          }
+        } catch {
+          // fall through to keyword
+        }
+      }
+    }
+
+    // Keyword fallback — always available.
+    const keywordHits = this.keywordEngine.search(message);
+    if (keywordHits.length === 0) {
+      // No matches — give the model a head-truncated catalog rather than
+      // nothing so it still has SOME ids to refer to.
+      return all
+        .slice(0, k)
+        .map((n) => ({ id: n.id, attributes: n.attributes }));
+    }
+    return this.materializeNodes(keywordHits.slice(0, k).map((h) => h.nodeId));
+  }
+
+  /** Internal: cheap "do we have ANY embedding warm yet?" check used by the
+   *  catalog selector to decide whether to attempt a semantic top-K. */
+  private async hasAnyEmbedding(): Promise<boolean> {
+    if (this.embeddingStore) {
+      // No general "size" primitive on the store contract — best effort: ask
+      // for a similar() with a zero-vector and see if anything comes back.
+      try {
+        const probe = await this.embeddingStore.similar([], 1, '', '');
+        return probe.length > 0;
+      } catch {
+        return false;
+      }
+    }
+    if (this.cache) {
+      try {
+        const raw = await this.cache.get(EMBED_INDEX_KEY);
+        if (!raw) return false;
+        const list = JSON.parse(raw) as string[];
+        return Array.isArray(list) && list.length > 0;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /** Internal: lift a list of node ids to the {@link NodeData} shape, dropping unknowns. */
+  private materializeNodes(ids: ReadonlyArray<string>): NodeData[] {
+    const out: NodeData[] = [];
+    for (const id of ids) {
+      const node = this.store.getNode(id);
+      if (!node) continue;
+      out.push({ id: node.id, attributes: node.attributes });
+    }
+    return out;
   }
 }
 
@@ -1403,15 +1610,210 @@ function buildCacheKey(prompt: string, opts: CompleteOptions | undefined): strin
 }
 
 /**
- * Cache key for a chat prompt + tool definition list. Tool definitions
- * are folded into the hash so changing the tool surface invalidates
- * cached responses.
+ * Cache key for a chat messages array + tool definition list. Tool
+ * definitions are folded into the hash so changing the tool surface
+ * invalidates cached responses; the messages array is hashed in stable
+ * (role, content) order so a system-message edit also invalidates.
  */
-function chatCacheKey(prompt: string, tools: LLMToolDefinition[]): string {
+function chatCacheKey(
+  messages: LLMMessage[],
+  tools: LLMToolDefinition[],
+): string {
+  const messageSig = messages
+    .map((m) => `${m.role}:${m.content}`)
+    .join(' ');
   const toolSig = tools
     .map((t) => `${t.name}:${stableStringify(t.parameters)}`)
     .join('|');
-  return `chat|${fnv1a64(prompt)}|${fnv1a64(toolSig)}`;
+  return `chat|${fnv1a64(messageSig)}|${fnv1a64(toolSig)}`;
+}
+
+/**
+ * Flatten a structured-messages array into a single prompt string, used by
+ * the legacy `stream()` fallback when the provider doesn't implement
+ * {@link LLMProvider.streamMessages}. Format is
+ *   `<system content>\n\nUser: <user content>` (with assistant turns
+ * interleaved as `Assistant: ...` blocks). Per the project memory, this is
+ * a backwards-compatibility bridge — the structured path is preferred.
+ */
+function flattenMessages(messages: LLMMessage[]): string {
+  const parts: string[] = [];
+  for (const m of messages) {
+    if (m.role === 'system') parts.push(m.content);
+    else if (m.role === 'user') parts.push(`User: ${m.content}`);
+    else parts.push(`Assistant: ${m.content}`);
+  }
+  return parts.join('\n\n');
+}
+
+/**
+ * Render the catalog block embedded in the chat system message. Format:
+ *
+ *   `<id> | <title> | <type> | <key>=<value>; <key>=<value>...`
+ *
+ * One line per node. The title is taken from `name`/`title`/`label` (in that
+ * order); `<type>` is the `type` attribute or the literal `(unknown)`. Other
+ * attributes follow as `key=value` pairs, alphabetized, with array values
+ * joined by `,`. Empty input yields `(no nodes)` so the prompt never has a
+ * blank section.
+ */
+function renderCatalogBlock(nodes: ReadonlyArray<NodeData>): string {
+  if (nodes.length === 0) return '(no nodes)';
+  const lines: string[] = [];
+  for (const node of nodes) {
+    const attrs = node.attributes ?? {};
+    const title = pickTitleAttribute(attrs) ?? node.id;
+    const type = typeof attrs.type === 'string' ? attrs.type : '(unknown)';
+    const extras: string[] = [];
+    const keys = Object.keys(attrs).sort();
+    for (const key of keys) {
+      if (
+        key === 'name' ||
+        key === 'title' ||
+        key === 'label' ||
+        key === 'type'
+      ) {
+        continue;
+      }
+      const rendered = renderAttrValue(attrs[key]);
+      if (rendered === undefined) continue;
+      extras.push(`${key}=${rendered}`);
+    }
+    const extrasJoined = extras.length > 0 ? ` | ${extras.join('; ')}` : '';
+    lines.push(`${node.id} | ${title} | ${type}${extrasJoined}`);
+  }
+  return lines.join('\n');
+}
+
+function pickTitleAttribute(
+  attrs: Record<string, unknown>,
+): string | undefined {
+  for (const key of ['name', 'title', 'label']) {
+    const v = attrs[key];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return undefined;
+}
+
+function renderAttrValue(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value === 'string') return value.length > 0 ? value : undefined;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    const parts: string[] = [];
+    for (const item of value) {
+      if (typeof item === 'string' && item.length > 0) parts.push(item);
+      else if (typeof item === 'number' || typeof item === 'boolean') parts.push(String(item));
+    }
+    return parts.length > 0 ? parts.join(',') : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Validate a raw tool-call payload against the engine's known tool schemas.
+ * Returns `{ ok: true }` for accept, `{ ok: false, reason }` for reject.
+ *
+ * The engine keeps a hand-rolled validator (rather than pulling a JSON-Schema
+ * runtime) because the rule set is small and bounded by {@link BUILT_IN_TOOLS}.
+ * Rules: required fields present, array fields are arrays (NOT objects),
+ * string fields are strings, boolean fields are booleans.
+ */
+function validateToolArgs(
+  name: string,
+  argsJson: string,
+): { ok: true } | { ok: false; reason: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(argsJson);
+  } catch {
+    return { ok: false, reason: 'arguments are not valid JSON' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, reason: 'arguments must be a JSON object' };
+  }
+  const a = parsed as Record<string, unknown>;
+  switch (name) {
+    case 'highlight': {
+      if (!('ids' in a)) {
+        return { ok: false, reason: 'missing required field "ids"' };
+      }
+      if (!Array.isArray(a.ids)) {
+        return {
+          ok: false,
+          reason: '"ids" must be an array of strings, not an object or other type',
+        };
+      }
+      return { ok: true };
+    }
+    case 'focus': {
+      if (typeof a.nodeId !== 'string' || a.nodeId.length === 0) {
+        return { ok: false, reason: '"nodeId" must be a non-empty string' };
+      }
+      return { ok: true };
+    }
+    case 'annotate': {
+      if (typeof a.nodeId !== 'string' || a.nodeId.length === 0) {
+        return { ok: false, reason: '"nodeId" must be a non-empty string' };
+      }
+      if (typeof a.text !== 'string') {
+        return { ok: false, reason: '"text" must be a string' };
+      }
+      return { ok: true };
+    }
+    case 'apply_filter': {
+      // Either { spec: {...} } or the spec inlined. Both are accepted by
+      // parseToolCall, so we mirror that leniency here.
+      const candidate =
+        a.spec && typeof a.spec === 'object' && !Array.isArray(a.spec)
+          ? (a.spec as Record<string, unknown>)
+          : a;
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+        return { ok: false, reason: '"spec" must be an object' };
+      }
+      return { ok: true };
+    }
+    case 'set_inferred_visibility': {
+      if (typeof a.visible !== 'boolean') {
+        return { ok: false, reason: '"visible" must be a boolean' };
+      }
+      return { ok: true };
+    }
+    default:
+      // Unknown tool — let translateLLMEvent drop it; no retry.
+      return { ok: true };
+  }
+}
+
+/**
+ * Append a corrective system message (and the prior assistant tool-call
+ * attempt) so the model can see WHAT went wrong on retry. Includes the
+ * available node ids so the model has fresh context for a corrected
+ * `highlight` call.
+ */
+function appendCorrectionForRetry(
+  messages: LLMMessage[],
+  badEvent: Extract<LLMStreamEvent, { type: 'tool_call' }>,
+  reason: string,
+  relevantNodes: ReadonlyArray<NodeData>,
+): LLMMessage[] {
+  const idsList = relevantNodes
+    .map((n) => n.id)
+    .slice(0, 32)
+    .join(', ');
+  const next = messages.slice();
+  next.push({
+    role: 'assistant',
+    content: `[tool_call ${badEvent.name} ${badEvent.arguments}]`,
+  });
+  next.push({
+    role: 'system',
+    content:
+      `The previous tool call \`${badEvent.name}\` had invalid arguments: ${reason}. ` +
+      `The available node ids are: ${idsList}. ` +
+      `Emit a corrected tool call alongside your text answer.`,
+  });
+  return next;
 }
 
 /**

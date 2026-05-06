@@ -1,5 +1,6 @@
 import type {
   CompleteOptions,
+  LLMMessage,
   LLMProvider,
   LLMStreamEvent,
   StreamOptions,
@@ -30,6 +31,11 @@ import type { EmbedOptions, Vector } from './Embedding.js';
 export interface MockLLMProvider extends LLMProvider {
   /** Always defined on the mock — the constructor wires a deterministic embedder. */
   embed(texts: string[], opts?: EmbedOptions): Promise<Vector[]>;
+  /** Always defined on the mock — exercises the structured-messages path. */
+  streamMessages(
+    messages: LLMMessage[],
+    opts?: StreamOptions,
+  ): AsyncIterable<LLMStreamEvent>;
   /** Number of times `complete` has been called since construction. */
   getCallCount(): number;
   /** The last prompt passed to `complete` or `stream`, or `undefined` if never called. */
@@ -40,8 +46,14 @@ export interface MockLLMProvider extends LLMProvider {
   getEmbedCallCount(): number;
   /** The last batch of texts passed to `embed`. */
   getLastEmbedBatch(): string[] | undefined;
-  /** The last `StreamOptions` passed to `stream`. */
+  /** The last `StreamOptions` passed to `stream` or `streamMessages`. */
   getLastStreamOptions(): StreamOptions | undefined;
+  /**
+   * The last `messages` array passed to `streamMessages`, or `undefined`
+   * if the engine routed through the legacy single-prompt `stream()` path
+   * instead.
+   */
+  getLastStreamMessages(): LLMMessage[] | undefined;
   /** Reset call-count + last-prompt state without re-creating the mock. */
   reset(): void;
 }
@@ -82,6 +94,7 @@ export function mockLLMProvider(
   let embedCallCount = 0;
   let lastPrompt: string | undefined;
   let lastStreamOptions: StreamOptions | undefined;
+  let lastStreamMessages: LLMMessage[] | undefined;
   let lastEmbedBatch: string[] | undefined;
 
   const isFn = typeof canned === 'function';
@@ -130,6 +143,7 @@ export function mockLLMProvider(
       streamCallCount += 1;
       lastPrompt = prompt;
       lastStreamOptions = opts;
+      lastStreamMessages = undefined;
 
       // Honor pre-aborted signals: emit a single `done` and stop.
       if (opts?.signal?.aborted) {
@@ -140,6 +154,56 @@ export function mockLLMProvider(
       const resolved = await resolveCanned(prompt, opts);
 
       // Re-check abort after the (possibly async) canned resolver.
+      if (opts?.signal?.aborted) {
+        yield { type: 'done', reason: 'aborted' };
+        return;
+      }
+
+      if (typeof resolved === 'string') {
+        if (resolved.length > 0) {
+          yield { type: 'text', delta: resolved };
+        }
+        yield { type: 'done', reason: 'stop' };
+        return;
+      }
+
+      let sawDone = false;
+      for (const ev of resolved) {
+        if (opts?.signal?.aborted) {
+          yield { type: 'done', reason: 'aborted' };
+          return;
+        }
+        if (ev.type === 'done') sawDone = true;
+        yield ev;
+      }
+      if (!sawDone) {
+        yield { type: 'done', reason: 'stop' };
+      }
+    },
+
+    async *streamMessages(
+      messages: LLMMessage[],
+      opts?: StreamOptions,
+    ): AsyncGenerator<LLMStreamEvent, void, unknown> {
+      streamCallCount += 1;
+      lastStreamMessages = messages.map((m) => ({ ...m }));
+      lastStreamOptions = opts;
+      // Resolve canned source keyed off the LAST user message — keeps tests
+      // that set canned by user input ("hi" → "hello world") working without
+      // having to know the system prompt verbatim.
+      const lastUser = [...messages]
+        .reverse()
+        .find((m) => m.role === 'user');
+      const promptKey = lastUser ? lastUser.content : '';
+      lastPrompt = promptKey;
+
+      if (opts?.signal?.aborted) {
+        yield { type: 'done', reason: 'aborted' };
+        return;
+      }
+
+      const resolved = await resolveCanned(promptKey, opts);
+
       if (opts?.signal?.aborted) {
         yield { type: 'done', reason: 'aborted' };
         return;
@@ -211,12 +275,19 @@ export function mockLLMProvider(
       return lastStreamOptions;
     },
 
+    getLastStreamMessages(): LLMMessage[] | undefined {
+      return lastStreamMessages
+        ? lastStreamMessages.map((m) => ({ ...m }))
+        : undefined;
+    },
+
     reset(): void {
       callCount = 0;
       streamCallCount = 0;
       embedCallCount = 0;
       lastPrompt = undefined;
       lastStreamOptions = undefined;
+      lastStreamMessages = undefined;
       lastEmbedBatch = undefined;
     },
   };

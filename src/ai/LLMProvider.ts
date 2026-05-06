@@ -71,9 +71,33 @@ export type LLMStreamEvent =
   | { type: 'done'; reason?: 'stop' | 'length' | 'aborted' };
 
 /**
+ * Conversation roles supported by {@link LLMProvider.streamMessages}. Mirrors
+ * the OpenAI / Anthropic role taxonomy. `system` is always treated as
+ * out-of-band instruction by chat-completion-trained models; `user` is the
+ * literal user input; `assistant` is prior model output (used to seed the
+ * model with its own previous turn — e.g. when retrying a malformed tool
+ * call with a corrective follow-up).
+ */
+export type LLMRole = 'system' | 'user' | 'assistant';
+
+/**
+ * One message in a structured-roles chat exchange. Used by the optional
+ * {@link LLMProvider.streamMessages} method so engines can preserve role
+ * separation end-to-end (instructions vs user input). Tool-use-trained
+ * models heavily discount instructions delivered as user-role content; the
+ * system role exists precisely so the engine can keep its directives where
+ * the model is trained to obey them.
+ */
+export interface LLMMessage {
+  role: LLMRole;
+  content: string;
+}
+
+/**
  * The LLM provider contract. Phase 1 added `complete()`; Phase 2 adds
  * `stream()` for the streaming chat / tool-call path; Phase 3 adds the
- * **optional** `embed()` method for vector embeddings.
+ * **optional** `embed()` method for vector embeddings; Phase 6 (this version)
+ * adds the **optional** `streamMessages()` method for structured chat.
  *
  * Hosts NEVER invoke this directly. They import a provider package
  * (`@inferagraph/anthropic-provider`, `@inferagraph/openai-provider`, etc.)
@@ -103,6 +127,21 @@ export interface LLMProvider {
    * cancellation paths (use `reason: 'aborted'`).
    */
   stream(prompt: string, opts?: StreamOptions): AsyncIterable<LLMStreamEvent>;
+  /**
+   * **Optional** — structured-messages streaming. Providers SHOULD implement
+   * this so system / user role separation is preserved end-to-end. Engines
+   * call `streamMessages` when present, falling back to {@link stream} with a
+   * single flattened string when not. Same event contract as `stream()` —
+   * the only difference is the input shape.
+   *
+   * The corrective-retry path on malformed tool calls relies on this method
+   * so the prior assistant turn (the bad tool call) and a system-role
+   * correction can be appended deterministically.
+   */
+  streamMessages?(
+    messages: LLMMessage[],
+    opts?: StreamOptions,
+  ): AsyncIterable<LLMStreamEvent>;
   /**
    * **Optional** — embed a batch of texts and return one vector per text,
    * in the same order. Providers that don't support embeddings MUST omit

@@ -1,11 +1,16 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphStore } from '../../src/store/GraphStore.js';
 import { QueryEngine } from '../../src/store/QueryEngine.js';
 import { AIEngine } from '../../src/ai/AIEngine.js';
 import { mockLLMProvider } from '../../src/ai/MockLLMProvider.js';
 import { lruCache } from '../../src/cache/lruCache.js';
 import type { ChatEvent } from '../../src/ai/ChatEvent.js';
-import type { LLMStreamEvent } from '../../src/ai/LLMProvider.js';
+import type {
+  LLMMessage,
+  LLMProvider,
+  LLMStreamEvent,
+  StreamOptions,
+} from '../../src/ai/LLMProvider.js';
 
 function makeStore(): GraphStore {
   const store = new GraphStore();
@@ -369,7 +374,10 @@ describe('AIEngine.chat()', () => {
       const provider = mockLLMProvider(() => 'ok');
       engine.setProvider(provider);
       await collect(engine.chat('hi'));
-      const prompt = provider.getLastPrompt() ?? '';
+      // Schema lives in the system message under the new structured-messages
+      // path; concatenate role contents so the assertion is shape-agnostic.
+      const messages = provider.getLastStreamMessages() ?? [];
+      const prompt = messages.map((m) => m.content).join('\n');
       expect(prompt).toMatch(/type/);
       expect(prompt).toMatch(/era/);
     });
@@ -401,7 +409,10 @@ describe('AIEngine.chat()', () => {
       const provider = mockLLMProvider(() => 'ok');
       engine.setProvider(provider);
       await collect(engine.chat(message));
-      return provider.getLastPrompt() ?? '';
+      // The contract lives in the system message; concatenate role contents
+      // so the assertion is shape-agnostic.
+      const messages = provider.getLastStreamMessages() ?? [];
+      return messages.map((m) => m.content).join('\n');
     }
 
     it('requires both text and highlight in every graph-relevant response', async () => {
@@ -519,6 +530,257 @@ describe('AIEngine.chat()', () => {
       );
       // The malformed tool call is silently dropped; only `done` survives.
       expect(events.map((e) => e.type)).toEqual(['done']);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Change 1 — embedding-retrieved (or full-catalog) node context
+  // ---------------------------------------------------------------------------
+  describe('relevant-nodes catalog', () => {
+    it('includes a structured catalog (id | title | type | ...) in the system message', async () => {
+      // Tier-1 (no embeddings): small graph, the engine should embed the full
+      // catalog. Each line: `<id> | <title> | <type> | <other key=value pairs>`
+      // so the model can copy ids verbatim.
+      const provider = mockLLMProvider(() => 'ok');
+      engine.setProvider(provider);
+      await collect(engine.chat('Adam'));
+      const messages = provider.getLastStreamMessages();
+      expect(messages).toBeDefined();
+      const system = messages!.find((m) => m.role === 'system');
+      expect(system).toBeDefined();
+      // Adam's id in the fixture is `1`; title `Adam`; type `person`.
+      expect(system!.content).toMatch(/1 \| Adam \| person/);
+      // Eden too — the catalog is full when graph <= K.
+      expect(system!.content).toMatch(/3 \| Eden \| place/);
+    });
+
+    it('falls back to keyword search when embeddings are not ready', async () => {
+      // Force the ranking path: shrink chatContextSize below the fixture
+      // node count so collectRelevantNodes must rank. Then strip embed so
+      // the engine has no semantic option — keyword is the only path left.
+      const smallEngine = new AIEngine(store, new QueryEngine(store), {
+        chatContextSize: 2,
+      });
+      const { SearchEngine } = await import('../../src/store/SearchEngine.js');
+      const spy = vi.spyOn(SearchEngine.prototype, 'search');
+
+      let captured: LLMMessage[] | undefined;
+      const provider: LLMProvider = {
+        name: 'no-embed-mock',
+        async complete() {
+          return 'ok';
+        },
+        async *stream(_prompt: string, _opts?: StreamOptions) {
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+        async *streamMessages(messages: LLMMessage[], _opts?: StreamOptions) {
+          captured = messages;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+      };
+      smallEngine.setProvider(provider);
+
+      await collect(smallEngine.chat('Eden'));
+
+      // The keyword path ran (no embed provider, graph > K → ranking needed).
+      expect(spy).toHaveBeenCalled();
+      // Catalog still got built into the system message — Eden is in it.
+      expect(captured).toBeDefined();
+      const system = captured!.find((m) => m.role === 'system');
+      expect(system!.content).toMatch(/3 \| Eden \| place/);
+      spy.mockRestore();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Change 2 — structured-messages provider interface
+  // ---------------------------------------------------------------------------
+  describe('streamMessages provider interface', () => {
+    it('calls streamMessages with system + user roles when the provider supports it', async () => {
+      let streamCalls = 0;
+      let messagesCalls = 0;
+      let captured: LLMMessage[] | undefined;
+      const provider: LLMProvider = {
+        name: 'mock-with-messages',
+        async complete() {
+          return 'ok';
+        },
+        async *stream(_prompt: string, _opts?: StreamOptions) {
+          streamCalls += 1;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+        async *streamMessages(messages: LLMMessage[], _opts?: StreamOptions) {
+          messagesCalls += 1;
+          captured = messages;
+          yield { type: 'text', delta: 'hi' } as LLMStreamEvent;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+      };
+      engine.setProvider(provider);
+      const events = await collect(engine.chat('Who lived in Eden?'));
+      expect(messagesCalls).toBe(1);
+      expect(streamCalls).toBe(0);
+      expect(captured).toBeDefined();
+      // Roles: at least one system + one user.
+      const roles = captured!.map((m) => m.role);
+      expect(roles).toContain('system');
+      expect(roles).toContain('user');
+      // The events still flow through.
+      expect(events.some((e) => e.type === 'text')).toBe(true);
+    });
+
+    it('falls back to stream() with a flattened prompt when the provider lacks streamMessages', async () => {
+      // Tier-1 fixture: only `stream` is defined.
+      let captured: string | undefined;
+      const provider: LLMProvider = {
+        name: 'legacy-mock',
+        async complete() {
+          return 'ok';
+        },
+        async *stream(prompt: string, _opts?: StreamOptions) {
+          captured = prompt;
+          yield { type: 'text', delta: 'ok' } as LLMStreamEvent;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+      };
+      engine.setProvider(provider);
+      await collect(engine.chat('Who lived in Eden?'));
+      expect(captured).toBeDefined();
+      // The flattened prompt MUST contain the system contract directives
+      // (MUST + highlight) AND the user's literal question.
+      expect(captured!).toMatch(/MUST/);
+      expect(captured!).toMatch(/highlight/);
+      expect(captured!).toMatch(/Who lived in Eden\?/);
+    });
+
+    it('system message contains the MUST contract and the schema block', async () => {
+      const provider = mockLLMProvider(() => 'ok');
+      engine.setProvider(provider);
+      await collect(engine.chat('hi'));
+      const messages = provider.getLastStreamMessages();
+      const system = messages!.find((m) => m.role === 'system');
+      expect(system).toBeDefined();
+      expect(system!.content).toMatch(/MUST/);
+      expect(system!.content).toMatch(/highlight/);
+      // Schema attribute keys (type/era) appear because we re-render the
+      // schema block into the system message.
+      expect(system!.content).toMatch(/type/);
+      expect(system!.content).toMatch(/era/);
+    });
+
+    it('user message contains only the user question — no instructions, no schema', async () => {
+      const provider = mockLLMProvider(() => 'ok');
+      engine.setProvider(provider);
+      await collect(engine.chat('Who lived in Eden?'));
+      const messages = provider.getLastStreamMessages();
+      const user = messages!.find((m) => m.role === 'user');
+      expect(user).toBeDefined();
+      // Exactly the user's question — no `MUST`, no schema header, no
+      // catalog. The instructions belong in the system message.
+      expect(user!.content).toBe('Who lived in Eden?');
+      expect(user!.content).not.toMatch(/MUST/);
+      expect(user!.content).not.toMatch(/Dataset schema/);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Change 3 — retry once on malformed tool args
+  // ---------------------------------------------------------------------------
+  describe('malformed tool-call retry', () => {
+    it('drops a highlight tool call with empty ids and retries with a corrective system message', async () => {
+      // Provider yields a malformed `highlight({})` first; on retry yields a
+      // valid one. The host should see ONLY the valid tool call.
+      let invocation = 0;
+      let secondMessages: LLMMessage[] | undefined;
+      const provider: LLMProvider = {
+        name: 'retry-mock',
+        async complete() {
+          return 'ok';
+        },
+        async *stream(_prompt: string, _opts?: StreamOptions) {
+          // Used by the legacy fallback only — not in this test.
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+        async *streamMessages(messages: LLMMessage[], _opts?: StreamOptions) {
+          invocation += 1;
+          if (invocation === 1) {
+            // Malformed: missing required `ids` field.
+            yield {
+              type: 'tool_call',
+              name: 'highlight',
+              arguments: '{}',
+            } as LLMStreamEvent;
+            yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+            return;
+          }
+          // Second invocation: capture for inspection, emit a valid call.
+          secondMessages = messages;
+          yield { type: 'text', delta: 'Adam and Eve.' } as LLMStreamEvent;
+          yield {
+            type: 'tool_call',
+            name: 'highlight',
+            arguments: JSON.stringify({ ids: ['1', '2', '3'] }),
+          } as LLMStreamEvent;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+      };
+      engine.setProvider(provider);
+      const events = await collect(
+        engine.chat('Who lived in Eden?', { emitToolCalls: true }),
+      );
+      expect(invocation).toBe(2);
+      // The retry path appended a corrective system message.
+      expect(secondMessages).toBeDefined();
+      const correctives = secondMessages!.filter(
+        (m) =>
+          m.role === 'system' && /previous tool call/i.test(m.content),
+      );
+      expect(correctives.length).toBeGreaterThan(0);
+      // The bad call MUST NOT leak through. The good one MUST.
+      const highlights = events.filter((e) => e.type === 'highlight');
+      expect(highlights).toHaveLength(1);
+      const hi = highlights[0] as Extract<ChatEvent, { type: 'highlight' }>;
+      expect(hi.ids.has('1')).toBe(true);
+      expect(hi.ids.has('2')).toBe(true);
+      expect(hi.ids.has('3')).toBe(true);
+    });
+
+    it('caps retries at 1 — second malformed tool call passes through (still dropped, no third call)', async () => {
+      // Even after one corrective retry, if the model is still malformed we
+      // give up — drop the bad tool call and fall through with whatever text
+      // was emitted. Critically: NO third invocation.
+      let invocation = 0;
+      const provider: LLMProvider = {
+        name: 'retry-cap-mock',
+        async complete() {
+          return 'ok';
+        },
+        async *stream(_prompt: string, _opts?: StreamOptions) {
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+        async *streamMessages(_messages: LLMMessage[], _opts?: StreamOptions) {
+          invocation += 1;
+          // Always malformed — `ids` is an object, not an array.
+          yield { type: 'text', delta: `try-${invocation}` } as LLMStreamEvent;
+          yield {
+            type: 'tool_call',
+            name: 'highlight',
+            arguments: JSON.stringify({ ids: {} }),
+          } as LLMStreamEvent;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+      };
+      engine.setProvider(provider);
+      const events = await collect(
+        engine.chat('Who lived in Eden?', { emitToolCalls: true }),
+      );
+      // Exactly two invocations — original + one retry. Cap is 1.
+      expect(invocation).toBe(2);
+      // No highlight events leaked through (both were malformed).
+      const highlights = events.filter((e) => e.type === 'highlight');
+      expect(highlights).toHaveLength(0);
+      // Text from the retry attempt does still flow.
+      expect(events.some((e) => e.type === 'text')).toBe(true);
     });
   });
 });
