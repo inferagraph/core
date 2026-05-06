@@ -260,6 +260,89 @@ describe('useInferaGraphChat — Phase 1 (0.8.0) callbacks', () => {
   });
 });
 
+describe('useInferaGraphChat — conversationId forwarding (0.8.1)', () => {
+  beforeEach(() => {
+    setHighlight.mockReset();
+    setFilter.mockReset();
+    focusOn.mockReset();
+    annotate.mockReset();
+    clearAnnotations.mockReset();
+  });
+
+  function makeCapturingTransport(): {
+    transport: {
+      chat: (
+        message: string,
+        opts?: import('../../src/ai/ChatEvent.js').ChatOptions,
+      ) => AsyncIterable<ChatEvent>;
+    };
+    capturedOpts: Array<import('../../src/ai/ChatEvent.js').ChatOptions | undefined>;
+  } {
+    const capturedOpts: Array<import('../../src/ai/ChatEvent.js').ChatOptions | undefined> = [];
+    const transport = {
+      // eslint-disable-next-line require-yield
+      async *chat(
+        _message: string,
+        opts?: import('../../src/ai/ChatEvent.js').ChatOptions,
+      ): AsyncGenerator<ChatEvent, void, unknown> {
+        capturedOpts.push(opts);
+        yield { type: 'done', reason: 'stop' };
+      },
+    };
+    return { transport, capturedOpts };
+  }
+
+  interface ChildHandleWithOpts {
+    invoke: (
+      msg: string,
+      opts?: { conversationId?: string },
+    ) => Promise<ChatEvent[]>;
+  }
+
+  function ChatChildWithOpts({
+    handleRef,
+  }: {
+    handleRef: { current: ChildHandleWithOpts | null };
+  }): React.ReactElement {
+    const { chat } = useInferaGraphChat();
+    handleRef.current = {
+      invoke: async (msg: string, opts?: { conversationId?: string }) =>
+        collect(chat(msg, opts)),
+    };
+    return <span />;
+  }
+
+  it('forwards conversationId to the transport', async () => {
+    const { transport, capturedOpts } = makeCapturingTransport();
+    const handle: { current: ChildHandleWithOpts | null } = { current: null };
+    render(
+      <InferaGraph data={{ nodes: [], edges: [] }} transport={transport}>
+        <ChatChildWithOpts handleRef={handle} />
+      </InferaGraph>,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    await act(async () =>
+      handle.current!.invoke('hello', { conversationId: 'conv-xyz' }),
+    );
+    expect(capturedOpts.length).toBe(1);
+    expect(capturedOpts[0]?.conversationId).toBe('conv-xyz');
+  });
+
+  it('without conversationId calls transport with no conversationId field', async () => {
+    const { transport, capturedOpts } = makeCapturingTransport();
+    const handle: { current: ChildHandleWithOpts | null } = { current: null };
+    render(
+      <InferaGraph data={{ nodes: [], edges: [] }} transport={transport}>
+        <ChatChildWithOpts handleRef={handle} />
+      </InferaGraph>,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    await act(async () => handle.current!.invoke('hello'));
+    expect(capturedOpts.length).toBe(1);
+    expect(capturedOpts[0]?.conversationId).toBeUndefined();
+  });
+});
+
 describe('<InferaGraph onChat> callback', () => {
   beforeEach(() => {
     setHighlight.mockReset();

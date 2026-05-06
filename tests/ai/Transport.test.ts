@@ -245,6 +245,50 @@ describe('httpTransport', () => {
     }
   });
 
+  it('sends conversationId in request body when provided', async () => {
+    let capturedBody: string | undefined;
+    const fetch = vi.fn(async (_url, init?: RequestInit) => {
+      capturedBody = init?.body as string;
+      return sseResponse(buildSSE([{ type: 'done', reason: 'stop' }]));
+    });
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    await collect(
+      transport.chat('hi', { conversationId: 'conv-123' }),
+    );
+    expect(capturedBody).toBeDefined();
+    const parsed = JSON.parse(capturedBody!) as Record<string, unknown>;
+    expect(parsed.conversationId).toBe('conv-123');
+    expect(parsed.message).toBe('hi');
+  });
+
+  it('omits conversationId from body when undefined', async () => {
+    let capturedBody: string | undefined;
+    const fetch = vi.fn(async (_url, init?: RequestInit) => {
+      capturedBody = init?.body as string;
+      return sseResponse(buildSSE([{ type: 'done', reason: 'stop' }]));
+    });
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    await collect(transport.chat('hi'));
+    expect(capturedBody).toBeDefined();
+    const parsed = JSON.parse(capturedBody!) as Record<string, unknown>;
+    expect('conversationId' in parsed).toBe(false);
+  });
+
+  it('continues to send message + emitToolCalls without conversationId (back-compat)', async () => {
+    let capturedBody: string | undefined;
+    const fetch = vi.fn(async (_url, init?: RequestInit) => {
+      capturedBody = init?.body as string;
+      return sseResponse(buildSSE([{ type: 'done', reason: 'stop' }]));
+    });
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    await collect(transport.chat('hi', { emitToolCalls: true }));
+    expect(capturedBody).toBeDefined();
+    const parsed = JSON.parse(capturedBody!) as Record<string, unknown>;
+    expect(parsed.message).toBe('hi');
+    expect(parsed.emitToolCalls).toBe(true);
+    expect('conversationId' in parsed).toBe(false);
+  });
+
   it('drops malformed debug events (missing required `phase`)', async () => {
     const sse =
       `data: ${JSON.stringify({
