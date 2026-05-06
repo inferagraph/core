@@ -160,66 +160,13 @@ export { ForceLayout3D } from './layouts/ForceLayout3D.js';
 export { TreeLayout } from './layouts/TreeLayout.js';
 export { LayoutRegistry } from './layouts/LayoutRegistry.js';
 
-// Renderer
-export { WebGLRenderer } from './renderer/WebGLRenderer.js';
-export type { TickCallback } from './renderer/WebGLRenderer.js';
-export { SceneController } from './renderer/SceneController.js';
-export type {
-  SceneControllerOptions,
-  CameraSnapshot,
-} from './renderer/SceneController.js';
-export type {
-  VisibilityHost,
-  HighlightHost,
-  FocusHost,
-  AnnotateHost,
-  InferredEdgeHost,
-} from './renderer/types.js';
-export { AnnotationRenderer } from './renderer/AnnotationRenderer.js';
-export {
-  NodeColorResolver,
-  DEFAULT_NODE_COLOR,
-} from './renderer/NodeColorResolver.js';
-export type {
-  NodeColorFn,
-  NodeColorResolverOptions,
-} from './renderer/NodeColorResolver.js';
-export {
-  EdgeColorMap,
-  DEFAULT_EDGE_COLOR,
-} from './renderer/EdgeColorMap.js';
-export type {
-  EdgeColorFn,
-  EdgeColorContext,
-  EdgeColorMapOptions,
-} from './renderer/EdgeColorMap.js';
-export {
-  blendEdgeColors,
-  mixHexColors,
-} from './renderer/blendEdgeColors.js';
-export {
-  DEFAULT_PALETTE_32,
-  hashStringToIndex,
-  autoColor,
-  brighten,
-} from './renderer/palette.js';
-export { NodeMesh } from './renderer/NodeMesh.js';
-export { EdgeMesh } from './renderer/EdgeMesh.js';
-export {
-  InferredEdgeMesh,
-  INFERRED_EDGE_DASH_SIZE,
-  INFERRED_EDGE_GAP_SIZE,
-  INFERRED_EDGE_ALPHA,
-  INFERRED_EDGE_COLOR,
-} from './renderer/InferredEdgeMesh.js';
-export { LabelRenderer } from './renderer/LabelRenderer.js';
-export { CustomNodeRenderer } from './renderer/CustomNodeRenderer.js';
-export { Raycaster } from './renderer/Raycaster.js';
-export { CameraController } from './renderer/CameraController.js';
-export { PulseController, DEFAULT_PULSE_CONFIG } from './renderer/PulseController.js';
-export type { PulseConfig, PulseOption } from './renderer/PulseController.js';
-export { InteractionManager } from './renderer/InteractionManager.js';
-export { ThemeManager } from './renderer/ThemeManager.js';
+// Renderer surface intentionally NOT re-exported from this entry.
+// `/data` is the server-safe entry point: it must not transitively
+// load the renderer modules, because they import three.js, which in
+// turn imports `three/examples/jsm/controls/TrackballControls.js` —
+// an ESM-only module that Node refuses to require() from a CJS bundle.
+// Browser consumers can reach the renderer surface via the root entry
+// `@inferagraph/core` (see src/index.ts).
 
 // Overlay
 export { TooltipOverlay } from './overlay/TooltipOverlay.js';
