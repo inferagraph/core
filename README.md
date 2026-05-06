@@ -1,6 +1,6 @@
 # @inferagraph/core
 
-AI-powered knowledge graph platform with WebGL visualization. **v0.6.0** — Phase 6 (drilldown + node detail).
+AI-powered knowledge graph platform with WebGL visualization. **v0.8.0** — Phase 1 RAG architecture (hybrid retrieval + conversation memory + cross-encoder rerank + library-driven indexing).
 
 InferaGraph is a self-contained platform that holds graph data, performs AI reasoning via LLM, and renders interactive 3D visualizations. The consuming application is a thin shell that feeds data and displays results — it never invokes the LLM directly.
 
@@ -10,13 +10,33 @@ InferaGraph is a self-contained platform that holds graph data, performs AI reas
 - Built-in graph store with query, filter, and search
 - Domain-agnostic visibility predicate (uniform across all viz modes — graph, tree, future modes)
 - Streaming chat-as-API with tool calls (`apply_filter`, `highlight`, `focus`, `annotate`, `set_inferred_visibility`) auto-dispatched to the renderer
-- Three-tier embedding progression — keyword search → cache-backed similarity → dedicated `EmbeddingStore`
+- **Hybrid retrieval** — semantic (`embeddingStore.searchVector`) + keyword + 1-hop graph expansion, weighted-sum merged
+- **Cross-encoder rerank** — per-candidate LLM relevance scoring with per-conversation cache, top-K kept
+- **Multi-turn conversations** — `ConversationStore` interface; `InMemoryConversationStore` ships in core. Pronoun resolution from prior turn's `retrievedNodeIds`
+- **Citation requirement** — model is asked to cite every entity inline as `[[id]]`; the host renders these as clickable links
+- **`debug` chat events** — first-class `ChatEvent` member; surfaced via the new `<InferaGraph onDiagnostic>` callback for ops-visibility badges
+- **`onToolCallOutcome`** — host callback fired after tool-call dispatch so UIs can render "applied / unknown" badges
+- **`GraphIndexer`** — reusable indexing engine; one call (`embedAll`, `computeInferredEdges`, `recomputeInferredEdgesFor`, `reconcile`) handles the whole RAG pipeline. Hosts wire it after data load; library handles the rest
+- **`embeddingText({contentKeys})`** — content body now drives the embedding's body (verbatim, no `key:` prefix); attribute metadata becomes the header
+- Three-tier embedding progression — keyword search → cache-backed similarity → dedicated `EmbeddingStore` (now with optional `searchVector` for vector-native stores)
 - Natural-language `query` prop — predicate compiled at runtime, ANDed with the explicit `filter` prop
 - Inferred-edge overlay (RRF over LLM + embeddings + graph signals); toggleable via prop or `set_inferred_visibility` tool call
 - Drilldown + node detail — `+` hover affordance, node-click handler, `MemoryManager` LRU eviction
 - Pluggable LLM providers (Anthropic, OpenAI, Azure AI Foundry); host-blind core
 - React entry point + a separate `data` entry for Next.js RSC contexts
 - CSS-themable overlays and controls
+
+## What's new in 0.8.0
+
+- `LLMMessage` / `LLMRole` types for structured-roles chat (already in 0.7.x; now stable surface)
+- `EmbeddingStore.searchVector?(queryEmbedding, {top, container})` — additive optional method; `InMemoryEmbeddingStore` implements via linear-scan cosine
+- `ChatEvent` gains `{type:'debug', phase, detail?, counters?, conversationId?}`
+- `AIEngineConfig` gains `embeddingContentKeys`, `chatRerankEnabled`, `chatRerankCandidates`, `chatRerankTopK`, `priorTurnLimit`
+- `AIEngine.setConversationStore(store)` + `chat(message, {conversationId})`
+- `AIEngine.buildChatMessages` adds an Edges block, an Inferred-relationships block, a pronoun-resolution block (when applicable), and the citation requirement
+- `emitWithFallbacks` rewritten as a pure reducer; empty-highlight substitution draws from per-query retrieval, zero-text synthesis grounds in the first retrieved node's content (no more `Showing X, Y, Z` catalog roll-up)
+- `<InferaGraph onDiagnostic onToolCallOutcome>` props
+- Re-exports: `LLMMessage`, `LLMRole`, `ConversationStore`, `ConversationTurn`, `inMemoryConversationStore`, `SearchVectorHit`, `GraphIndexer`, `GraphIndexerConfig`, `IndexerProgress`, `DEFAULT_EMBEDDING_CONTENT_KEYS`, `EmbeddingTextOptions`, `ToolCallOutcome`
 
 ## Installation
 

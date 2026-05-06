@@ -91,6 +91,12 @@ async function* runChat(
   ctx: {
     getTransport: () => { chat: (m: string, o?: ChatOptions) => AsyncIterable<ChatEvent> } | null;
     dispatch: (event: ChatEvent) => void;
+    onDiagnostic?: (event: Extract<ChatEvent, { type: 'debug' }>) => void;
+    onToolCallOutcome?: (outcome: {
+      tool: string;
+      appliedIds?: string[];
+      unknownIds?: string[];
+    }) => void;
   },
 ): AsyncGenerator<ChatEvent, void, unknown> {
   const transport = ctx.getTransport();
@@ -100,6 +106,12 @@ async function* runChat(
   }
   const stream = transport.chat(message, opts);
   for await (const ev of stream) {
+    if (ev.type === 'debug') {
+      // Diagnostic events surface via the host's onDiagnostic callback,
+      // not the iterator. Hosts render them as grey badges.
+      ctx.onDiagnostic?.(ev);
+      continue;
+    }
     if (
       ev.type === 'apply_filter' ||
       ev.type === 'highlight' ||
@@ -109,8 +121,38 @@ async function* runChat(
     ) {
       // Dispatch to the renderer; do NOT surface to the host.
       ctx.dispatch(ev);
+      // Fire an outcome callback so hosts can render "applied / unknown"
+      // badges. The renderer doesn't currently report unknownIds back
+      // through dispatch, so for now we surface the requested ids as
+      // appliedIds. A future enhancement will reconcile against the
+      // store's known-ids set.
+      if (ctx.onToolCallOutcome) {
+        const outcome = computeToolCallOutcome(ev);
+        if (outcome) ctx.onToolCallOutcome(outcome);
+      }
       continue;
     }
     yield ev;
+  }
+}
+
+function computeToolCallOutcome(ev: ChatEvent): {
+  tool: string;
+  appliedIds?: string[];
+  unknownIds?: string[];
+} | undefined {
+  switch (ev.type) {
+    case 'highlight':
+      return { tool: 'highlight', appliedIds: [...ev.ids] };
+    case 'focus':
+      return { tool: 'focus', appliedIds: [ev.nodeId] };
+    case 'annotate':
+      return { tool: 'annotate', appliedIds: [ev.nodeId] };
+    case 'apply_filter':
+      return { tool: 'apply_filter' };
+    case 'set_inferred_visibility':
+      return { tool: 'set_inferred_visibility' };
+    default:
+      return undefined;
   }
 }

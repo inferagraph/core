@@ -20,3 +20,4 @@ export type {
 export { GraphProvider } from './react/GraphProvider.js';
 export type { SlugResolver, GraphContextValue, GraphProviderProps } from './react/GraphProvider.js';
 export { createReactNodeRenderFn, createReactTooltipRenderFn } from './react/ReactNodeRenderer.js';
+export type { ToolCallOutcome, InferaGraphChatContext } from './react/chatContext.js';

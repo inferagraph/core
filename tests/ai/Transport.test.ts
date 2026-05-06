@@ -221,4 +221,42 @@ describe('httpTransport', () => {
     const events = await collect(transport.chat('hi', { signal: ac.signal }));
     expect(events).toEqual([{ type: 'done', reason: 'aborted' }]);
   });
+
+  it('reconstructs debug events from SSE', async () => {
+    const sse =
+      `data: ${JSON.stringify({
+        type: 'debug',
+        phase: 'vector-search',
+        detail: 'topK=8',
+        counters: { semantic: 8, keyword: 3 },
+        conversationId: 'c1',
+      })}\n\n` +
+      `data: ${JSON.stringify({ type: 'done', reason: 'stop' })}\n\n`;
+    const fetch = vi.fn(async () => sseResponse(sse));
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    const events = await collect(transport.chat('hi'));
+    const debug = events.find((e) => e.type === 'debug');
+    expect(debug).toBeDefined();
+    if (debug && debug.type === 'debug') {
+      expect(debug.phase).toBe('vector-search');
+      expect(debug.detail).toBe('topK=8');
+      expect(debug.counters).toEqual({ semantic: 8, keyword: 3 });
+      expect(debug.conversationId).toBe('c1');
+    }
+  });
+
+  it('drops malformed debug events (missing required `phase`)', async () => {
+    const sse =
+      `data: ${JSON.stringify({
+        type: 'debug',
+        // missing required `phase`
+        detail: 'oops',
+      })}\n\n` +
+      `data: ${JSON.stringify({ type: 'done', reason: 'stop' })}\n\n`;
+    const fetch = vi.fn(async () => sseResponse(sse));
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    const events = await collect(transport.chat('hi'));
+    expect(events.some((e) => e.type === 'debug')).toBe(false);
+    expect(events[events.length - 1].type).toBe('done');
+  });
 });

@@ -153,6 +153,26 @@ export interface InferaGraphProps {
    */
   onChat?: (event: ChatEvent) => void;
   /**
+   * Phase 1 (RAG architecture, 0.8.0) — fired when the engine emits a
+   * `debug` ChatEvent (vector-search, rerank, retrieval-empty, etc.).
+   * Hosts use this to render diagnostic badges underneath assistant
+   * bubbles for ops visibility. Debug events are NEVER yielded to the
+   * iterator — only this callback receives them.
+   */
+  onDiagnostic?: (event: Extract<ChatEvent, { type: 'debug' }>) => void;
+  /**
+   * Phase 1 (RAG architecture, 0.8.0) — fired after a tool-call event
+   * has been dispatched to the renderer. Lets host UIs surface
+   * "N applied, M unknown" badges. The library reports the requested
+   * ids as `appliedIds`; future enhancements will reconcile against
+   * the store's known-ids set to populate `unknownIds`.
+   */
+  onToolCallOutcome?: (outcome: {
+    tool: string;
+    appliedIds?: string[];
+    unknownIds?: string[];
+  }) => void;
+  /**
    * Phase 6 — slug → nodeId resolver. When supplied, hooks like
    * {@link useInferaGraphContent} translate the input through this
    * resolver before calling into the {@link DataAdapter}. Hosts that
@@ -216,6 +236,12 @@ interface InferaGraphInnerProps {
   transport?: Transport;
   showInferredEdges?: boolean;
   onChat?: (event: ChatEvent) => void;
+  onDiagnostic?: (event: Extract<ChatEvent, { type: 'debug' }>) => void;
+  onToolCallOutcome?: (outcome: {
+    tool: string;
+    appliedIds?: string[];
+    unknownIds?: string[];
+  }) => void;
   onNodeClick?: (nodeId: NodeId, node: NodeData) => void;
   onExpandRequest?: (nodeId: NodeId) => void;
   className?: string;
@@ -244,6 +270,8 @@ function InferaGraphInner({
   transport,
   showInferredEdges,
   onChat,
+  onDiagnostic,
+  onToolCallOutcome,
   onNodeClick,
   onExpandRequest,
   className,
@@ -518,6 +546,10 @@ function InferaGraphInner({
   // iterator).
   const onChatRef = useRef(onChat);
   onChatRef.current = onChat;
+  const onDiagnosticRef = useRef(onDiagnostic);
+  onDiagnosticRef.current = onDiagnostic;
+  const onToolCallOutcomeRef = useRef(onToolCallOutcome);
+  onToolCallOutcomeRef.current = onToolCallOutcome;
 
   // Build a chat context value that surfaces the current transport
   // through getters so swapping `transport` mid-flight is transparent
@@ -568,6 +600,12 @@ function InferaGraphInner({
             return;
         }
       },
+      onDiagnostic: (event) => {
+        onDiagnosticRef.current?.(event);
+      },
+      onToolCallOutcome: (outcome) => {
+        onToolCallOutcomeRef.current?.(outcome);
+      },
     };
   }, [activeTransport]);
 
@@ -606,6 +644,8 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     transport,
     showInferredEdges,
     onChat,
+    onDiagnostic,
+    onToolCallOutcome,
     slugResolver,
     maxNodes,
     onNodeClick,
@@ -637,6 +677,8 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
         transport={transport}
         showInferredEdges={showInferredEdges}
         onChat={onChat}
+        onDiagnostic={onDiagnostic}
+        onToolCallOutcome={onToolCallOutcome}
         onNodeClick={onNodeClick}
         onExpandRequest={onExpandRequest}
         className={className}

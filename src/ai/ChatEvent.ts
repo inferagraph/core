@@ -67,6 +67,36 @@ export type ChatEvent =
       visible: boolean;
     }
   | {
+      type: 'debug';
+      /**
+       * Diagnostic phase the engine (or host route) is reporting on. Each
+       * phase fires at most once per chat turn. Hosts can render these as
+       * grey collapsible badges underneath the assistant bubble for ops
+       * visibility — they MUST NOT be treated as model output.
+       */
+      phase:
+        | 'stream-opened'
+        | 'warmup-blocking'
+        | 'vector-search'
+        | 'rerank'
+        | 'pronoun-resolve'
+        | 'retrieval-complete'
+        | 'retrieval-empty'
+        | 'substitution-fired'
+        | 'engine-empty'
+        | 'conversation-cleared';
+      /** Free-form per-phase narrative (e.g. `topK=8`). Optional. */
+      detail?: string;
+      /** Per-phase numeric counters (latency, candidate counts, etc.). Optional. */
+      counters?: Record<string, number>;
+      /**
+       * Conversation id this debug event belongs to. Lets the host pin the
+       * badge to the right turn when conversations multiplex over a single
+       * connection. Optional — single-turn hosts can leave it unset.
+       */
+      conversationId?: string;
+    }
+  | {
       type: 'done';
       /** Why the stream ended. `'aborted'` = canceled via AbortSignal. */
       reason?: 'stop' | 'length' | 'aborted';
@@ -91,4 +121,11 @@ export interface ChatOptions {
    * + `done` events. Useful for non-React consumers and tests.
    */
   emitToolCalls?: boolean;
+  /**
+   * Conversation id, scoped to whichever {@link ConversationStore} the
+   * engine is configured with. When set, the engine fetches prior turns
+   * for that id and appends the user + assistant turn after the stream
+   * completes. Omit to opt out of conversation memory for this call.
+   */
+  conversationId?: string;
 }

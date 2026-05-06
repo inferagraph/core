@@ -89,6 +89,21 @@ export interface SimilarHit {
 }
 
 /**
+ * Result row returned by the optional {@link EmbeddingStore.searchVector}
+ * vector-native query. Same shape as {@link SimilarHit}, named distinctly
+ * so the two query paths are easy to tell apart in stack traces.
+ *
+ * Phase 1 (RAG architecture) shipped this so the engine's hybrid retrieval
+ * path can read the same vector index from both the in-memory store
+ * (linear scan) and the production Cosmos NoSQL store (true vector index).
+ */
+export interface SearchVectorHit {
+  nodeId: NodeId;
+  /** Cosine similarity in `[-1, 1]`; higher is more similar. */
+  score: number;
+}
+
+/**
  * Pluggable vector storage for `@inferagraph/core`.
  *
  * Tier 3 of the embedding storage progression: hosts pass an instance to
@@ -135,6 +150,23 @@ export interface EmbeddingStore {
   ): Promise<SimilarHit[]>;
   /** Drop everything. */
   clear(): Promise<void>;
+  /**
+   * **Optional** — vector-native top-K search. New in 0.8.0 and the canonical
+   * entry point for the engine's hybrid-retrieval path. Returns the `top`
+   * highest-similarity entries; `container` lets a single store hold both
+   * unit embeddings and inferred-edge embeddings under one roof (the
+   * production Cosmos store does this — `'units'` is the units container,
+   * `'inferred_edges'` the inferred-edges container; in-memory stores can
+   * ignore the field).
+   *
+   * Stores that don't implement this method MUST omit it (rather than throw)
+   * so the engine's tier detection can fall back to {@link similar} via
+   * `'searchVector' in store`.
+   */
+  searchVector?(
+    queryEmbedding: Vector,
+    opts: { top: number; container?: 'units' | 'inferred_edges' },
+  ): Promise<SearchVectorHit[]>;
 }
 
 /**
