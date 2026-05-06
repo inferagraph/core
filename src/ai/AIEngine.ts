@@ -55,6 +55,29 @@ export interface AIEngineConfig {
    * the user's message. Default: 12.
    */
   chatContextSize?: number;
+  /**
+   * Maximum number of nodes whose `attributes.content` is embedded as
+   * full retrieval-augmented context in the chat system message. Counts
+   * the top-K most-relevant nodes from the same ranking the catalog
+   * uses. Defaults to 4. If the catalog is smaller than K the engine
+   * includes content for whichever nodes are present (no padding).
+   */
+  chatContentSize?: number;
+  /**
+   * Per-node byte cap applied to `attributes.content` before it is
+   * inlined into the system message. Anything beyond the cap is trimmed
+   * and a Unicode ellipsis (`…`) is appended so the model can tell the
+   * text is partial. Defaults to 800.
+   */
+  chatContentMaxTokens?: number;
+  /**
+   * Total byte budget for the inlined content section. When the sum of
+   * per-node content (after per-node truncation) exceeds the budget, the
+   * engine drops the lowest-relevance nodes' content first until the
+   * total fits — those nodes still appear in the catalog without their
+   * content body. Defaults to 3200.
+   */
+  chatContentBudgetTokens?: number;
 }
 
 /** Internal: which embedding storage path is currently active. */
@@ -205,6 +228,9 @@ export class AIEngine {
   private readonly schemaSampleSize: number;
   private readonly defaultSearchK: number;
   private readonly chatContextSize: number;
+  private readonly chatContentSize: number;
+  private readonly chatContentMaxTokens: number;
+  private readonly chatContentBudgetTokens: number;
   private readonly inspector: SchemaInspector;
   private readonly keywordEngine: SearchEngine;
   private provider: LLMProvider | undefined;
@@ -249,6 +275,9 @@ export class AIEngine {
     this.schemaSampleSize = config?.schemaSampleSize ?? 10;
     this.defaultSearchK = config?.defaultSearchK ?? 25;
     this.chatContextSize = config?.chatContextSize ?? 12;
+    this.chatContentSize = config?.chatContentSize ?? 4;
+    this.chatContentMaxTokens = config?.chatContentMaxTokens ?? 800;
+    this.chatContentBudgetTokens = config?.chatContentBudgetTokens ?? 3200;
     this.inspector = new SchemaInspector(store, {
       maxSamplesPerAttribute: this.schemaSampleSize,
     });
@@ -615,19 +644,14 @@ export class AIEngine {
     const cacheKey = chatCacheKey(messages, tools);
     const cached = await this.lookupChatCache(cacheKey);
     if (cached) {
-      for (const ev of cached.events) {
-        if (signal?.aborted) {
-          yield { type: 'done', reason: 'aborted' };
-          return;
-        }
-        for await (const out of this.translateLLMEvent(ev, emitToolCalls)) {
-          yield out;
-        }
-        if (ev.type === 'done') return;
+      for await (const ev of this.emitWithFallbacks(
+        cached.events,
+        emitToolCalls,
+        relevantNodes,
+        signal,
+      )) {
+        yield ev;
       }
-      // Cached stream lacked a trailing done — synthesize one so consumers
-      // always see a terminal event.
-      yield { type: 'done', reason: 'stop' };
       return;
     }
 
@@ -698,26 +722,18 @@ export class AIEngine {
           continue;
         }
 
-        // No retry needed — emit everything we collected this attempt.
-        let sawDone = false;
-        for (const ev of attemptEvents) {
-          collected.push(ev);
-          if (ev.type === 'done') sawDone = true;
-          for await (const out of this.translateLLMEvent(ev, emitToolCalls)) {
-            yield out;
-          }
-          if (signal?.aborted && !sawDone) {
-            const aborted: LLMStreamEvent = { type: 'done', reason: 'aborted' };
-            collected.push(aborted);
-            yield { type: 'done', reason: 'aborted' };
-            sawDone = true;
-            break;
-          }
-        }
-        if (!sawDone) {
-          const synth: LLMStreamEvent = { type: 'done', reason: 'stop' };
-          collected.push(synth);
-          yield { type: 'done', reason: 'stop' };
+        // No retry needed — emit everything we collected this attempt
+        // through the fallback-aware emitter, which substitutes empty
+        // highlights and synthesizes a text event when the model was
+        // text-silent.
+        for (const ev of attemptEvents) collected.push(ev);
+        for await (const out of this.emitWithFallbacks(
+          attemptEvents,
+          emitToolCalls,
+          relevantNodes,
+          signal,
+        )) {
+          yield out;
         }
         break;
       }
@@ -771,30 +787,135 @@ export class AIEngine {
   }
 
   /**
-   * Translate ONE provider {@link LLMStreamEvent} into zero-or-more host
-   * {@link ChatEvent}s. Text + done events are always translated. Tool
-   * calls are translated into typed events; whether they propagate
-   * depends on `emitToolCalls`.
+   * Emit a buffered stream of provider events to the host, applying two
+   * engine-side fallbacks the user never sees a model failure for:
+   *
+   *   1. **Empty-highlight substitution** — when the model emits a
+   *      `highlight` whose `ids` are empty, missing, or otherwise unusable
+   *      (after the upstream malformed-tool-call retry has already
+   *      completed), the engine substitutes the embedding-retrieved node
+   *      ids that built the prompt's relevant-nodes catalog. Without this
+   *      the host sees `highlight({ids:{}})` and nothing fades / lights —
+   *      exactly the failure mode the user reported live against
+   *      gpt-5.4-mini ("Tell me about Cain" → empty highlight).
+   *
+   *   2. **Zero-text synthesis** — when the model finishes the stream
+   *      without ever emitting a `text` event (only tool calls), the engine
+   *      synthesizes a single grounded acknowledgment derived from the
+   *      relevant-nodes catalog. Better than the silent screen the user
+   *      reported.
+   *
+   * Text events stream live as they arrive. Tool calls are buffered so we
+   * can decide on the substitute / synth before the `done` event closes
+   * the stream. Aborted streams short-circuit immediately.
    */
-  private async *translateLLMEvent(
-    ev: LLMStreamEvent,
+  private async *emitWithFallbacks(
+    events: ReadonlyArray<LLMStreamEvent>,
     emitToolCalls: boolean,
+    relevantNodes: ReadonlyArray<NodeData>,
+    signal: AbortSignal | undefined,
   ): AsyncGenerator<ChatEvent, void, unknown> {
-    if (ev.type === 'text') {
-      yield { type: 'text', delta: ev.delta };
+    const bufferedToolCalls: ChatEvent[] = [];
+    let textCount = 0;
+    let sawNonEmptyHighlight = false;
+    let sawAnyHighlightAttempt = false;
+    let doneEvent: Extract<LLMStreamEvent, { type: 'done' }> | undefined;
+    let sawDone = false;
+
+    for (const ev of events) {
+      if (signal?.aborted) {
+        yield { type: 'done', reason: 'aborted' };
+        return;
+      }
+      if (ev.type === 'text') {
+        textCount += 1;
+        yield { type: 'text', delta: ev.delta };
+        continue;
+      }
+      if (ev.type === 'done') {
+        doneEvent = ev;
+        sawDone = true;
+        break;
+      }
+      // tool_call — translate and decide whether to buffer or hold for
+      // substitution.
+      const translated = parseToolCall(ev.name, ev.arguments);
+      if (translated && translated.type === 'highlight') {
+        sawAnyHighlightAttempt = true;
+        if (translated.ids.size > 0) {
+          sawNonEmptyHighlight = true;
+          if (emitToolCalls) bufferedToolCalls.push(translated);
+        }
+        // Empty highlight: deliberately drop here so the substitute can
+        // take its place after the buffered tool calls.
+        continue;
+      }
+      // Non-highlight tool call. The model may have called highlight with
+      // a malformed shape that parseToolCall rejected (e.g. ids: {}); the
+      // upstream retry handles validation, so anything reaching us is
+      // genuinely a translation failure for this tool. We track the
+      // attempt regardless so substitution still kicks in.
+      if (!translated && ev.name === 'highlight') {
+        sawAnyHighlightAttempt = true;
+        continue;
+      }
+      if (translated && emitToolCalls) {
+        bufferedToolCalls.push(translated);
+      }
+    }
+
+    // Empty-highlight substitution. We substitute when the model attempted
+    // a highlight at all but never produced one with ids. This covers the
+    // observed `highlight({"ids":{}})` failure mode AND the live
+    // `highlight({})` no-`ids`-key one. We do not synthesize a highlight
+    // when the model never tried — that would imply graph relevance we
+    // can't be sure of.
+    if (sawAnyHighlightAttempt && !sawNonEmptyHighlight) {
+      const substituteIds = new Set<string>();
+      for (const node of relevantNodes) substituteIds.add(node.id);
+      if (substituteIds.size > 0) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[chat] model emitted empty highlight; substituting ${substituteIds.size} embedding-retrieved ids`,
+        );
+        if (emitToolCalls) {
+          bufferedToolCalls.push({ type: 'highlight', ids: substituteIds });
+        }
+      }
+    }
+
+    // Zero-text synthesis. Fire when the model produced no text deltas
+    // AND we are not in an aborted state. The synthesized acknowledgment
+    // is a brief grounded line built from the relevant-nodes catalog so
+    // the host always renders something — better than the empty pane the
+    // user reported.
+    if (textCount === 0 && !signal?.aborted) {
+      const synth = synthesizeAcknowledgment(relevantNodes);
+      if (synth !== undefined) {
+        // eslint-disable-next-line no-console
+        console.warn('[chat] model emitted no text; synthesized acknowledgment');
+        yield { type: 'text', delta: synth };
+      }
+    }
+
+    // Flush buffered tool calls now that any synth text has gone first.
+    for (const tc of bufferedToolCalls) {
+      if (signal?.aborted) {
+        yield { type: 'done', reason: 'aborted' };
+        return;
+      }
+      yield tc;
+    }
+
+    if (signal?.aborted) {
+      yield { type: 'done', reason: 'aborted' };
       return;
     }
-    if (ev.type === 'done') {
-      yield { type: 'done', reason: ev.reason };
-      return;
+    if (sawDone && doneEvent) {
+      yield { type: 'done', reason: doneEvent.reason };
+    } else {
+      yield { type: 'done', reason: 'stop' };
     }
-    // tool_call
-    const translated = parseToolCall(ev.name, ev.arguments);
-    if (translated && emitToolCalls) {
-      yield translated;
-    }
-    // We deliberately swallow translation failures rather than break the
-    // stream — a malformed tool call is a model error, not a host error.
   }
 
   /**
@@ -1214,7 +1335,13 @@ export class AIEngine {
   ): LLMMessage[] {
     const schemaBlock = renderSchemaBlock(schema, this.schemaSampleSize);
     const catalogBlock = renderCatalogBlock(relevantNodes);
-    const systemContent = [
+    const contentBlock = renderContentBlock(
+      relevantNodes,
+      this.chatContentSize,
+      this.chatContentMaxTokens,
+      this.chatContentBudgetTokens,
+    );
+    const lines: string[] = [
       'You are an assistant embedded inside an interactive graph visualization.',
       'The host application renders the graph and shows your conversational text alongside it. Both halves matter — the text explains, the visual shows.',
       '',
@@ -1250,10 +1377,19 @@ export class AIEngine {
       '',
       'Relevant nodes (use these ids verbatim in `highlight` / `focus` / `annotate`):',
       catalogBlock,
-    ].join('\n');
+    ];
+    if (contentBlock !== undefined) {
+      lines.push('');
+      lines.push('Relevant entity content:');
+      lines.push(contentBlock);
+      lines.push('');
+      lines.push(
+        'Use the entity content above as the source of truth for biographical / descriptive answers. If the content does not cover something, say so rather than inventing facts.',
+      );
+    }
 
     return [
-      { role: 'system', content: systemContent },
+      { role: 'system', content: lines.join('\n') },
       { role: 'user', content: message },
     ];
   }
@@ -1683,6 +1819,85 @@ function renderCatalogBlock(nodes: ReadonlyArray<NodeData>): string {
     lines.push(`${node.id} | ${title} | ${type}${extrasJoined}`);
   }
   return lines.join('\n');
+}
+
+/**
+ * Render the optional "Relevant entity content:" block. Walks the same
+ * relevance-ranked node list the catalog uses, takes the top
+ * `contentSize` nodes whose `attributes.content` is a non-empty string,
+ * truncates each body to `maxPerNode` bytes (appending `…` when cut),
+ * then enforces the total `budget` by dropping lowest-relevance
+ * content first. Returns `undefined` when no node has content — the
+ * caller then omits the section entirely so hosts that don't store
+ * content see a clean prompt.
+ */
+function renderContentBlock(
+  nodes: ReadonlyArray<NodeData>,
+  contentSize: number,
+  maxPerNode: number,
+  budget: number,
+): string | undefined {
+  // Take the top-K candidates from the (already-ranked) node list. If the
+  // list is shorter than K we use what we have — never pad.
+  const candidates = nodes
+    .slice(0, Math.max(0, contentSize))
+    .map((node) => {
+      const attrs = node.attributes ?? {};
+      const raw = attrs.content;
+      if (typeof raw !== 'string' || raw.length === 0) return undefined;
+      const title = pickTitleAttribute(attrs) ?? node.id;
+      const truncated =
+        raw.length > maxPerNode ? raw.slice(0, maxPerNode) + '…' : raw;
+      return { id: node.id, title, body: truncated };
+    })
+    .filter(
+      (entry): entry is { id: string; title: string; body: string } =>
+        entry !== undefined,
+    );
+
+  if (candidates.length === 0) return undefined;
+
+  // Render each candidate to a `## title (id: id)\nbody` block, then walk
+  // from highest to lowest relevance keeping a running byte count. The
+  // first block to push the total past `budget` (and every block after it)
+  // is dropped.
+  const rendered: Array<{ block: string; bytes: number }> = candidates.map(
+    (c) => {
+      const block = `## ${c.title} (id: ${c.id})\n${c.body}`;
+      return { block, bytes: block.length };
+    },
+  );
+  const kept: string[] = [];
+  let total = 0;
+  for (const r of rendered) {
+    if (total + r.bytes > budget && kept.length > 0) break;
+    kept.push(r.block);
+    total += r.bytes;
+  }
+  return kept.join('\n\n');
+}
+
+/**
+ * Build the one-line text the engine yields when the model finished a
+ * chat turn without ever emitting a `text` event. We prefer titles over
+ * raw ids so the acknowledgment reads naturally; if no title attribute
+ * exists we fall back to the entity count. Returns `undefined` when no
+ * relevant nodes were available — the caller then skips the synth so we
+ * never emit literally `Showing .` or `Found 0 relevant entities ...`.
+ */
+function synthesizeAcknowledgment(
+  nodes: ReadonlyArray<NodeData>,
+): string | undefined {
+  if (nodes.length === 0) return undefined;
+  const titles: string[] = [];
+  const MAX_TITLES = 6;
+  for (const node of nodes) {
+    const t = pickTitleAttribute(node.attributes ?? {});
+    if (t !== undefined) titles.push(t);
+    if (titles.length >= MAX_TITLES) break;
+  }
+  if (titles.length > 0) return `Showing ${titles.join(', ')}.`;
+  return `Found ${nodes.length} relevant entities for your question.`;
 }
 
 function pickTitleAttribute(

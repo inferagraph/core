@@ -119,7 +119,13 @@ describe('AIEngine.chat()', () => {
       const events = await collect(
         engine.chat('show people', { emitToolCalls: true }),
       );
-      expect(events.map((e) => e.type)).toEqual(['apply_filter', 'done']);
+      // Zero-text synthesis prepends a synthesized acknowledgment when the
+      // model emits only tool calls — see "zero-text synthesis" tests below.
+      expect(events.map((e) => e.type)).toEqual([
+        'text',
+        'apply_filter',
+        'done',
+      ]);
     });
 
     it('apply_filter tool call produces a working predicate', async () => {
@@ -245,8 +251,10 @@ describe('AIEngine.chat()', () => {
       const events = await collect(
         engine.chat('chaos', { emitToolCalls: true }),
       );
-      // Only the done event should make it through.
-      expect(events.map((e) => e.type)).toEqual(['done']);
+      // All malformed tool calls are dropped; the zero-text fallback then
+      // synthesizes a one-line acknowledgment so the host never renders an
+      // empty pane.
+      expect(events.map((e) => e.type)).toEqual(['text', 'done']);
     });
   });
 
@@ -528,8 +536,10 @@ describe('AIEngine.chat()', () => {
       const events = await collect(
         engine.chat('confused', { emitToolCalls: true }),
       );
-      // The malformed tool call is silently dropped; only `done` survives.
-      expect(events.map((e) => e.type)).toEqual(['done']);
+      // The malformed tool call is silently dropped; the zero-text fallback
+      // synthesizes a one-line acknowledgment so the host never renders an
+      // empty pane.
+      expect(events.map((e) => e.type)).toEqual(['text', 'done']);
     });
   });
 
@@ -745,10 +755,11 @@ describe('AIEngine.chat()', () => {
       expect(hi.ids.has('3')).toBe(true);
     });
 
-    it('caps retries at 1 — second malformed tool call passes through (still dropped, no third call)', async () => {
+    it('caps retries at 1 — second malformed tool call triggers empty-highlight substitution (no third call)', async () => {
       // Even after one corrective retry, if the model is still malformed we
-      // give up — drop the bad tool call and fall through with whatever text
-      // was emitted. Critically: NO third invocation.
+      // give up — drop the bad tool call and let the engine-side empty-
+      // highlight substitution fire so the host still sees a usable
+      // highlight. Critically: NO third invocation.
       let invocation = 0;
       const provider: LLMProvider = {
         name: 'retry-cap-mock',
@@ -776,11 +787,362 @@ describe('AIEngine.chat()', () => {
       );
       // Exactly two invocations — original + one retry. Cap is 1.
       expect(invocation).toBe(2);
-      // No highlight events leaked through (both were malformed).
-      const highlights = events.filter((e) => e.type === 'highlight');
-      expect(highlights).toHaveLength(0);
+      // The substituted highlight makes it through, populated from the
+      // embedding-retrieved relevant-nodes catalog.
+      const highlights = events.filter(
+        (e): e is Extract<ChatEvent, { type: 'highlight' }> =>
+          e.type === 'highlight',
+      );
+      expect(highlights).toHaveLength(1);
+      expect(highlights[0].ids.size).toBeGreaterThan(0);
       // Text from the retry attempt does still flow.
       expect(events.some((e) => e.type === 'text')).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // RAG: include node content in the system message
+  // ---------------------------------------------------------------------------
+  describe('RAG node content in system message', () => {
+    function makeContentStore(): GraphStore {
+      const s = new GraphStore();
+      s.addNode('cain', {
+        name: 'Cain',
+        type: 'person',
+        content:
+          'Cain was the firstborn son of Adam and Eve. He killed his brother Abel.',
+      });
+      s.addNode('abel', {
+        name: 'Abel',
+        type: 'person',
+        content: 'Abel was the second son of Adam and Eve, slain by Cain.',
+      });
+      s.addNode('seth', {
+        name: 'Seth',
+        type: 'person',
+        content: 'Seth was the third son of Adam and Eve, born after Abel’s death.',
+      });
+      s.addNode('enoch', {
+        name: 'Enoch',
+        type: 'person',
+        content: 'Enoch walked with God and was taken up.',
+      });
+      return s;
+    }
+
+    it('includes node content for top-K relevant nodes under "Relevant entity content:"', async () => {
+      const s = makeContentStore();
+      const e = new AIEngine(s, new QueryEngine(s));
+      const provider = mockLLMProvider(() => 'ok');
+      e.setProvider(provider);
+      await collect(e.chat('Tell me about Cain'));
+      const messages = provider.getLastStreamMessages();
+      const sys = messages!.find((m) => m.role === 'system')!.content;
+      expect(sys).toMatch(/Relevant entity content:/);
+      // Each top-K node renders as `## <title> (id: <id>)` followed by content.
+      expect(sys).toMatch(/## Cain \(id: cain\)/);
+      expect(sys).toMatch(/Cain was the firstborn son of Adam and Eve\./);
+      // Other nodes also appear in the content block (graph fits inside K).
+      expect(sys).toMatch(/## Abel \(id: abel\)/);
+    });
+
+    it('truncates per-node content to chatContentMaxTokens with an ellipsis', async () => {
+      const s = new GraphStore();
+      const longContent = 'A'.repeat(2000);
+      s.addNode('long', {
+        name: 'Long',
+        type: 'person',
+        content: longContent,
+      });
+      const e = new AIEngine(s, new QueryEngine(s), {
+        chatContentMaxTokens: 50,
+      });
+      const provider = mockLLMProvider(() => 'ok');
+      e.setProvider(provider);
+      await collect(e.chat('Tell me about Long'));
+      const messages = provider.getLastStreamMessages();
+      const sys = messages!.find((m) => m.role === 'system')!.content;
+      // Isolate the content block so the assertion isn't confused by other
+      // sections (schema sampling, catalog row) that may render the same body.
+      const contentBlockMatch = sys.match(
+        /Relevant entity content:\n([\s\S]*?)\n\nUse the entity content/,
+      );
+      expect(contentBlockMatch).not.toBeNull();
+      const contentBlock = contentBlockMatch![1];
+      // Truncated body: 50 'A's then a Unicode ellipsis.
+      expect(contentBlock).toMatch(/## Long \(id: long\)\nA{50}…/);
+      // The block itself must not contain the full body.
+      expect(contentBlock).not.toMatch(/A{60}/);
+    });
+
+    it('drops lowest-relevance content first when over chatContentBudgetTokens', async () => {
+      // Four nodes, each ~300 chars of content, content budget = 700 chars.
+      // Only the top two ranked nodes should keep their content; the rest
+      // remain in the catalog row but their content is omitted.
+      const s = new GraphStore();
+      const body = (label: string) => `${label}: ` + 'X'.repeat(290);
+      s.addNode('alpha', { name: 'Alpha', type: 'person', content: body('alpha') });
+      s.addNode('beta', { name: 'Beta', type: 'person', content: body('beta') });
+      s.addNode('gamma', { name: 'Gamma', type: 'person', content: body('gamma') });
+      s.addNode('delta', { name: 'Delta', type: 'person', content: body('delta') });
+      const e = new AIEngine(s, new QueryEngine(s), {
+        chatContentBudgetTokens: 700,
+        chatContentMaxTokens: 400,
+      });
+
+      // Rank deterministically via a custom keyword query: the engine ranks via
+      // the keyword search engine when no embeddings are warm. Asking for
+      // "alpha" puts alpha first; we feed enough query terms to rank predictably.
+      const provider = mockLLMProvider(() => 'ok');
+      e.setProvider(provider);
+      // Force the ranking path by shrinking chatContextSize to less than node count.
+      const small = new AIEngine(s, new QueryEngine(s), {
+        chatContextSize: 4,
+        chatContentBudgetTokens: 700,
+        chatContentMaxTokens: 400,
+      });
+      small.setProvider(provider);
+      await collect(small.chat('alpha beta'));
+      const sys = provider
+        .getLastStreamMessages()!
+        .find((m) => m.role === 'system')!.content;
+      // The content section must include the top-ranked node bodies.
+      expect(sys).toMatch(/## Alpha \(id: alpha\)\nalpha:/);
+      // Lowest-ranked node's catalog row remains, but its full content is dropped.
+      expect(sys).toMatch(/delta \| Delta \| person/);
+      expect(sys).not.toMatch(/## Delta \(id: delta\)\ndelta:/);
+    });
+
+    it('skips the content section entirely when no node has attributes.content', async () => {
+      // Default fixture (no `content` on any node) — the section header must
+      // not appear at all so hosts that don't supply content see a clean prompt.
+      const provider = mockLLMProvider(() => 'ok');
+      engine.setProvider(provider);
+      await collect(engine.chat('hi'));
+      const sys = provider
+        .getLastStreamMessages()!
+        .find((m) => m.role === 'system')!.content;
+      expect(sys).not.toMatch(/Relevant entity content:/);
+    });
+
+    it('tells the model to ground biographical answers in the included content', async () => {
+      const s = makeContentStore();
+      const e = new AIEngine(s, new QueryEngine(s));
+      const provider = mockLLMProvider(() => 'ok');
+      e.setProvider(provider);
+      await collect(e.chat('Tell me about Cain'));
+      const sys = provider
+        .getLastStreamMessages()!
+        .find((m) => m.role === 'system')!.content;
+      expect(sys).toMatch(/source of truth/i);
+      expect(sys).toMatch(/say so rather than inventing/i);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Empty-highlight substitution
+  // ---------------------------------------------------------------------------
+  describe('empty-highlight substitution', () => {
+    it('substitutes embedding-retrieved ids when model emits highlight with empty ids', async () => {
+      // Provider yields { ids: {} } on BOTH initial and retry; engine should
+      // substitute the relevant-nodes ids it computed for the catalog.
+      const provider: LLMProvider = {
+        name: 'always-empty-highlight',
+        async complete() {
+          return 'ok';
+        },
+        async *stream(_prompt: string, _opts?: StreamOptions) {
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+        async *streamMessages(_messages: LLMMessage[], _opts?: StreamOptions) {
+          yield { type: 'text', delta: 'Adam and Eve.' } as LLMStreamEvent;
+          yield {
+            type: 'tool_call',
+            name: 'highlight',
+            arguments: JSON.stringify({ ids: {} }),
+          } as LLMStreamEvent;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+      };
+      engine.setProvider(provider);
+      const events = await collect(
+        engine.chat('Who lived in Eden?', { emitToolCalls: true }),
+      );
+      const highlights = events.filter(
+        (e): e is Extract<ChatEvent, { type: 'highlight' }> =>
+          e.type === 'highlight',
+      );
+      expect(highlights).toHaveLength(1);
+      // The engine substitutes the embedding-retrieved (catalog) ids — the
+      // small fixture's full node set.
+      expect(highlights[0].ids.size).toBeGreaterThan(0);
+      expect(highlights[0].ids.has('1')).toBe(true);
+      expect(highlights[0].ids.has('2')).toBe(true);
+      expect(highlights[0].ids.has('3')).toBe(true);
+    });
+
+    it('substitutes embedding-retrieved ids when model emits highlight with missing ids field', async () => {
+      const provider: LLMProvider = {
+        name: 'missing-ids-highlight',
+        async complete() {
+          return 'ok';
+        },
+        async *stream(_prompt: string, _opts?: StreamOptions) {
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+        async *streamMessages(_messages: LLMMessage[], _opts?: StreamOptions) {
+          yield { type: 'text', delta: 'Adam and Eve.' } as LLMStreamEvent;
+          yield {
+            type: 'tool_call',
+            name: 'highlight',
+            arguments: '{}',
+          } as LLMStreamEvent;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+      };
+      engine.setProvider(provider);
+      const events = await collect(
+        engine.chat('Who lived in Eden?', { emitToolCalls: true }),
+      );
+      const highlights = events.filter(
+        (e): e is Extract<ChatEvent, { type: 'highlight' }> =>
+          e.type === 'highlight',
+      );
+      expect(highlights).toHaveLength(1);
+      expect(highlights[0].ids.size).toBeGreaterThan(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Zero-text synthesis
+  // ---------------------------------------------------------------------------
+  describe('zero-text synthesis', () => {
+    it('synthesizes a text event when the model emits zero text (only tool calls)', async () => {
+      const provider: LLMProvider = {
+        name: 'no-text-mock',
+        async complete() {
+          return 'ok';
+        },
+        async *stream(_prompt: string, _opts?: StreamOptions) {
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+        async *streamMessages(_messages: LLMMessage[], _opts?: StreamOptions) {
+          yield {
+            type: 'tool_call',
+            name: 'highlight',
+            arguments: JSON.stringify({ ids: ['1', '2'] }),
+          } as LLMStreamEvent;
+          yield {
+            type: 'tool_call',
+            name: 'focus',
+            arguments: JSON.stringify({ nodeId: '1' }),
+          } as LLMStreamEvent;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+      };
+      engine.setProvider(provider);
+      const events = await collect(
+        engine.chat('Who lived in Eden?', { emitToolCalls: true }),
+      );
+      const texts = events.filter((e) => e.type === 'text');
+      expect(texts).toHaveLength(1);
+      expect((texts[0] as Extract<ChatEvent, { type: 'text' }>).delta).toMatch(
+        /Showing|Found/,
+      );
+      // Tool calls preserved in their original order.
+      const types = events.map((e) => e.type);
+      expect(types.indexOf('highlight')).toBeLessThan(types.indexOf('focus'));
+    });
+
+    it('does NOT synthesize text when at least one text event was emitted', async () => {
+      const provider: LLMProvider = {
+        name: 'has-text-mock',
+        async complete() {
+          return 'ok';
+        },
+        async *stream(_prompt: string, _opts?: StreamOptions) {
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+        async *streamMessages(_messages: LLMMessage[], _opts?: StreamOptions) {
+          yield { type: 'text', delta: 'Adam and Eve.' } as LLMStreamEvent;
+          yield {
+            type: 'tool_call',
+            name: 'highlight',
+            arguments: JSON.stringify({ ids: ['1'] }),
+          } as LLMStreamEvent;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+      };
+      engine.setProvider(provider);
+      const events = await collect(
+        engine.chat('Who lived in Eden?', { emitToolCalls: true }),
+      );
+      const texts = events.filter((e) => e.type === 'text');
+      expect(texts).toHaveLength(1);
+      expect((texts[0] as Extract<ChatEvent, { type: 'text' }>).delta).toBe(
+        'Adam and Eve.',
+      );
+    });
+
+    it('emits the synthesized text BEFORE the done event', async () => {
+      const provider: LLMProvider = {
+        name: 'order-check-mock',
+        async complete() {
+          return 'ok';
+        },
+        async *stream(_prompt: string, _opts?: StreamOptions) {
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+        async *streamMessages(_messages: LLMMessage[], _opts?: StreamOptions) {
+          yield {
+            type: 'tool_call',
+            name: 'highlight',
+            arguments: JSON.stringify({ ids: ['1'] }),
+          } as LLMStreamEvent;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+      };
+      engine.setProvider(provider);
+      const events = await collect(
+        engine.chat('Who lived in Eden?', { emitToolCalls: true }),
+      );
+      const types = events.map((e) => e.type);
+      const textIdx = types.indexOf('text');
+      const doneIdx = types.indexOf('done');
+      expect(textIdx).toBeGreaterThanOrEqual(0);
+      expect(textIdx).toBeLessThan(doneIdx);
+    });
+
+    it('combined: empty-highlight substitution + zero-text synthesis both fire when model emits only an empty highlight', async () => {
+      const provider: LLMProvider = {
+        name: 'empty-only-mock',
+        async complete() {
+          return 'ok';
+        },
+        async *stream(_prompt: string, _opts?: StreamOptions) {
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+        async *streamMessages(_messages: LLMMessage[], _opts?: StreamOptions) {
+          yield {
+            type: 'tool_call',
+            name: 'highlight',
+            arguments: JSON.stringify({ ids: {} }),
+          } as LLMStreamEvent;
+          yield { type: 'done', reason: 'stop' } as LLMStreamEvent;
+        },
+      };
+      engine.setProvider(provider);
+      const events = await collect(
+        engine.chat('Who lived in Eden?', { emitToolCalls: true }),
+      );
+      const texts = events.filter((e) => e.type === 'text');
+      const highlights = events.filter(
+        (e): e is Extract<ChatEvent, { type: 'highlight' }> =>
+          e.type === 'highlight',
+      );
+      expect(texts).toHaveLength(1);
+      expect(highlights).toHaveLength(1);
+      expect(highlights[0].ids.size).toBeGreaterThan(0);
     });
   });
 });
