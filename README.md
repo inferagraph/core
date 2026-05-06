@@ -1,6 +1,6 @@
 # @inferagraph/core
 
-AI-powered knowledge graph platform with WebGL visualization. **v0.8.1** — Phase 1 RAG architecture (hybrid retrieval + conversation memory + cross-encoder rerank + library-driven indexing).
+AI-powered knowledge graph platform with WebGL visualization. **v0.9.0** — diagnostic-surface warmup events + nominal-type fix across entry points + batched inferred-edge prompt mode + `InMemoryCacheProvider`.
 
 InferaGraph is a self-contained platform that holds graph data, performs AI reasoning via LLM, and renders interactive 3D visualizations. The consuming application is a thin shell that feeds data and displays results — it never invokes the LLM directly.
 
@@ -25,6 +25,14 @@ InferaGraph is a self-contained platform that holds graph data, performs AI reas
 - Pluggable LLM providers (Anthropic, OpenAI, Azure AI Foundry); host-blind core
 - React entry point + a separate `data` entry for Next.js RSC contexts
 - CSS-themable overlays and controls
+
+## What's new in 0.9.0
+
+- **Warmup test-noise silenced.** Background `ensureEmbeddings()` failures (typical with stub providers in unit tests) used to print `[InferaGraph AIEngine] ensureEmbeddings failed: ...` / `embed batch failed: ...` to `console.warn`, polluting test output and forcing hosts to spy on the global console. The warmup path now routes failures through the chat diagnostic surface — the next `chat()` call yields a `ChatEvent` of `{type:'debug', phase:'warmup-failed', detail}` and the buffer drains. No `console.warn`, no test-runner clutter; failures still surface to hosts that consume the iterable.
+- **Nominal-type collision between `@inferagraph/core` and `@inferagraph/core/data` fixed.** Pre-0.9.0, the two `tsup` configs each produced an independent `declare class AIEngine` (and friends) in their `.d.ts` rollups. Because the class body carries private fields, TypeScript treated them as nominally distinct, so `import { AIEngine } from '@inferagraph/core'` produced a value that was NOT assignable to a slot typed via `@inferagraph/core/data` — and vice versa. Folding all three entries into a single tsup config lets the DTS rollup share one chunk per shared class. **One** `AIEngine` symbol now flows from every entry; the assignability error disappears for `AIEngine`, `GraphStore`, `QueryEngine`, `SearchEngine`, `GraphIndexer`. No source-level import changes are required for consumers that already pick one entry per import — but if you previously worked around the collision with type assertions or aliased imports, you can now drop them.
+- **`GraphIndexer.computeInferredEdges` batched-prompt mode.** New optional `inferredEdgeBatchSize` on `GraphIndexerConfig`. Default `1` (preserves the existing one-prompt-per-pair behavior). With `K > 1`, the indexer asks the LLM for K relationship descriptions in a single JSON-array response per batch, dropping `provider.complete` cost from N calls to `ceil(N/K)` on the happy path. Defensive parsing: a malformed batch response (non-JSON, missing `descriptions` array, wrong array length, or call-level error) falls back to per-pair calls for THAT batch only — one bad batch never blocks the whole indexing pass.
+- **`InMemoryCacheProvider` ships in core.** New `inMemoryCacheProvider()` factory + `InMemoryCacheProvider` class give tests and short-lived dev workflows a Map-backed implementation with optional opt-in TTL and no size eviction. `lruCache()` remains the production default; `@inferagraph/redis-cache-provider` continues to ship the persistent variant. Wire via the existing `engine.setCache(...)`.
+- **`CacheProvider` widened.** `set` now accepts an optional `{ ttlSeconds }` for per-call TTL override; `delete(key)` is added for targeted invalidation (distinct from `clear()`, which still wipes everything). Existing `set(key, value)` callers are unaffected — the third argument is optional. `InMemoryCacheProvider` honors both a construction-time `ttlSeconds` default and per-call overrides via lazy expiry on `get`. `lruCache` accepts the per-call `ttlSeconds` for signature compatibility but ignores it (its TTL policy is fixed at construction); use construction-time `ttl` config instead. External implementations such as `@inferagraph/redis-cache-provider` will satisfy the wider interface in their next bump.
 
 ## What's new in 0.8.1
 

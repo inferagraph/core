@@ -305,6 +305,15 @@ export class AIEngine {
    * {@link ensureEmbeddings} to avoid stale writes from racing computes.
    */
   private currentInferredEdgesRun = 0;
+  /**
+   * Buffer of warmup-path failures that happened OUTSIDE an active chat
+   * stream (typically background `ensureEmbeddings()` kicks fired by
+   * `setEmbeddingStore` / search). The next `chat()` call drains this buffer
+   * as `debug` events with phase `warmup-failed` so consumers see the
+   * diagnostic on the assistant turn instead of via stderr `console.warn`.
+   * Per chat call the buffer is fully consumed; entries are not repeated.
+   */
+  private pendingWarmupFailures: string[] = [];
 
   constructor(
     store: GraphStore,
@@ -697,6 +706,23 @@ export class AIEngine {
     if (signal?.aborted) {
       yield { type: 'done', reason: 'aborted' };
       return;
+    }
+
+    // Drain any buffered warmup failures from background `ensureEmbeddings`
+    // kicks. These were captured silently (no `console.warn`) so the chat
+    // turn is the diagnostic surface — hosts render them as grey debug
+    // badges underneath the assistant bubble.
+    if (this.pendingWarmupFailures.length > 0) {
+      const failures = this.pendingWarmupFailures.slice();
+      this.pendingWarmupFailures.length = 0;
+      for (const detail of failures) {
+        yield {
+          type: 'debug',
+          phase: 'warmup-failed',
+          detail,
+          conversationId,
+        };
+      }
     }
 
     // Fetch prior turns ONLY when both a conversationId is supplied AND a
@@ -1191,9 +1217,12 @@ export class AIEngine {
       return this.warmupPromise;
     }
     this.warmupSignature = sig;
-    this.warmupPromise = this.runWarmup(tier).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.warn('[InferaGraph AIEngine] ensureEmbeddings failed:', err);
+    this.warmupPromise = this.runWarmup(tier).catch((err: unknown) => {
+      // Route to the diagnostic surface instead of stderr — the next
+      // chat() drains this buffer as a `debug` / `warmup-failed` event.
+      this.pendingWarmupFailures.push(
+        `ensureEmbeddings failed: ${describeError(err)}`,
+      );
     });
     return this.warmupPromise;
   }
@@ -1338,9 +1367,10 @@ export class AIEngine {
     let vectors: Vector[];
     try {
       vectors = await embedFn(texts);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn('[InferaGraph AIEngine] embed batch failed:', err);
+    } catch (err: unknown) {
+      this.pendingWarmupFailures.push(
+        `embed batch failed: ${describeError(err)}`,
+      );
       return;
     }
     const generatedAt = new Date().toISOString();
@@ -2574,6 +2604,21 @@ function stableStringify(value: unknown): string {
     parts.push(JSON.stringify(k) + ':' + stableStringify(obj[k]));
   }
   return '{' + parts.join(',') + '}';
+}
+
+/**
+ * Coerce an unknown thrown value into a short human-readable string for
+ * the diagnostic surface (`ChatEvent.debug.detail`). Prefers `Error.message`,
+ * falls back to `String(err)`, and tolerates non-Error throws.
+ */
+function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message || err.name;
+  if (typeof err === 'string') return err;
+  try {
+    return String(err);
+  } catch {
+    return 'unknown error';
+  }
 }
 
 /**

@@ -155,6 +155,10 @@ export { ResponseHandler } from './ai/ResponseHandler.js';
 // Cache
 export { lruCache } from './cache/lruCache.js';
 export type { CacheProvider, CacheConfig } from './cache/lruCache.js';
+export {
+  inMemoryCacheProvider,
+  InMemoryCacheProvider,
+} from './cache/inMemoryCacheProvider.js';
 export { parseTTL } from './cache/parseTTL.js';
 
 // Animation

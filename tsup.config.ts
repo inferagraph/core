@@ -52,24 +52,30 @@ const useClientPlugin = (entryBasenames: string[]) => ({
   },
 });
 
-export default defineConfig([
-  {
-    entry: ['src/data.ts'],
-    format: ['esm', 'cjs'],
-    dts: true,
-    sourcemap: true,
-    clean: true,
-    external: ['react', 'react-dom', 'three'],
-    treeshake: true,
-  },
-  {
-    entry: ['src/index.ts', 'src/react.ts'],
-    format: ['esm', 'cjs'],
-    dts: true,
-    sourcemap: true,
-    clean: false,
-    external: ['react', 'react-dom', 'three'],
-    treeshake: true,
-    plugins: [useClientPlugin(['index', 'react'])],
-  },
-]);
+// Single-config build (was two configs pre-0.9.0):
+//
+// Splitting `data.ts` into its own tsup config caused tsup's DTS rollup
+// to emit independent `class AIEngine { #store; ... }` declarations in
+// `data.d.ts` AND in the index/react chunk. TypeScript treats two
+// private-field-bearing class declarations as nominally distinct, so a
+// value of `AIEngine` imported from `@inferagraph/core/data` was NOT
+// assignable to a slot typed via `@inferagraph/core` (and vice versa).
+//
+// Folding all three entries into a single config lets tsup share one
+// DTS rollup graph: shared classes hoist into one chunk file and each
+// entry's `.d.ts` references that chunk. Same nominal type from every
+// entry — the assignability collision goes away.
+//
+// The `'use client';` directive is still selective: the plugin only
+// prepends it to `index.*` and `react.*` outputs (entryBasenames),
+// leaving `data.*` clean for server-side / RSC consumers.
+export default defineConfig({
+  entry: ['src/data.ts', 'src/index.ts', 'src/react.ts'],
+  format: ['esm', 'cjs'],
+  dts: true,
+  sourcemap: true,
+  clean: true,
+  external: ['react', 'react-dom', 'three'],
+  treeshake: true,
+  plugins: [useClientPlugin(['index', 'react'])],
+});

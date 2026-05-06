@@ -56,6 +56,20 @@ export interface GraphIndexerConfig {
    * round-trip-amortization vs. provider request size limits. Default 16.
    */
   embeddingBatchSize?: number;
+  /**
+   * How many candidate inferred-edge pairs to send per `provider.complete`
+   * call. Default `1` (one prompt per pair, preserves pre-0.9.0 behavior).
+   *
+   * When set to K > 1, the indexer asks the LLM for K relationship
+   * descriptions in a single JSON-array response per batch. On a malformed
+   * batch response (non-JSON, missing `descriptions` array, or an array of
+   * the wrong length), the indexer falls back to per-pair calls for THAT
+   * batch and continues — one bad batch must not break the indexing pass.
+   *
+   * For an N-pair indexing run with batch size K, this drops the
+   * `provider.complete` cost from N to ceil(N/K) on the happy path.
+   */
+  inferredEdgeBatchSize?: number;
 }
 
 /** One progress callback payload emitted by {@link GraphIndexer}. */
@@ -112,6 +126,7 @@ export class GraphIndexer {
       inferredEdgeThreshold: config.inferredEdgeThreshold ?? 0.75,
       maxInferredEdgesPerNode: config.maxInferredEdgesPerNode ?? 5,
       embeddingBatchSize: config.embeddingBatchSize ?? 16,
+      inferredEdgeBatchSize: config.inferredEdgeBatchSize ?? 1,
     };
   }
 
@@ -386,59 +401,198 @@ export class GraphIndexer {
 
     const completeFn = provider.complete.bind(provider);
     const embedFn = provider.embed!.bind(provider);
+    const batchSize = Math.max(1, this.config.inferredEdgeBatchSize);
 
     const newEdges: InferredEdge[] = [];
     let processed = 0;
-    for (const c of accepted) {
-      const aTitle = pickTitle(store, c.a);
-      const bTitle = pickTitle(store, c.b);
-      const prompt =
-        `Two entities in a knowledge graph share strong semantic similarity (cosine ${c.score.toFixed(3)}).` +
-        ` Briefly describe their relationship in one short sentence.\n` +
-        `Entity A: ${aTitle}\n` +
-        `Entity B: ${bTitle}`;
-      let description = '';
-      try {
-        description = (await completeFn(prompt)).trim();
-      } catch {
-        // If the provider fails on a single pair, skip that pair but keep
-        // going; the indexer is best-effort, not all-or-nothing.
-        continue;
-      }
-      if (description.length === 0) description = 'Related entities';
 
-      let descriptionVector: Vector | undefined;
-      try {
-        const [v] = await embedFn([description]);
-        descriptionVector = v;
-      } catch {
-        // Description-vector failure is non-fatal — store the edge without
-        // an embedding. Hosts that need the vector for retrieval will
-        // re-run later.
-        descriptionVector = undefined;
-      }
-      void descriptionVector;
+    // Iterate accepted pairs in chunks of `batchSize`. With batchSize=1
+    // this degenerates to one prompt per pair (pre-0.9.0 behavior); with
+    // K>1 we ask the LLM for K descriptions in one JSON-array response,
+    // and fall back to per-pair on malformed responses.
+    for (let i = 0; i < accepted.length; i += batchSize) {
+      const chunk = accepted.slice(i, i + batchSize);
+      const titlesPerPair = chunk.map((c) => ({
+        aTitle: pickTitle(store, c.a),
+        bTitle: pickTitle(store, c.b),
+      }));
 
-      newEdges.push({
-        sourceId: c.a,
-        targetId: c.b,
-        type: 'related_to',
-        score: c.score,
-        sources: ['embedding', 'llm'],
-        reasoning: description,
-      });
-      processed += 1;
-      opts?.onProgress?.({
-        stage: 'inferred-edges',
-        completed: processed,
-        total: accepted.length,
-      });
+      let descriptions: (string | undefined)[] = chunk.map(() => undefined);
+
+      if (chunk.length > 1) {
+        // Try the batched-prompt path first.
+        const batchPrompt = buildBatchPrompt(chunk, titlesPerPair);
+        let raw = '';
+        let batchOk = false;
+        try {
+          raw = await completeFn(batchPrompt);
+          const parsed = parseBatchDescriptions(raw, chunk.length);
+          if (parsed) {
+            descriptions = parsed;
+            batchOk = true;
+          }
+        } catch {
+          // Batch call itself errored — fall through to per-pair below.
+          batchOk = false;
+        }
+        if (!batchOk) {
+          // Defensive fallback: malformed JSON / wrong array length / call
+          // threw → run per-pair calls for THIS batch only and continue.
+          descriptions = await runPerPairCompletes(
+            completeFn,
+            chunk,
+            titlesPerPair,
+          );
+        }
+      } else {
+        // batchSize-of-1 path — one prompt per pair.
+        descriptions = await runPerPairCompletes(
+          completeFn,
+          chunk,
+          titlesPerPair,
+        );
+      }
+
+      for (let j = 0; j < chunk.length; j++) {
+        const c = chunk[j];
+        const description = (descriptions[j] ?? '').trim() || 'Related entities';
+
+        let descriptionVector: Vector | undefined;
+        try {
+          const [v] = await embedFn([description]);
+          descriptionVector = v;
+        } catch {
+          // Description-vector failure is non-fatal — store the edge
+          // without an embedding. Hosts that need the vector for
+          // retrieval will re-run later.
+          descriptionVector = undefined;
+        }
+        void descriptionVector;
+
+        newEdges.push({
+          sourceId: c.a,
+          targetId: c.b,
+          type: 'related_to',
+          score: c.score,
+          sources: ['embedding', 'llm'],
+          reasoning: description,
+        });
+        processed += 1;
+        opts?.onProgress?.({
+          stage: 'inferred-edges',
+          completed: processed,
+          total: accepted.length,
+        });
+      }
     }
 
     if (newEdges.length === 0) return 0;
     await inferredEdgeStore.set([...existing, ...newEdges]);
     return newEdges.length;
   }
+}
+
+/** One pair-of-ids row used by the per-pair / batched description helpers. */
+interface PairChunkItem {
+  a: string;
+  b: string;
+  score: number;
+}
+
+/** Build the per-pair prompt the indexer used pre-0.9.0. */
+function buildSinglePrompt(
+  c: PairChunkItem,
+  titles: { aTitle: string; bTitle: string },
+): string {
+  return (
+    `Two entities in a knowledge graph share strong semantic similarity (cosine ${c.score.toFixed(3)}).` +
+    ` Briefly describe their relationship in one short sentence.\n` +
+    `Entity A: ${titles.aTitle}\n` +
+    `Entity B: ${titles.bTitle}`
+  );
+}
+
+/**
+ * Build the batched-prompt payload for K candidate pairs. Asks the LLM
+ * for a strict JSON object: `{"descriptions": [...]}` with K entries in
+ * the same order as the listed pairs.
+ */
+function buildBatchPrompt(
+  chunk: PairChunkItem[],
+  titlesPerPair: Array<{ aTitle: string; bTitle: string }>,
+): string {
+  const lines: string[] = [];
+  for (let i = 0; i < chunk.length; i++) {
+    const t = titlesPerPair[i];
+    lines.push(
+      `${i + 1}. ${t.aTitle} <-> ${t.bTitle} (cosine ${chunk[i].score.toFixed(3)})`,
+    );
+  }
+  return (
+    `You will be given ${chunk.length} candidate relationships between pairs of entities in a knowledge graph.\n` +
+    `For each pair, generate one short sentence describing the relationship from entity A to entity B.\n` +
+    `Return JSON only, with exactly ${chunk.length} entries in the same order as the list:\n` +
+    `{"descriptions": ["...", "..."]}\n\n` +
+    `Pairs:\n${lines.join('\n')}`
+  );
+}
+
+/**
+ * Defensive parse of a batched-prompt response. Returns the array of
+ * descriptions when the response is valid JSON of shape
+ * `{descriptions: string[]}` AND the array length matches `expected`.
+ * Returns `undefined` on any malformed shape so the caller can fall back
+ * to per-pair calls.
+ */
+function parseBatchDescriptions(
+  raw: string,
+  expected: number,
+): string[] | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  // Strip a leading code-fence (```json ... ```) if the model added one.
+  const trimmed = raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  const descs = (parsed as { descriptions?: unknown }).descriptions;
+  if (!Array.isArray(descs)) return undefined;
+  if (descs.length !== expected) return undefined;
+  const out: string[] = [];
+  for (const d of descs) {
+    if (typeof d !== 'string') return undefined;
+    out.push(d);
+  }
+  return out;
+}
+
+/**
+ * Per-pair completion fallback. Used both for the batchSize-of-1 path
+ * AND for malformed-batch fallback. A single pair throwing is silently
+ * skipped (description left `undefined`) — best-effort indexing.
+ */
+async function runPerPairCompletes(
+  completeFn: (prompt: string) => Promise<string>,
+  chunk: PairChunkItem[],
+  titlesPerPair: Array<{ aTitle: string; bTitle: string }>,
+): Promise<(string | undefined)[]> {
+  const out: (string | undefined)[] = chunk.map(() => undefined);
+  for (let i = 0; i < chunk.length; i++) {
+    try {
+      const reply = await completeFn(buildSinglePrompt(chunk[i], titlesPerPair[i]));
+      out[i] = reply;
+    } catch {
+      out[i] = undefined;
+    }
+  }
+  return out;
 }
 
 function pairKey(a: string, b: string): string {
