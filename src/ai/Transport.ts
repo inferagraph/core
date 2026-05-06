@@ -130,15 +130,22 @@ export function httpTransport(config: HttpTransportConfig): Transport {
           headers[k] = v;
         });
       }
+      // Build the request body. `conversationId` is omitted entirely
+      // (key not present, not `null`) when undefined so server routes that
+      // treat "missing" as "generate a fresh id" still behave correctly.
+      const body: { message: string; emitToolCalls: boolean; conversationId?: string } = {
+        message,
+        emitToolCalls: !!opts?.emitToolCalls,
+      };
+      if (typeof opts?.conversationId === 'string') {
+        body.conversationId = opts.conversationId;
+      }
       let response: Response;
       try {
         response = await fetchFn(config.url, {
           method: 'POST',
           headers,
-          body: JSON.stringify({
-            message,
-            emitToolCalls: !!opts?.emitToolCalls,
-          }),
+          body: JSON.stringify(body),
           signal: opts?.signal,
         });
       } catch (err) {

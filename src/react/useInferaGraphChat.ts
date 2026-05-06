@@ -26,7 +26,18 @@ export interface InferaGraphChatHook {
    */
   chat: (
     message: string,
-    opts?: { signal?: AbortSignal },
+    opts?: {
+      signal?: AbortSignal;
+      /**
+       * Optional conversation id, forwarded to the active transport. When
+       * the HTTP transport is in use the id flows into the request body
+       * so the server route can thread it into its `ConversationStore`;
+       * with the in-process transport the id is forwarded directly to
+       * `AIEngine.chat`. Omit to opt out of conversation memory for this
+       * call.
+       */
+      conversationId?: string;
+    },
   ) => AsyncIterable<ChatEvent>;
 }
 
@@ -61,7 +72,10 @@ export function useInferaGraphChat(): InferaGraphChatHook {
   ctxRef.current = ctx;
 
   const chat = useCallback(
-    (message: string, opts?: { signal?: AbortSignal }): AsyncIterable<ChatEvent> => {
+    (
+      message: string,
+      opts?: { signal?: AbortSignal; conversationId?: string },
+    ): AsyncIterable<ChatEvent> => {
       const live = ctxRef.current;
       if (!live.getTransport()) {
         throw new Error(
@@ -72,6 +86,13 @@ export function useInferaGraphChat(): InferaGraphChatHook {
         signal: opts?.signal,
         emitToolCalls: true,
       };
+      // Only set conversationId when the caller provided it — the
+      // transport layer treats "missing" and "undefined" as equivalent
+      // ("opt out of memory"), but we keep the field out of the options
+      // object so HTTP serialization stays clean (no `null` keys).
+      if (typeof opts?.conversationId === 'string') {
+        chatOpts.conversationId = opts.conversationId;
+      }
       return runChat(message, chatOpts, live);
     },
     [],

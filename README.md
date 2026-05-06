@@ -1,6 +1,6 @@
 # @inferagraph/core
 
-AI-powered knowledge graph platform with WebGL visualization. **v0.8.0** — Phase 1 RAG architecture (hybrid retrieval + conversation memory + cross-encoder rerank + library-driven indexing).
+AI-powered knowledge graph platform with WebGL visualization. **v0.8.1** — Phase 1 RAG architecture (hybrid retrieval + conversation memory + cross-encoder rerank + library-driven indexing).
 
 InferaGraph is a self-contained platform that holds graph data, performs AI reasoning via LLM, and renders interactive 3D visualizations. The consuming application is a thin shell that feeds data and displays results — it never invokes the LLM directly.
 
@@ -25,6 +25,11 @@ InferaGraph is a self-contained platform that holds graph data, performs AI reas
 - Pluggable LLM providers (Anthropic, OpenAI, Azure AI Foundry); host-blind core
 - React entry point + a separate `data` entry for Next.js RSC contexts
 - CSS-themable overlays and controls
+
+## What's new in 0.8.1
+
+- `httpTransport` now forwards `conversationId` from `ChatOptions` into the request body (`{ message, emitToolCalls, conversationId? }`). Omitted when undefined so server routes that treat "missing" as "generate a fresh id" still behave correctly.
+- `useInferaGraphChat().chat(message, { conversationId })` accepts a per-call `conversationId`; the hook forwards it to the active transport so hosts no longer need to bypass the hook to thread conversation memory through their server route.
 
 ## What's new in 0.8.0
 
