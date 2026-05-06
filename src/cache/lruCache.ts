@@ -4,18 +4,33 @@ import { parseTTL } from './parseTTL.js';
  * Pluggable cache backend for LLM responses inside `@inferagraph/core`.
  *
  * Implementations are responsible for enforcing their own bounds (entry count,
- * TTL, memory ceiling, etc.). Consumers do NOT pass per-entry TTLs — the cache
- * is configured once at construction and applies its policy uniformly.
+ * TTL, memory ceiling, etc.). The cache is configured once at construction
+ * and applies its policy uniformly; the optional per-call `{ ttlSeconds }`
+ * override on `set` lets a caller request a tighter expiry for a specific
+ * entry, but implementations are free to honor it or fall back to their
+ * construction-time policy when a per-entry TTL is incompatible with their
+ * eviction strategy (e.g. fixed-size LRU).
  *
- * The shape is intentionally tiny: `get` / `set` / `clear`. That's enough for
- * the AI engine's needs and lets external implementations (Redis, IndexedDB,
- * etc.) target a stable contract.
+ * The shape is intentionally small: `get` / `set` / `delete` / `clear`. That
+ * lets external implementations (Redis, IndexedDB, etc.) target a stable
+ * contract.
  */
 export interface CacheProvider {
   /** Look up a value by key. Returns `undefined` on miss. */
   get(key: string): Promise<string | undefined>;
-  /** Store a value. Cache enforces its own bounds; consumers don't pass per-entry TTLs. */
-  set(key: string, value: string): Promise<void>;
+  /**
+   * Store a value. When `opts.ttlSeconds` is provided, the entry expires
+   * after that many seconds; when omitted, the implementation falls back
+   * to its construction-time default (or no TTL if no default is configured).
+   * Implementations MAY ignore `opts.ttlSeconds` if a per-entry TTL is
+   * incompatible with their eviction strategy.
+   */
+  set(key: string, value: string, opts?: { ttlSeconds?: number }): Promise<void>;
+  /**
+   * Remove a single entry. Idempotent — deleting a missing key is a no-op
+   * and must NOT throw. Distinct from `clear()`, which wipes the whole cache.
+   */
+  delete(key: string): Promise<void>;
   /** Drop everything. Called by `AIEngine` when the LLM provider instance changes. */
   clear(): Promise<void>;
 }
@@ -84,7 +99,15 @@ class InMemoryLRUCache implements CacheProvider {
     return entry.value;
   }
 
-  async set(key: string, value: string): Promise<void> {
+  async set(
+    key: string,
+    value: string,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _opts?: { ttlSeconds?: number },
+  ): Promise<void> {
+    // LRU's TTL policy is fixed at construction (`ttl` config). A per-call
+    // override would interact awkwardly with size-based eviction order, so
+    // we accept the wider CacheProvider signature but ignore `_opts`.
     const expiresAt = this.ttlMs === -1 ? Infinity : Date.now() + this.ttlMs;
 
     if (this.map.has(key)) {
@@ -100,6 +123,10 @@ class InMemoryLRUCache implements CacheProvider {
         this.map.delete(oldestKey);
       }
     }
+  }
+
+  async delete(key: string): Promise<void> {
+    this.map.delete(key);
   }
 
   async clear(): Promise<void> {

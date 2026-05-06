@@ -206,6 +206,44 @@ describe('lruCache', () => {
     });
   });
 
+  describe('delete()', () => {
+    it('removes the entry', async () => {
+      const cache = lruCache({ maxEntries: 10 });
+      await cache.set('a', '1');
+      await cache.set('b', '2');
+      await cache.delete('a');
+      expect(await cache.get('a')).toBeUndefined();
+      expect(await cache.get('b')).toBe('2');
+    });
+
+    it('is idempotent on missing keys', async () => {
+      const cache = lruCache({ maxEntries: 10 });
+      await expect(cache.delete('never-set')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('per-call ttlSeconds is accepted but ignored', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    // lruCache's TTL policy is set once at construction (`ttl` config). The
+    // wider CacheProvider interface accepts a per-call `{ ttlSeconds }`
+    // override; LRU semantics make a per-entry override leaky (it would
+    // interact awkwardly with eviction order), so the LRU impl honors
+    // construction-time TTL only and ignores the per-call value.
+    it('the construction-time ttl wins over a per-call ttlSeconds', async () => {
+      const cache = lruCache({ ttl: '5m' });
+      // Per-call asks for 1 hour; LRU ignores it and uses the 5m construction TTL.
+      await cache.set('a', '1', { ttlSeconds: 60 * 60 });
+      vi.setSystemTime(Date.now() + 5 * 60 * 1000 + 1);
+      expect(await cache.get('a')).toBeUndefined();
+    });
+  });
+
   describe('get() on miss', () => {
     it('returns undefined', async () => {
       const cache = lruCache();

@@ -77,6 +77,7 @@ export type ChatEvent =
       phase:
         | 'stream-opened'
         | 'warmup-blocking'
+        | 'warmup-failed'
         | 'vector-search'
         | 'rerank'
         | 'pronoun-resolve'
