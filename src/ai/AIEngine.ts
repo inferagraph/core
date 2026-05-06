@@ -83,7 +83,7 @@ const BUILT_IN_TOOLS: LLMToolDefinition[] = [
   {
     name: 'apply_filter',
     description:
-      'Restrict which nodes are visible. Pass a domain-agnostic filter spec keyed by node attribute names. A node matches when, for EVERY key in the spec, the node\'s attribute value (or any element of an array attribute) is one of the listed strings.',
+      'Restrict which nodes are visible. Use ONLY when the user EXPLICITLY asks to filter ("show only X", "hide events") — never auto-filter in response to a question about the data, because that hides the answer. Pass a domain-agnostic filter spec keyed by node attribute names. A node matches when, for EVERY key in the spec, the node\'s attribute value (or any element of an array attribute) is one of the listed strings.',
     parameters: {
       type: 'object',
       properties: {
@@ -103,14 +103,15 @@ const BUILT_IN_TOOLS: LLMToolDefinition[] = [
   {
     name: 'highlight',
     description:
-      'Emphasize a set of nodes. Non-highlighted nodes dim. Pass an empty list to clear highlight.',
+      'Highlight every node referenced in your answer — the subject of the question PLUS the objects of the answer. Other nodes fade automatically. Pass an empty list to clear the highlight. This tool MUST accompany the streamed text on every graph-relevant response.',
     parameters: {
       type: 'object',
       properties: {
         ids: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Node ids to highlight.',
+          description:
+            'Node ids to highlight. Include EVERY node referenced by your answer, including the subject of the user\'s question.',
         },
       },
       required: ['ids'],
@@ -1086,23 +1087,50 @@ export class AIEngine {
    * Build the system + user prompt sent to the LLM for `chat()`. The
    * prompt teaches the LLM about the available tools (visual instructions)
    * AND the dataset schema so it can construct valid `apply_filter` specs.
+   *
+   * Contract: every graph-relevant response MUST emit BOTH a streamed text
+   * answer AND a `highlight(ids)` tool call covering every node referenced
+   * by the answer (the subject of the question PLUS the objects of the
+   * answer). Soft "prefer" wording is forbidden — tool-use-trained models
+   * read it as permission to skip the text and emit only a tool call, which
+   * the host then filters out of its display path, leaving the user with
+   * nothing on screen.
    */
   private buildChatPrompt(message: string, schema: SchemaSummary): string {
     const schemaBlock = renderSchemaBlock(schema, this.schemaSampleSize);
     return [
       'You are an assistant embedded inside an interactive graph visualization.',
-      'You help the user explore the graph by emitting a mix of conversational text and visual-instruction tool calls.',
+      'The host application renders the graph and shows your conversational text alongside it. Both halves matter — the text explains, the visual shows.',
       '',
-      'Available tools:',
-      '- apply_filter(spec): restrict which nodes are visible.',
-      '- highlight(ids): emphasize a set of nodes; others dim.',
-      '- focus(nodeId): animate the camera to a node.',
-      '- annotate(nodeId, text): attach a sticky note to a node.',
+      'Every response that touches the graph MUST emit BOTH:',
+      '',
+      '  1. Conversational text. Stream a clear, brief prose answer that addresses the user\'s question.',
+      '',
+      '  2. A `highlight(ids)` tool call listing EVERY node referenced in your answer — including the subject of the question, not only the objects of the answer. Every node that is part of "what the user is asking about" goes into the `ids` list. Other nodes fade automatically.',
+      '',
+      'If the question has no graph relevance (e.g. "how do I use you?"), reply with text only. Otherwise, never text-only and never tool-call-only.',
+      '',
+      'Other tools (use them additively to `highlight`, never as a replacement):',
+      '',
+      '  - `focus(nodeId)` — animate the camera to one anchor node when the question is centered on a single node.',
+      '  - `apply_filter(spec)` — restrict visibility. Use ONLY when the user EXPLICITLY asks to filter ("show only X", "hide events"). Do NOT auto-filter on questions about the data — that hides the answer.',
+      '  - `annotate(nodeId, text)` — attach a sticky note to a node.',
+      '',
+      'Examples:',
+      '  User: "Who lived in Eden?"',
+      '  → text: "Adam and Eve dwelt in the Garden of Eden."',
+      '  → highlight(["garden-of-eden", "adam", "eve"])  ← all three: the place asked about plus the people who lived there.',
+      '',
+      '  User: "Tell me about Noah."',
+      '  → text: a short biography',
+      '  → highlight(["noah"])',
+      '  → focus("noah")',
+      '',
+      '  User: "How do I use this?"',
+      '  → text only — no graph entities involved.',
       '',
       'Dataset schema (attribute keys and a sample of observed values):',
       schemaBlock,
-      '',
-      'When the user asks a visual question (e.g. "show me only X"), prefer emitting a tool call. When they ask for explanation, emit conversational text.',
       '',
       `User: ${message}`,
     ].join('\n');
