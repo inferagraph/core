@@ -390,6 +390,78 @@ describe('AIEngine.chat()', () => {
     });
   });
 
+  // The chat prompt is a hard contract with the LLM. Tool-use-trained models
+  // (e.g. gpt-5.4-mini and similar) treat soft "prefer" wording as permission
+  // to skip the text and emit only a tool call — which then gets filtered out
+  // of the host's display path, leaving the user with nothing on screen. The
+  // prompt MUST require BOTH a streamed text answer AND a `highlight` tool
+  // call covering every node referenced by the answer (subject + objects).
+  describe('chat prompt contract', () => {
+    async function getPrompt(message: string): Promise<string> {
+      const provider = mockLLMProvider(() => 'ok');
+      engine.setProvider(provider);
+      await collect(engine.chat(message));
+      return provider.getLastPrompt() ?? '';
+    }
+
+    it('requires both text and highlight in every graph-relevant response', async () => {
+      const prompt = await getPrompt('Who lived in Eden?');
+      // Hard "MUST" contract, not soft "prefer".
+      expect(prompt).toContain('MUST');
+      expect(prompt).toMatch(/text/i);
+      expect(prompt).toMatch(/highlight/);
+      // The previous soft phrasing is removed entirely so trained models can
+      // not read it as permission to skip text.
+      expect(prompt).not.toMatch(/prefer/i);
+    });
+
+    it('instructs highlight to cover EVERY referenced node including subjects', async () => {
+      const prompt = await getPrompt('Who lived in Eden?');
+      // The model must include the subject of the question, not just the
+      // objects of the answer (Eden + Adam + Eve, never just Adam + Eve).
+      expect(prompt).toMatch(/EVERY node referenced/);
+      expect(prompt).toMatch(/subject/);
+    });
+
+    it('restricts apply_filter to explicit user filter requests', async () => {
+      const prompt = await getPrompt('Who lived in Eden?');
+      // apply_filter is for "show only X" / "hide Y" — never auto-applied to
+      // questions about the data, because that hides the answer.
+      expect(prompt).toMatch(/apply_filter/);
+      expect(prompt).toMatch(/explicit/i);
+      expect(prompt).toMatch(/show only|hide/i);
+    });
+
+    it('allows text-only when no graph entities are relevant', async () => {
+      const prompt = await getPrompt('How do I use this?');
+      // Out-of-graph questions ("how do I use you?") may be answered with text
+      // alone; the "MUST emit highlight" rule applies to graph-relevant turns.
+      expect(prompt).toMatch(/no graph relevance|text only/i);
+    });
+
+    it('declares highlight as the "every referenced node" tool to the provider', async () => {
+      const provider = mockLLMProvider(() => 'ok');
+      engine.setProvider(provider);
+      await collect(engine.chat('hi'));
+      const opts = provider.getLastStreamOptions();
+      const tool = (opts?.tools ?? []).find((t) => t.name === 'highlight');
+      expect(tool).toBeDefined();
+      expect(tool!.description).toMatch(/every node referenced/i);
+      expect(tool!.description).toMatch(/subject/i);
+    });
+
+    it('declares apply_filter as explicit-user-request-only to the provider', async () => {
+      const provider = mockLLMProvider(() => 'ok');
+      engine.setProvider(provider);
+      await collect(engine.chat('hi'));
+      const opts = provider.getLastStreamOptions();
+      const tool = (opts?.tools ?? []).find((t) => t.name === 'apply_filter');
+      expect(tool).toBeDefined();
+      expect(tool!.description).toMatch(/explicit/i);
+      expect(tool!.description).toMatch(/show only|hide/i);
+    });
+  });
+
   describe('set_inferred_visibility tool', () => {
     it('translates set_inferred_visibility(true) into a typed event', async () => {
       const provider = mockLLMProvider((): LLMStreamEvent[] => [
