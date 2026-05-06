@@ -3,6 +3,7 @@ import {
   cosineSimilarity,
   type EmbeddingRecord,
   type EmbeddingStore,
+  type SearchVectorHit,
   type SimilarHit,
   type Vector,
 } from './Embedding.js';
@@ -80,6 +81,34 @@ class InMemoryEmbeddingStore implements EmbeddingStore {
 
   async clear(): Promise<void> {
     this.map.clear();
+  }
+
+  /**
+   * Vector-native top-K (Phase 1 / 0.8.0). In-memory implementation is a
+   * linear scan over the same map {@link similar} uses, with no model /
+   * version filter (production stores split containers; in-memory keeps a
+   * single bucket and ignores the `container` arg). Per-nodeId
+   * deduplication keeps the best score across multiple content hashes,
+   * mirroring {@link similar}'s contract.
+   */
+  async searchVector(
+    queryEmbedding: Vector,
+    opts: { top: number; container?: 'units' | 'inferred_edges' },
+  ): Promise<SearchVectorHit[]> {
+    // `container` is intentionally unread — in-memory stores share one bucket.
+    void opts.container;
+    if (opts.top <= 0) return [];
+    const seen = new Map<NodeId, number>();
+    for (const record of this.map.values()) {
+      const score = cosineSimilarity(queryEmbedding, record.vector);
+      if (Number.isNaN(score)) continue;
+      const prev = seen.get(record.nodeId);
+      if (prev === undefined || score > prev) seen.set(record.nodeId, score);
+    }
+    const hits: SearchVectorHit[] = [];
+    for (const [nodeId, score] of seen) hits.push({ nodeId, score });
+    hits.sort((a, b) => b.score - a.score);
+    return hits.slice(0, opts.top);
   }
 
   /** Test-only inspection helper: how many records are stored. */

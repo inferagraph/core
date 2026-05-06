@@ -327,6 +327,52 @@ function reconstructChatEvent(parsed: unknown): ChatEvent | null {
       if (error) event.error = error;
       return event;
     }
+    case 'debug': {
+      // Phase is required and must be one of the published enum values.
+      // Anything else is dropped so a stray host-emitted shape can't
+      // contaminate the host's badge surface.
+      const ALLOWED_PHASES = [
+        'stream-opened',
+        'warmup-blocking',
+        'vector-search',
+        'rerank',
+        'pronoun-resolve',
+        'retrieval-complete',
+        'retrieval-empty',
+        'substitution-fired',
+        'engine-empty',
+        'conversation-cleared',
+      ] as const;
+      const phase = p.phase;
+      if (
+        typeof phase !== 'string' ||
+        !(ALLOWED_PHASES as readonly string[]).includes(phase)
+      ) {
+        return null;
+      }
+      const event: Extract<ChatEvent, { type: 'debug' }> = {
+        type: 'debug',
+        phase: phase as Extract<ChatEvent, { type: 'debug' }>['phase'],
+      };
+      if (typeof p.detail === 'string') event.detail = p.detail;
+      if (
+        p.counters &&
+        typeof p.counters === 'object' &&
+        !Array.isArray(p.counters)
+      ) {
+        const safe: Record<string, number> = {};
+        for (const [k, v] of Object.entries(
+          p.counters as Record<string, unknown>,
+        )) {
+          if (typeof v === 'number' && Number.isFinite(v)) safe[k] = v;
+        }
+        event.counters = safe;
+      }
+      if (typeof p.conversationId === 'string') {
+        event.conversationId = p.conversationId;
+      }
+      return event;
+    }
     default:
       return null;
   }

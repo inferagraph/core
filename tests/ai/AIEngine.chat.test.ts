@@ -1046,9 +1046,13 @@ describe('AIEngine.chat()', () => {
       );
       const texts = events.filter((e) => e.type === 'text');
       expect(texts).toHaveLength(1);
-      expect((texts[0] as Extract<ChatEvent, { type: 'text' }>).delta).toMatch(
-        /Showing|Found/,
-      );
+      // Per the Phase 1 (0.8.0) contract, synthesized text is grounded
+      // in the first retrieved node — not the legacy "Showing X, Y, Z."
+      // catalog roll-up. Just assert non-empty so the test stays robust
+      // across whatever first-node content the catalog picks.
+      expect(
+        (texts[0] as Extract<ChatEvent, { type: 'text' }>).delta.length,
+      ).toBeGreaterThan(0);
       // Tool calls preserved in their original order.
       const types = events.map((e) => e.type);
       expect(types.indexOf('highlight')).toBeLessThan(types.indexOf('focus'));

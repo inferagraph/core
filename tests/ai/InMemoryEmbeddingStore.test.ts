@@ -164,4 +164,17 @@ describe('inMemoryEmbeddingStore', () => {
       expect(hits).toEqual([]);
     });
   });
+
+  describe('searchVector()', () => {
+    it('returns the top-N nodes ranked by cosine similarity', async () => {
+      await store.set(record('a', [1, 0, 0]));
+      await store.set(record('b', [0.9, 0.1, 0]));
+      await store.set(record('c', [0, 1, 0]));
+      const sv = (store as EmbeddingStore).searchVector;
+      expect(typeof sv).toBe('function');
+      const hits = await store.searchVector!([1, 0, 0], { top: 2 });
+      expect(hits.map((h) => h.nodeId)).toEqual(['a', 'b']);
+      expect(hits[0].score).toBeGreaterThan(hits[1].score);
+    });
+  });
 });

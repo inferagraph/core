@@ -30,6 +30,10 @@ import { computeGraphInferences } from './inference/graph.js';
 import { computeEmbeddingInferences } from './inference/embedding.js';
 import { computeLLMInferences } from './inference/llm.js';
 import { mergeInferences } from './inference/merge.js';
+import type {
+  ConversationStore,
+  ConversationTurn,
+} from './ConversationStore.js';
 
 /**
  * Tunables for the AI engine. Phase 1 deliberately keeps this small — chat,
@@ -78,6 +82,34 @@ export interface AIEngineConfig {
    * content body. Defaults to 3200.
    */
   chatContentBudgetTokens?: number;
+  /**
+   * Per-host content-priority keys passed to {@link embeddingText}. The
+   * engine uses these for both warmup embeddings and prompt rendering.
+   * Default: `['content', 'description', 'body', 'summary']` (the same
+   * defaults {@link embeddingText} ships).
+   */
+  embeddingContentKeys?: readonly string[];
+  /**
+   * Whether to run the cross-encoder rerank pass after hybrid retrieval.
+   * Default `true`. Disable to save the per-candidate `provider.complete`
+   * calls (faster + cheaper, lower quality).
+   */
+  chatRerankEnabled?: boolean;
+  /**
+   * How many candidates the hybrid-retrieval merger feeds to the rerank
+   * pass. Default 20.
+   */
+  chatRerankCandidates?: number;
+  /**
+   * How many candidates survive the rerank pass and reach the chat prompt.
+   * Default 8.
+   */
+  chatRerankTopK?: number;
+  /**
+   * How many prior conversation turns to splice into the chat messages
+   * array when a {@link ConversationStore} is set. Default 8.
+   */
+  priorTurnLimit?: number;
 }
 
 /** Internal: which embedding storage path is currently active. */
@@ -231,12 +263,20 @@ export class AIEngine {
   private readonly chatContentSize: number;
   private readonly chatContentMaxTokens: number;
   private readonly chatContentBudgetTokens: number;
+  private readonly embeddingContentKeys: readonly string[];
+  private readonly chatRerankEnabled: boolean;
+  private readonly chatRerankCandidates: number;
+  private readonly chatRerankTopK: number;
+  private readonly priorTurnLimit: number;
   private readonly inspector: SchemaInspector;
   private readonly keywordEngine: SearchEngine;
   private provider: LLMProvider | undefined;
   private cache: CacheProvider | undefined;
   private embeddingStore: EmbeddingStore | undefined;
   private inferredEdgeStore: InferredEdgeStore | undefined;
+  private conversationStore: ConversationStore | undefined;
+  /** Per-process rerank cache, keyed by `(conversationId, queryHash, candidateIds)`. */
+  private readonly rerankCache = new Map<string, string[]>();
   /**
    * Reference identity of the last provider seen by any cached operation.
    * Per the user's design choice, switching the provider instance triggers a
@@ -278,6 +318,16 @@ export class AIEngine {
     this.chatContentSize = config?.chatContentSize ?? 4;
     this.chatContentMaxTokens = config?.chatContentMaxTokens ?? 800;
     this.chatContentBudgetTokens = config?.chatContentBudgetTokens ?? 3200;
+    this.embeddingContentKeys = config?.embeddingContentKeys ?? [
+      'content',
+      'description',
+      'body',
+      'summary',
+    ];
+    this.chatRerankEnabled = config?.chatRerankEnabled ?? true;
+    this.chatRerankCandidates = config?.chatRerankCandidates ?? 20;
+    this.chatRerankTopK = config?.chatRerankTopK ?? 8;
+    this.priorTurnLimit = config?.priorTurnLimit ?? 8;
     this.inspector = new SchemaInspector(store, {
       maxSamplesPerAttribute: this.schemaSampleSize,
     });
@@ -341,6 +391,21 @@ export class AIEngine {
   /** Get the current inferred-edge store, or `undefined` if none configured. */
   getInferredEdgeStore(): InferredEdgeStore | undefined {
     return this.inferredEdgeStore;
+  }
+
+  /**
+   * Inject (or replace) the {@link ConversationStore} used by multi-turn
+   * chat memory. Pass `undefined` to disable conversation memory entirely
+   * — chat calls then ignore the `conversationId` opt and never persist
+   * turns.
+   */
+  setConversationStore(store: ConversationStore | undefined): void {
+    this.conversationStore = store;
+  }
+
+  /** Get the current conversation store, or `undefined` if none configured. */
+  getConversationStore(): ConversationStore | undefined {
+    return this.conversationStore;
   }
 
   /**
@@ -619,6 +684,7 @@ export class AIEngine {
     const trimmed = message?.trim() ?? '';
     const emitToolCalls = !!opts?.emitToolCalls;
     const signal = opts?.signal;
+    const conversationId = opts?.conversationId;
 
     if (trimmed.length === 0) {
       yield { type: 'done', reason: 'stop' };
@@ -633,10 +699,84 @@ export class AIEngine {
       return;
     }
 
+    // Fetch prior turns ONLY when both a conversationId is supplied AND a
+    // store is configured. The pronoun-resolution block uses the most
+    // recent assistant turn's `retrievedNodeIds`.
+    let priorTurns: ConversationTurn[] = [];
+    let priorRetrievedIds: string[] = [];
+    if (conversationId && this.conversationStore) {
+      try {
+        priorTurns = await this.conversationStore.getTurns(
+          conversationId,
+          this.priorTurnLimit,
+        );
+      } catch {
+        priorTurns = [];
+      }
+      // Pull retrievedNodeIds from the most recent assistant turn for
+      // pronoun resolution.
+      for (let i = priorTurns.length - 1; i >= 0; i--) {
+        if (priorTurns[i].role === 'assistant' && priorTurns[i].retrievedNodeIds) {
+          priorRetrievedIds = priorTurns[i].retrievedNodeIds!.slice();
+          break;
+        }
+      }
+    }
+
     const schema = this.discoverSchema();
-    const relevantNodes = await this.collectRelevantNodes(trimmed);
-    const messages = this.buildChatMessages(trimmed, schema, relevantNodes);
+    await this.refreshInferredEdgesSnapshot();
+    // Hybrid retrieval — semantic + keyword + 1-hop graph expansion.
+    const retrievalResult = await this.runHybridRetrieval(trimmed);
+    let relevantNodes = retrievalResult.nodes;
+    let emittedRetrievalEmpty = false;
+    if (relevantNodes.length === 0) {
+      // Engine no longer head-truncates the catalog — empty stays empty.
+      yield {
+        type: 'debug',
+        phase: 'retrieval-empty',
+        detail: 'no semantic, keyword, or graph-expansion hits',
+        conversationId,
+      };
+      emittedRetrievalEmpty = true;
+    }
+
+    // Cross-encoder rerank pass (gated by config).
+    if (
+      this.chatRerankEnabled &&
+      relevantNodes.length > 0 &&
+      this.provider
+    ) {
+      relevantNodes = await this.runRerank(
+        trimmed,
+        relevantNodes,
+        conversationId,
+      );
+    }
+
+    // Detect pronouns; only inject the prior-entities block when both
+    // pronouns AND prior retrievedNodeIds are present.
+    const usePronounBlock =
+      hasPronouns(trimmed) && priorRetrievedIds.length > 0;
+    const pronounIds = usePronounBlock ? priorRetrievedIds : [];
+
+    const baseMessages = this.buildChatMessages(
+      trimmed,
+      schema,
+      relevantNodes,
+      { pronounIds },
+    );
+    // Splice prior turns BETWEEN the system message and the current user
+    // message so the model sees: [system, ...prior, current-user].
+    const messages: LLMMessage[] = [
+      baseMessages[0], // system
+      ...priorTurns.map((t) => ({
+        role: t.role,
+        content: t.content,
+      })),
+      baseMessages[1], // current user
+    ];
     const tools = BUILT_IN_TOOLS;
+    void emittedRetrievalEmpty;
 
     // ---- Cache: replay if we have one. The key hashes the structured
     //      messages array deterministically so a system-message edit
@@ -663,6 +803,7 @@ export class AIEngine {
     const collected: LLMStreamEvent[] = [];
     let attempt = 0;
     let abortedDuringStream = false;
+    let assistantText = '';
 
     try {
       while (attempt <= MAX_RETRIES) {
@@ -733,6 +874,7 @@ export class AIEngine {
           relevantNodes,
           signal,
         )) {
+          if (out.type === 'text') assistantText += out.delta;
           yield out;
         }
         break;
@@ -760,6 +902,43 @@ export class AIEngine {
     // intentionally not cached (the user canceled before completion).
     if (!signal?.aborted) {
       await this.persistChatCache(cacheKey, collected);
+      await this.persistConversationTurn(
+        conversationId,
+        trimmed,
+        assistantText,
+        relevantNodes.map((n) => n.id),
+      );
+    }
+  }
+
+  /**
+   * Internal: persist the current chat turn to the conversation store, if
+   * one is configured and a conversationId was supplied. Stores the user
+   * turn followed by the assistant turn (with `retrievedNodeIds`).
+   * Failures are swallowed — chat is best-effort.
+   */
+  private async persistConversationTurn(
+    conversationId: string | undefined,
+    userText: string,
+    assistantText: string,
+    retrievedNodeIds: string[],
+  ): Promise<void> {
+    if (!conversationId || !this.conversationStore) return;
+    const now = Date.now();
+    try {
+      await this.conversationStore.appendTurn(conversationId, {
+        role: 'user',
+        content: userText,
+        timestamp: now,
+      });
+      await this.conversationStore.appendTurn(conversationId, {
+        role: 'assistant',
+        content: assistantText,
+        timestamp: now + 1,
+        retrievedNodeIds: retrievedNodeIds.slice(),
+      });
+    } catch {
+      // Conversation persistence failures must never break a chat.
     }
   }
 
@@ -815,91 +994,95 @@ export class AIEngine {
     relevantNodes: ReadonlyArray<NodeData>,
     signal: AbortSignal | undefined,
   ): AsyncGenerator<ChatEvent, void, unknown> {
-    const bufferedToolCalls: ChatEvent[] = [];
-    let textCount = 0;
-    let sawNonEmptyHighlight = false;
-    let sawAnyHighlightAttempt = false;
-    let doneEvent: Extract<LLMStreamEvent, { type: 'done' }> | undefined;
-    let sawDone = false;
+    // Pure-reducer rewrite (Phase 1 / 0.8.0): single pass over the final
+    // attempt's events accumulating the four signals we care about
+    // (`textCount`, `eventCount`, `highlightSeen`, `highlightIds`), then a
+    // deterministic fallback step. No cross-attempt state — the previous
+    // implementation tracked `sawAnyHighlightAttempt` across retries via
+    // class-level mutable fields, which raced.
+    interface Reduced {
+      eventCount: number;
+      textCount: number;
+      highlightSeen: boolean;
+      highlightIds: Set<string>;
+      bufferedToolCalls: ChatEvent[];
+      doneReason?: 'stop' | 'length' | 'aborted';
+      sawDone: boolean;
+      textBuffer: string;
+    }
+
+    const reduced: Reduced = {
+      eventCount: 0,
+      textCount: 0,
+      highlightSeen: false,
+      highlightIds: new Set<string>(),
+      bufferedToolCalls: [],
+      sawDone: false,
+      textBuffer: '',
+    };
 
     for (const ev of events) {
+      reduced.eventCount += 1;
       if (signal?.aborted) {
         yield { type: 'done', reason: 'aborted' };
         return;
       }
       if (ev.type === 'text') {
-        textCount += 1;
+        reduced.textCount += 1;
+        reduced.textBuffer += ev.delta;
         yield { type: 'text', delta: ev.delta };
         continue;
       }
       if (ev.type === 'done') {
-        doneEvent = ev;
-        sawDone = true;
-        break;
+        reduced.doneReason = ev.reason;
+        reduced.sawDone = true;
+        continue; // walk to end so reducer sees full attempt
       }
-      // tool_call — translate and decide whether to buffer or hold for
-      // substitution.
+      // tool_call.
       const translated = parseToolCall(ev.name, ev.arguments);
       if (translated && translated.type === 'highlight') {
-        sawAnyHighlightAttempt = true;
-        if (translated.ids.size > 0) {
-          sawNonEmptyHighlight = true;
-          if (emitToolCalls) bufferedToolCalls.push(translated);
+        reduced.highlightSeen = true;
+        for (const id of translated.ids) reduced.highlightIds.add(id);
+        if (translated.ids.size > 0 && emitToolCalls) {
+          reduced.bufferedToolCalls.push(translated);
         }
-        // Empty highlight: deliberately drop here so the substitute can
-        // take its place after the buffered tool calls.
         continue;
       }
-      // Non-highlight tool call. The model may have called highlight with
-      // a malformed shape that parseToolCall rejected (e.g. ids: {}); the
-      // upstream retry handles validation, so anything reaching us is
-      // genuinely a translation failure for this tool. We track the
-      // attempt regardless so substitution still kicks in.
       if (!translated && ev.name === 'highlight') {
-        sawAnyHighlightAttempt = true;
+        reduced.highlightSeen = true;
         continue;
       }
       if (translated && emitToolCalls) {
-        bufferedToolCalls.push(translated);
+        reduced.bufferedToolCalls.push(translated);
       }
     }
 
-    // Empty-highlight substitution. We substitute when the model attempted
-    // a highlight at all but never produced one with ids. This covers the
-    // observed `highlight({"ids":{}})` failure mode AND the live
-    // `highlight({})` no-`ids`-key one. We do not synthesize a highlight
-    // when the model never tried — that would imply graph relevance we
-    // can't be sure of.
-    if (sawAnyHighlightAttempt && !sawNonEmptyHighlight) {
+    // -- Empty-highlight substitution. Substitute from per-query
+    //    retrieval set (NOT from the global store).
+    if (reduced.highlightSeen && reduced.highlightIds.size === 0) {
       const substituteIds = new Set<string>();
       for (const node of relevantNodes) substituteIds.add(node.id);
-      if (substituteIds.size > 0) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[chat] model emitted empty highlight; substituting ${substituteIds.size} embedding-retrieved ids`,
-        );
-        if (emitToolCalls) {
-          bufferedToolCalls.push({ type: 'highlight', ids: substituteIds });
-        }
+      if (substituteIds.size > 0 && emitToolCalls) {
+        reduced.bufferedToolCalls.push({
+          type: 'highlight',
+          ids: substituteIds,
+        });
       }
     }
 
-    // Zero-text synthesis. Fire when the model produced no text deltas
-    // AND we are not in an aborted state. The synthesized acknowledgment
-    // is a brief grounded line built from the relevant-nodes catalog so
-    // the host always renders something — better than the empty pane the
-    // user reported.
-    if (textCount === 0 && !signal?.aborted) {
-      const synth = synthesizeAcknowledgment(relevantNodes);
+    // -- Zero-text synthesis. Fire when text-silent AND not aborted.
+    //    The synthesized text is grounded in the FIRST retrieved node's
+    //    content (first paragraph, capped at 200 chars) — NOT a "Showing
+    //    Adam, Eve, ..." catalog roll-up.
+    if (reduced.textCount === 0 && !signal?.aborted) {
+      const synth = synthesizeGroundedText(relevantNodes);
       if (synth !== undefined) {
-        // eslint-disable-next-line no-console
-        console.warn('[chat] model emitted no text; synthesized acknowledgment');
         yield { type: 'text', delta: synth };
       }
     }
 
-    // Flush buffered tool calls now that any synth text has gone first.
-    for (const tc of bufferedToolCalls) {
+    // Flush buffered tool calls.
+    for (const tc of reduced.bufferedToolCalls) {
       if (signal?.aborted) {
         yield { type: 'done', reason: 'aborted' };
         return;
@@ -911,8 +1094,8 @@ export class AIEngine {
       yield { type: 'done', reason: 'aborted' };
       return;
     }
-    if (sawDone && doneEvent) {
-      yield { type: 'done', reason: doneEvent.reason };
+    if (reduced.sawDone) {
+      yield { type: 'done', reason: reduced.doneReason };
     } else {
       yield { type: 'done', reason: 'stop' };
     }
@@ -1139,7 +1322,9 @@ export class AIEngine {
         id: storeNode.id,
         attributes: storeNode.attributes,
       };
-      const text = embeddingText(node);
+      const text = embeddingText(node, {
+        contentKeys: this.embeddingContentKeys,
+      });
       const hash = computeContentHash(text);
       const existing = await this.lookupEmbedding(node.id, model, modelVersion, hash);
       if (existing) continue;
@@ -1332,6 +1517,7 @@ export class AIEngine {
     message: string,
     schema: SchemaSummary,
     relevantNodes: ReadonlyArray<NodeData>,
+    opts?: { pronounIds?: ReadonlyArray<string> },
   ): LLMMessage[] {
     const schemaBlock = renderSchemaBlock(schema, this.schemaSampleSize);
     const catalogBlock = renderCatalogBlock(relevantNodes);
@@ -1341,6 +1527,9 @@ export class AIEngine {
       this.chatContentMaxTokens,
       this.chatContentBudgetTokens,
     );
+    const edgesBlock = this.renderEdgesBlock(relevantNodes);
+    const inferredBlock = this.renderInferredEdgesBlock();
+    const pronounIds = opts?.pronounIds ?? [];
     const lines: string[] = [
       'You are an assistant embedded inside an interactive graph visualization.',
       'The host application renders the graph and shows your conversational text alongside it. Both halves matter — the text explains, the visual shows.',
@@ -1387,6 +1576,25 @@ export class AIEngine {
         'Use the entity content above as the source of truth for biographical / descriptive answers. If the content does not cover something, say so rather than inventing facts.',
       );
     }
+    if (edgesBlock !== undefined) {
+      lines.push('');
+      lines.push('Edges (explicit relationships among the relevant entities):');
+      lines.push(edgesBlock);
+    }
+    if (inferredBlock !== undefined) {
+      lines.push('');
+      lines.push('Inferred relationships (system-generated overlays):');
+      lines.push(inferredBlock);
+    }
+    if (pronounIds.length > 0) {
+      lines.push('');
+      lines.push('Potentially-referenced entities (from prior turn):');
+      lines.push(pronounIds.join(', '));
+    }
+    lines.push('');
+    lines.push(
+      'Cite every entity you reference using the syntax [[id]] after the entity\'s first mention. The host renders these as clickable links. Every factual claim must reference a node id from the catalog. If the catalog does not contain the answer, say "I do not have data on that" — do not extrapolate or invent.',
+    );
 
     return [
       { role: 'system', content: lines.join('\n') },
@@ -1395,77 +1603,238 @@ export class AIEngine {
   }
 
   /**
-   * Internal: pick the slice of nodes most relevant to the user's message
-   * for the chat catalog. Three paths:
-   *   - Graph fits in {@link chatContextSize} → return the full catalog.
-   *   - Embeddings warm + provider has `embed` → semantic top-K.
-   *   - Otherwise → keyword search (always available).
-   *
-   * The semantic path never blocks on a cold-start warmup — when no
-   * embeddings are available yet we fall through to keyword so chat
-   * doesn't hang.
+   * Render the explicit-edges block: for each pair of nodes in
+   * `relevantNodes` connected by a store edge, emit one
+   * `<source> —[<type]→ <target>` line. Capped at 30 lines so a dense
+   * subgraph doesn't blow the prompt budget. Returns `undefined` when no
+   * pair is connected.
    */
-  private async collectRelevantNodes(
-    message: string,
-  ): Promise<NodeData[]> {
-    const all = this.store.getAllNodes();
-    const k = this.chatContextSize;
-    if (all.length <= k) {
-      return all.map((n) => ({ id: n.id, attributes: n.attributes }));
+  private renderEdgesBlock(
+    nodes: ReadonlyArray<NodeData>,
+  ): string | undefined {
+    if (nodes.length < 2) return undefined;
+    const idSet = new Set(nodes.map((n) => n.id));
+    const lines: string[] = [];
+    const MAX = 30;
+    for (const edge of this.store.getAllEdges()) {
+      if (!idSet.has(edge.sourceId) || !idSet.has(edge.targetId)) continue;
+      const type =
+        typeof edge.attributes.type === 'string'
+          ? edge.attributes.type
+          : 'related_to';
+      lines.push(`${edge.sourceId} —[${type}]→ ${edge.targetId}`);
+      if (lines.length >= MAX) break;
     }
-
-    // Semantic path — only if embeddings are wired AND the provider can embed.
-    const tier = this.getEmbeddingTier();
-    if (tier !== 'tier-1') {
-      const haveAnyEmbedding = await this.hasAnyEmbedding();
-      if (haveAnyEmbedding) {
-        try {
-          const hits = await this.runSemanticSearch(message, k, undefined);
-          if (hits.length > 0) {
-            return this.materializeNodes(hits.map((h) => h.nodeId));
-          }
-        } catch {
-          // fall through to keyword
-        }
-      }
-    }
-
-    // Keyword fallback — always available.
-    const keywordHits = this.keywordEngine.search(message);
-    if (keywordHits.length === 0) {
-      // No matches — give the model a head-truncated catalog rather than
-      // nothing so it still has SOME ids to refer to.
-      return all
-        .slice(0, k)
-        .map((n) => ({ id: n.id, attributes: n.attributes }));
-    }
-    return this.materializeNodes(keywordHits.slice(0, k).map((h) => h.nodeId));
+    return lines.length > 0 ? lines.join('\n') : undefined;
   }
 
-  /** Internal: cheap "do we have ANY embedding warm yet?" check used by the
-   *  catalog selector to decide whether to attempt a semantic top-K. */
-  private async hasAnyEmbedding(): Promise<boolean> {
-    if (this.embeddingStore) {
-      // No general "size" primitive on the store contract — best effort: ask
-      // for a similar() with a zero-vector and see if anything comes back.
+  /**
+   * Render the inferred-relationships block: every entry currently
+   * persisted in {@link InferredEdgeStore}, formatted with confidence
+   * + reasoning. Returns `undefined` when no inferred edges exist or no
+   * store is wired.
+   */
+  private renderInferredEdgesBlock(): string | undefined {
+    // Synchronous read of the store wouldn't fit the contract; this
+    // method is called from buildChatMessages which is sync, so we cache
+    // the most-recent snapshot during chat() instead. For the v1 cut we
+    // just inspect the last-known snapshot — see {@link refreshInferredEdgesSnapshot}.
+    const snap = this.inferredEdgesSnapshot;
+    if (!snap || snap.length === 0) return undefined;
+    const MAX = 8;
+    const lines: string[] = [];
+    for (const e of snap) {
+      const conf = e.score.toFixed(2);
+      const desc = e.reasoning ?? 'related';
+      lines.push(
+        `[INFERRED, confidence: ${conf}] ${e.sourceId} —[${e.type}]→ ${e.targetId}: ${desc}`,
+      );
+      if (lines.length >= MAX) break;
+    }
+    return lines.join('\n');
+  }
+
+  /**
+   * Snapshot of inferred edges captured at chat() entry. Sync access from
+   * {@link buildChatMessages} would otherwise force the whole call stack
+   * async. Refreshed by {@link refreshInferredEdgesSnapshot}.
+   */
+  private inferredEdgesSnapshot: ReadonlyArray<InferredEdge> | undefined;
+
+  private async refreshInferredEdgesSnapshot(): Promise<void> {
+    if (!this.inferredEdgeStore) {
+      this.inferredEdgesSnapshot = undefined;
+      return;
+    }
+    try {
+      this.inferredEdgesSnapshot = await this.inferredEdgeStore.getAll();
+    } catch {
+      this.inferredEdgesSnapshot = undefined;
+    }
+  }
+
+  /**
+   * Phase 1 hybrid retrieval (0.8.0). Replaces the old cascade of
+   * "semantic → keyword → alphabetical-first-12". Combines three signals:
+   *
+   *   A. Semantic — `embeddingStore.searchVector(queryEmbedding, top)`
+   *      when the store implements it AND the provider can embed.
+   *   B. Keyword  — the existing data-layer SearchEngine.
+   *   C. 1-hop graph expansion — for each top hit (above ~0.6
+   *      similarity), pull neighbors via `store.getNeighborIds(id)`.
+   *      Each neighbor gets a `+0.3` graph bonus.
+   *
+   * Per-node merged score: `semantic*0.6 + keyword*0.3 + graphBonus*0.3`.
+   * Sort descending. Take top {@link chatRerankCandidates}. When the
+   * merged set is empty, return empty — the engine will emit a
+   * `retrieval-empty` debug event. NO alphabetical-first-12 fallback.
+   */
+  private async runHybridRetrieval(
+    message: string,
+  ): Promise<{ nodes: NodeData[] }> {
+    // Fast path: when the store is small enough to fit in the catalog
+    // window, return everything. This is NOT the alphabetical-first-12
+    // fallback the Phase 1 spec calls out — that one fired when retrieval
+    // missed on a LARGE graph; this one is the legitimate "graph is small,
+    // just give the model everything" optimization.
+    const all = this.store.getAllNodes();
+    if (all.length > 0 && all.length <= this.chatContextSize) {
+      return {
+        nodes: all.map((n) => ({ id: n.id, attributes: n.attributes })),
+      };
+    }
+    const k = this.chatRerankCandidates;
+    const score = new Map<string, number>();
+
+    // A. Semantic via searchVector when the store supports it.
+    if (
+      this.embeddingStore &&
+      typeof (this.embeddingStore as EmbeddingStore).searchVector ===
+        'function' &&
+      this.providerHasEmbed() &&
+      this.provider
+    ) {
       try {
-        const probe = await this.embeddingStore.similar([], 1, '', '');
-        return probe.length > 0;
+        const embedFn = this.provider.embed!.bind(this.provider);
+        const [qv] = await embedFn([message]);
+        if (qv && qv.length > 0) {
+          const hits = await this.embeddingStore.searchVector!(qv, {
+            top: k,
+            container: 'units',
+          });
+          for (const h of hits) {
+            score.set(h.nodeId, (score.get(h.nodeId) ?? 0) + h.score * 0.6);
+          }
+        }
       } catch {
-        return false;
+        // best-effort: semantic failure must not break retrieval.
       }
     }
-    if (this.cache) {
-      try {
-        const raw = await this.cache.get(EMBED_INDEX_KEY);
-        if (!raw) return false;
-        const list = JSON.parse(raw) as string[];
-        return Array.isArray(list) && list.length > 0;
-      } catch {
-        return false;
+
+    // B. Keyword via the data-layer SearchEngine. The underlying engine
+    //    matches the WHOLE query as a substring, which fails on natural-
+    //    language inputs like "Tell me about Cain" because no attribute
+    //    contains that whole phrase. Tokenize on whitespace and accumulate
+    //    per-token hits so each meaningful word contributes; this is the
+    //    canonical hybrid-retrieval keyword path.
+    const tokens = tokenizeForKeywordSearch(message);
+    const keywordRunScore = new Map<string, number>();
+    for (const tok of tokens) {
+      const hits = this.keywordEngine.search(tok);
+      for (const r of hits) {
+        keywordRunScore.set(
+          r.nodeId,
+          (keywordRunScore.get(r.nodeId) ?? 0) + r.score,
+        );
       }
     }
-    return false;
+    for (const [nodeId, s] of keywordRunScore) {
+      score.set(nodeId, (score.get(nodeId) ?? 0) + s * 0.3);
+    }
+
+    // C. 1-hop graph expansion: for each top hit above 0.6 (in raw score
+    //    units, before weighting), add its neighbors with a +0.3 bonus.
+    const seedIds = [...score.entries()]
+      .filter(([, s]) => s >= 0.18) // 0.6 * 0.3 (min keyword pass)
+      .map(([id]) => id);
+    for (const id of seedIds) {
+      for (const nid of this.store.getNeighborIds(id)) {
+        score.set(nid, (score.get(nid) ?? 0) + 0.3);
+      }
+    }
+
+    if (score.size === 0) return { nodes: [] };
+
+    const sorted = [...score.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, k)
+      .map(([id]) => id);
+    return { nodes: this.materializeNodes(sorted) };
+  }
+
+  /**
+   * Phase 1 cross-encoder rerank (0.8.0). For each candidate node, asks
+   * the LLM provider to score relevance to the user query. Sorts by score
+   * descending, keeps top-K. Cached on
+   * `(conversationId, queryHash, candidateIds)` so a follow-up turn with
+   * the same retrieval doesn't re-pay the LLM bill.
+   */
+  private async runRerank(
+    message: string,
+    candidates: ReadonlyArray<NodeData>,
+    conversationId: string | undefined,
+  ): Promise<NodeData[]> {
+    if (candidates.length === 0) return [];
+    if (!this.provider) return candidates.slice();
+    const idsKey = candidates
+      .map((n) => n.id)
+      .sort()
+      .join(',');
+    const queryHash = fnv1a64(message);
+    const cacheKey = `rerank|${conversationId ?? ''}|${queryHash}|${idsKey}`;
+    const cached = this.rerankCache.get(cacheKey);
+    if (cached) {
+      // Reorder candidates to the cached order, dropping any that are
+      // no longer in the candidate set.
+      const byId = new Map(candidates.map((n) => [n.id, n]));
+      const out: NodeData[] = [];
+      for (const id of cached) {
+        const n = byId.get(id);
+        if (n) out.push(n);
+      }
+      return out;
+    }
+
+    const provider = this.provider;
+    const completeFn = provider.complete.bind(provider);
+    const scored = await Promise.all(
+      candidates.map(async (n) => {
+        const title = pickTitleAttribute(n.attributes ?? {}) ?? n.id;
+        const summary = renderShortSummary(n);
+        const prompt =
+          `Score 0.0-1.0 how relevant this node is to the user's question. ` +
+          `Return JSON only: {"score": number, "reason": string}.\n` +
+          `User question: ${message}\n` +
+          `Node id: ${n.id}\n` +
+          `Title: ${title}\n` +
+          `Summary: ${summary}`;
+        let raw = '';
+        try {
+          raw = await completeFn(prompt, { format: 'json' });
+        } catch {
+          raw = '';
+        }
+        return { node: n, score: parseScoreJson(raw) };
+      }),
+    );
+
+    scored.sort((a, b) => b.score - a.score);
+    const kept = scored.slice(0, this.chatRerankTopK).map((s) => s.node);
+    this.rerankCache.set(
+      cacheKey,
+      kept.map((n) => n.id),
+    );
+    return kept;
   }
 
   /** Internal: lift a list of node ids to the {@link NodeData} shape, dropping unknowns. */
@@ -1878,26 +2247,166 @@ function renderContentBlock(
 }
 
 /**
- * Build the one-line text the engine yields when the model finished a
- * chat turn without ever emitting a `text` event. We prefer titles over
- * raw ids so the acknowledgment reads naturally; if no title attribute
- * exists we fall back to the entity count. Returns `undefined` when no
- * relevant nodes were available — the caller then skips the synth so we
- * never emit literally `Showing .` or `Found 0 relevant entities ...`.
+ * Phase 1 zero-text synthesis: derive a single grounded text event from
+ * the FIRST retrieved node's content body (first paragraph, capped at
+ * 200 chars). Never falls back to the catalog roll-up. Returns
+ * `undefined` when there's nothing to ground in.
  */
-function synthesizeAcknowledgment(
+function synthesizeGroundedText(
   nodes: ReadonlyArray<NodeData>,
 ): string | undefined {
   if (nodes.length === 0) return undefined;
-  const titles: string[] = [];
-  const MAX_TITLES = 6;
-  for (const node of nodes) {
-    const t = pickTitleAttribute(node.attributes ?? {});
-    if (t !== undefined) titles.push(t);
-    if (titles.length >= MAX_TITLES) break;
+  const first = nodes[0];
+  const attrs = first.attributes ?? {};
+  const title = pickTitleAttribute(attrs) ?? first.id;
+  const contentKeys = ['content', 'description', 'body', 'summary'];
+  let body = '';
+  for (const k of contentKeys) {
+    const v = attrs[k];
+    if (typeof v === 'string' && v.length > 0) {
+      body = v;
+      break;
+    }
   }
-  if (titles.length > 0) return `Showing ${titles.join(', ')}.`;
-  return `Found ${nodes.length} relevant entities for your question.`;
+  if (body.length === 0) {
+    // No body text — narrate the node minimally with its title so the host
+    // always renders SOMETHING. This is grounded in the node id, not in a
+    // multi-entity catalog list.
+    return `${title}.`;
+  }
+  // First paragraph, capped at 200 chars.
+  const firstPara = body.split(/\n\s*\n/)[0] ?? body;
+  const truncated =
+    firstPara.length > 200 ? firstPara.slice(0, 200) + '…' : firstPara;
+  return truncated;
+}
+
+/**
+ * Tokenize a chat message into keyword-search candidate tokens. Drops
+ * stopwords + tokens shorter than three chars so the keyword path doesn't
+ * get drowned in matches against "the" / "of" / etc.
+ */
+function tokenizeForKeywordSearch(message: string): string[] {
+  const STOPWORDS = new Set([
+    'the',
+    'and',
+    'for',
+    'are',
+    'but',
+    'not',
+    'you',
+    'all',
+    'can',
+    'her',
+    'was',
+    'one',
+    'our',
+    'out',
+    'day',
+    'get',
+    'has',
+    'him',
+    'his',
+    'how',
+    'man',
+    'new',
+    'now',
+    'old',
+    'see',
+    'two',
+    'way',
+    'who',
+    'boy',
+    'did',
+    'its',
+    'let',
+    'put',
+    'say',
+    'she',
+    'too',
+    'use',
+    'tell',
+    'about',
+    'what',
+    'who',
+    'when',
+    'where',
+    'why',
+    'with',
+    'this',
+    'that',
+    'they',
+    'them',
+    'from',
+    'into',
+    'have',
+    'been',
+    'will',
+    'were',
+    'your',
+  ]);
+  const tokens = message.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const t of tokens) {
+    if (t.length < 3) continue;
+    if (STOPWORDS.has(t)) continue;
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
+/** Detect whether a message contains a pronoun the model may need help resolving. */
+function hasPronouns(message: string): boolean {
+  const PRONOUNS = [
+    'he',
+    'she',
+    'him',
+    'her',
+    'it',
+    'they',
+    'them',
+    'this',
+    'that',
+    'his',
+    'hers',
+    'its',
+    'their',
+  ];
+  const tokens = message.toLowerCase().split(/[^a-z]+/);
+  for (const t of tokens) {
+    if (PRONOUNS.includes(t)) return true;
+  }
+  return false;
+}
+
+/**
+ * Parse the JSON envelope used by the rerank prompt. Tolerates surrounding
+ * markdown fences (some providers emit them despite `format: 'json'`).
+ * Clamps to `[0, 1]`. Returns 0 on any malformed payload so the candidate
+ * sinks to the bottom rather than crashing the rerank.
+ */
+function parseScoreJson(raw: string): number {
+  if (!raw) return 0;
+  const cleaned = raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return 0;
+  }
+  if (!parsed || typeof parsed !== 'object') return 0;
+  const score = (parsed as { score?: unknown }).score;
+  if (typeof score !== 'number' || !Number.isFinite(score)) return 0;
+  if (score < 0) return 0;
+  if (score > 1) return 1;
+  return score;
 }
 
 function pickTitleAttribute(
@@ -1908,6 +2417,23 @@ function pickTitleAttribute(
     if (typeof v === 'string' && v.length > 0) return v;
   }
   return undefined;
+}
+
+/**
+ * Short summary for the rerank prompt — `id: <id>` plus the first 200
+ * characters of any content/description body. Keeps the rerank prompt
+ * small while giving the model enough to score against.
+ */
+function renderShortSummary(node: NodeData): string {
+  const attrs = node.attributes ?? {};
+  const contentKeys = ['content', 'description', 'body', 'summary'];
+  for (const k of contentKeys) {
+    const v = attrs[k];
+    if (typeof v === 'string' && v.length > 0) {
+      return v.length > 200 ? v.slice(0, 200) + '…' : v;
+    }
+  }
+  return `id: ${node.id}`;
 }
 
 function renderAttrValue(value: unknown): string | undefined {

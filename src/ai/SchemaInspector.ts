@@ -225,17 +225,66 @@ function summarizeValue(value: unknown): string[] {
 }
 
 /**
+ * Default per-host content-priority keys. Hosts override via the
+ * `contentKeys` option when their schema names the body differently.
+ *
+ * Phase 1 (RAG architecture): the body of these keys becomes the embedding
+ * text's body — emitted verbatim with NO `key:` prefix — so semantic search
+ * actually matches against the content, not against attribute metadata.
+ */
+export const DEFAULT_EMBEDDING_CONTENT_KEYS: readonly string[] = [
+  'content',
+  'description',
+  'body',
+  'summary',
+];
+
+/** Options for {@link embeddingText}. */
+export interface EmbeddingTextOptions {
+  /**
+   * Attribute keys whose values are body content. Each non-empty value is
+   * appended to the output verbatim, with no `key:` prefix, in order.
+   * Defaults to {@link DEFAULT_EMBEDDING_CONTENT_KEYS}.
+   */
+  contentKeys?: readonly string[];
+}
+
+/**
  * Module-level pure version of the embedding-text renderer. Exposed so
  * tests + downstream consumers can call it without instantiating an
  * inspector.
+ *
+ * Output structure (Phase 1, 0.8.0):
+ *   1. Title line (`name` / `title` / `label`, or the node id).
+ *   2. Body content from `contentKeys`, in order, each rendered verbatim
+ *      (no `key:` prefix) so it dominates the embedding's semantic weight.
+ *   3. Remaining attributes in alphabetical order, formatted `key: value`,
+ *      excluding the title-source keys and the contentKeys already emitted.
  */
-export function embeddingText(node: NodeData): string {
+export function embeddingText(
+  node: NodeData,
+  opts?: EmbeddingTextOptions,
+): string {
   const attrs = node.attributes ?? {};
+  const contentKeys =
+    opts?.contentKeys ?? DEFAULT_EMBEDDING_CONTENT_KEYS;
   const title = pickTitle(attrs) ?? node.id;
   const lines: string[] = [title];
+
+  // Body content first — verbatim, no key prefix.
+  const emittedAsBody = new Set<string>();
+  for (const key of contentKeys) {
+    const rendered = renderValue(attrs[key]);
+    if (rendered === undefined) continue;
+    lines.push(rendered);
+    emittedAsBody.add(key);
+  }
+
+  // Remaining attributes in alphabetical order with `key: value`.
   const keys = Object.keys(attrs).sort();
   for (const key of keys) {
     if (key === 'name' || key === 'title' || key === 'label') continue;
+    if (emittedAsBody.has(key)) continue;
     const rendered = renderValue(attrs[key]);
     if (rendered === undefined) continue;
     lines.push(`${key}: ${rendered}`);

@@ -186,6 +186,80 @@ describe('useInferaGraphChat', () => {
   });
 });
 
+describe('useInferaGraphChat — Phase 1 (0.8.0) callbacks', () => {
+  beforeEach(() => {
+    setHighlight.mockReset();
+    setFilter.mockReset();
+    focusOn.mockReset();
+    annotate.mockReset();
+    clearAnnotations.mockReset();
+  });
+
+  it('dispatches debug events via chatContext.onDiagnostic', async () => {
+    // Drive a transport that yields a `debug` event.
+    const customTransport = {
+      // eslint-disable-next-line require-yield
+      async *chat(): AsyncGenerator<ChatEvent, void, unknown> {
+        yield {
+          type: 'debug',
+          phase: 'vector-search',
+          detail: 'topK=8',
+        };
+        yield { type: 'done', reason: 'stop' };
+      },
+    };
+    const onDiagnostic = vi.fn();
+    const handle: { current: ChildHandle | null } = { current: null };
+    render(
+      <InferaGraph
+        data={{ nodes: [], edges: [] }}
+        transport={customTransport}
+        onDiagnostic={onDiagnostic}
+      >
+        <ChatChild handleRef={handle} />
+      </InferaGraph>,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    await act(async () => handle.current!.invoke('hi'));
+    expect(onDiagnostic).toHaveBeenCalledTimes(1);
+    expect(onDiagnostic.mock.calls[0][0]).toMatchObject({
+      type: 'debug',
+      phase: 'vector-search',
+    });
+  });
+
+  it('fires chatContext.onToolCallOutcome after a tool-call dispatch', async () => {
+    const provider = mockLLMProvider((): LLMStreamEvent[] => [
+      {
+        type: 'tool_call',
+        name: 'highlight',
+        arguments: JSON.stringify({ ids: ['x', 'y'] }),
+      },
+      { type: 'done', reason: 'stop' },
+    ]);
+    const onToolCallOutcome = vi.fn();
+    const handle: { current: ChildHandle | null } = { current: null };
+    render(
+      <InferaGraph
+        llm={provider}
+        data={{ nodes: [], edges: [] }}
+        onToolCallOutcome={onToolCallOutcome}
+      >
+        <ChatChild handleRef={handle} />
+      </InferaGraph>,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    await act(async () => handle.current!.invoke('hi'));
+    expect(onToolCallOutcome).toHaveBeenCalled();
+    const last =
+      onToolCallOutcome.mock.calls[
+        onToolCallOutcome.mock.calls.length - 1
+      ][0];
+    expect(last.tool).toBe('highlight');
+    expect(last.appliedIds).toBeDefined();
+  });
+});
+
 describe('<InferaGraph onChat> callback', () => {
   beforeEach(() => {
     setHighlight.mockReset();

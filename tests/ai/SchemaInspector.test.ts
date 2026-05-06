@@ -174,5 +174,52 @@ describe('SchemaInspector', () => {
       expect(text).toContain('age: 42');
       expect(text).toContain('alive: true');
     });
+
+    it('emits content body verbatim with no `key:` prefix (default contentKeys)', () => {
+      const node: NodeData = {
+        id: 'cain',
+        attributes: {
+          name: 'Cain',
+          type: 'person',
+          content: 'Cain killed his brother Abel.',
+        },
+      };
+      const text = embeddingText(node);
+      // content body must appear without a `content:` prefix because that
+      // would dilute the embedding's body. Other attributes still use
+      // `key: value`.
+      expect(text).toContain('Cain killed his brother Abel.');
+      expect(text).not.toMatch(/content:\s*Cain killed his brother Abel\./);
+      expect(text).toContain('type: person');
+    });
+
+    it('respects custom contentKeys (uses `body` instead of `content`)', () => {
+      const node: NodeData = {
+        id: 'cain',
+        attributes: {
+          name: 'Cain',
+          type: 'person',
+          body: 'Slew his brother Abel in the field.',
+        },
+      };
+      const text = embeddingText(node, { contentKeys: ['body'] });
+      expect(text).toContain('Slew his brother Abel in the field.');
+      expect(text).not.toMatch(/body:\s*Slew his brother/);
+    });
+
+    it('skips contentKey entries when the value is empty / missing', () => {
+      const node: NodeData = {
+        id: 'cain',
+        attributes: {
+          name: 'Cain',
+          type: 'person',
+          content: '',
+        },
+      };
+      const text = embeddingText(node);
+      // Should not emit a stray blank line for the empty content key.
+      expect(text.split('\n').filter((l) => l === '').length).toBe(0);
+      expect(text).toContain('type: person');
+    });
   });
 });

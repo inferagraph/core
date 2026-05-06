@@ -85,9 +85,20 @@ export type {
   EmbeddingMeta,
   EmbeddingRecord,
   EmbeddingStore,
+  SearchVectorHit,
   SimilarHit,
 } from './ai/Embedding.js';
 export { inMemoryEmbeddingStore } from './ai/InMemoryEmbeddingStore.js';
+export { inMemoryConversationStore } from './ai/InMemoryConversationStore.js';
+export type {
+  ConversationStore,
+  ConversationTurn,
+} from './ai/ConversationStore.js';
+export { GraphIndexer } from './ai/GraphIndexer.js';
+export type {
+  GraphIndexerConfig,
+  IndexerProgress,
+} from './ai/GraphIndexer.js';
 export { inMemoryInferredEdgeStore } from './ai/InferredEdge.js';
 export type {
   InferredEdge,
@@ -116,8 +127,13 @@ export type {
 export { mergeInferences } from './ai/inference/merge.js';
 export type { MergeOptions } from './ai/inference/merge.js';
 export type { ComputeInferredEdgesOptions } from './ai/AIEngine.js';
-export { SchemaInspector, embeddingText } from './ai/SchemaInspector.js';
+export {
+  SchemaInspector,
+  embeddingText,
+  DEFAULT_EMBEDDING_CONTENT_KEYS,
+} from './ai/SchemaInspector.js';
 export type {
+  EmbeddingTextOptions,
   SchemaSummary,
   SchemaAttribute,
   SchemaAttributeType,
