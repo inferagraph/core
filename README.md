@@ -26,6 +26,15 @@ InferaGraph is a self-contained platform that holds graph data, performs AI reas
 - React entry point + a separate `data` entry for Next.js RSC contexts
 - CSS-themable overlays and controls
 
+## What's new in 0.12.0
+
+- **Citation wire format becomes `[[token|matched-text]]`.** Both segments are required. The engine now rewrites every entity-name occurrence (not just the first) into the new wire so the host renders one clickable link per mention with the model's exact casing preserved (`"the Fall"` stays lowercase article). Hard break: tokens without the `|matched-text` portion are NOT recognized; hosts upgrading from 0.11.x adopt the new shape on consumption.
+- **`renderCitation: (token, matchedText) => ReactNode`.** Both arguments required. Hosts wire the anchor's text content from `matchedText` (model's casing wins) and the URL/path from `token`. The previous single-argument signature is gone — there is no back-compat path.
+- **Citation scope = the whole graph.** The injector consumes a `{ token, title }[]` candidate list derived from every node in the store, not just the per-turn rerank top-K. Entities outside the relevant set (e.g. Seth in a turn focused on Adam) still cite when their title appears in the response.
+- **System prompt softened.** The `Citations:` block now reads "Write naturally using each entity's name. The engine adds citation links automatically — you do not need to emit `[[id]]` tokens." The 0.11.0 alarmist "FORBIDDEN / CRITICAL ERROR" framing and the slug-shaped instructional examples are gone. Models write naturally; the engine guarantees the wire shape.
+- **Idempotent injector.** Running `injectCitations` on its own output is a no-op: any pre-existing `[[token|matched]]` collapses to its matched text on the strip pass, then re-emerges identically on the scan pass. Bare `[[slug]]` model emissions are stripped entirely and treated as garbage.
+- Public surface change is hard-breaking but small. Hosts on 0.11.x update one regex (`[[token]]` → `[[token|matched-text]]`) and one renderCitation signature; tests of the wire format follow.
+
 ## What's new in 0.11.0
 
 - **Deterministic server-side citation injection.** Production gpt-4o-class models routinely ignored the system prompt's `[[id]]` requirement, leaving the host with uncited streaming text. Soft prompts are not a contract. After the model stream completes, `AIEngine.chat` now scans the assistant text for first-occurrence titles of every `relevantNodes` entity and inserts `[[citationKey]]` directly after the matched span (whole-word, case-insensitive, prefix-aware so `Adam Smith` is never broken by `Adam`). When the corrected text differs from what streamed, the engine emits a new `text_replace` ChatEvent so hosts replace the streamed-incremental bubble with the citation-complete final. Citations become a guaranteed property of the chat pipeline rather than something the model might forget.

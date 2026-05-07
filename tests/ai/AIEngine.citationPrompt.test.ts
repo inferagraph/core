@@ -69,8 +69,8 @@ function captureSystemPrompt(): {
   };
 }
 
-describe('AIEngine.buildChatMessages — citation rule is present', () => {
-  it('points the model at the citation token format `[[id]]`', async () => {
+describe('AIEngine.buildChatMessages — citation guidance is soft', () => {
+  it('keeps a "Citations:" section so the rule is visible', async () => {
     const store = makeStore();
     const { provider, getSystemPrompt } = captureSystemPrompt();
     const engine = new AIEngine(store, new QueryEngine(store));
@@ -78,16 +78,16 @@ describe('AIEngine.buildChatMessages — citation rule is present', () => {
 
     await collect(engine.chat('hi'));
 
-    const sys = getSystemPrompt();
-    expect(sys).toContain('Citations:');
-    expect(sys).toContain('[[id]]');
+    expect(getSystemPrompt()).toContain('Citations:');
   });
 
-  it('shows a concrete "Cain [[cain]]" example so the format is unambiguous', async () => {
+  it('explicitly tells the model the engine inserts citations automatically — write naturally', async () => {
+    // 0.12.0 — the post-processor rewrites every entity-name occurrence
+    // into the new `[[token|matched]]` wire format. The prompt now
+    // pivots to "engine handles it; write naturally" rather than the
+    // 0.11.0 "FORBIDDEN / CRITICAL ERROR" framing.
     const store = makeStore();
     const { provider, getSystemPrompt } = captureSystemPrompt();
-    // 0.9.4: slug-shaped examples now require citationKey. With it set, the
-    // catalog gains a 4th slug column and the example matches the catalog.
     const engine = new AIEngine(store, new QueryEngine(store), {
       citationKey: 'slug',
     });
@@ -95,18 +95,24 @@ describe('AIEngine.buildChatMessages — citation rule is present', () => {
 
     await collect(engine.chat('hi'));
 
-    expect(getSystemPrompt()).toContain('Cain [[cain]]');
+    const sys = getSystemPrompt();
+    expect(sys).toMatch(/engine adds citation links automatically/i);
+    expect(sys).toMatch(/write naturally/i);
   });
 
-  it('mentions that the host injects citations automatically when the model skips them', async () => {
+  it('drops the alarmist "FORBIDDEN" / "CRITICAL ERROR" framing from earlier versions', async () => {
     const store = makeStore();
     const { provider, getSystemPrompt } = captureSystemPrompt();
-    const engine = new AIEngine(store, new QueryEngine(store));
+    const engine = new AIEngine(store, new QueryEngine(store), {
+      citationKey: 'slug',
+    });
     engine.setProvider(provider);
 
     await collect(engine.chat('hi'));
 
-    expect(getSystemPrompt()).toMatch(/host injects citations automatically/);
+    const sys = getSystemPrompt();
+    expect(sys).not.toMatch(/FORBIDDEN/);
+    expect(sys).not.toMatch(/CRITICAL ERROR/);
   });
 
   it('points tool calls (highlight/focus) at the FIRST column when citationKey is set', async () => {

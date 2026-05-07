@@ -162,23 +162,16 @@ describe('AIEngine renderCatalogBlock — citationKey behavior', () => {
   });
 });
 
-describe('AIEngine.buildChatMessages — citation prompt branches on citationKey', () => {
-  it('with citationKey set, references the LAST column and uses a slug-shaped example', async () => {
-    const store = makeStore();
-    const { provider, getSystemPrompt } = captureSystemPrompt();
-    const engine = new AIEngine(store, new QueryEngine(store), {
-      citationKey: 'slug',
-    });
-    engine.setProvider(provider);
-
-    await collect(engine.chat('hi'));
-
-    const sys = getSystemPrompt();
-    expect(sys).toContain('LAST column');
-    expect(sys).toContain('Cain [[cain]]');
-  });
-
-  it('with citationKey set, adds a note that highlight()/focus() use the FIRST column', async () => {
+describe('AIEngine.buildChatMessages — citationKey toggles the catalog row column only (0.12.0)', () => {
+  // 0.12.0 dropped the prompt-side instructional examples and the
+  // "LAST column" / "first column" framing. The engine no longer asks
+  // the model to emit `[[id]]` tokens — it inserts citations
+  // post-stream via `injectCitations`. The remaining citation-prompt
+  // contract (soft "engine handles it" wording, FIRST-column-for-tools
+  // reminder when citationKey is set) lives in
+  // `AIEngine.citationPrompt.test.ts` so nothing pins the deleted
+  // wording here.
+  it('with citationKey set, the FIRST-column tool-call reminder still ships', async () => {
     const store = makeStore();
     const { provider, getSystemPrompt } = captureSystemPrompt();
     const engine = new AIEngine(store, new QueryEngine(store), {
@@ -193,7 +186,7 @@ describe('AIEngine.buildChatMessages — citation prompt branches on citationKey
     expect(sys).toMatch(/highlight\(\).*FIRST column|FIRST column.*highlight\(\)/s);
   });
 
-  it('without citationKey set, references the first column and uses generic [[node-id-N]] placeholders', async () => {
+  it('without citationKey set, no FIRST-column tool-call note is emitted', async () => {
     const store = makeStore();
     const { provider, getSystemPrompt } = captureSystemPrompt();
     const engine = new AIEngine(store, new QueryEngine(store));
@@ -202,11 +195,10 @@ describe('AIEngine.buildChatMessages — citation prompt branches on citationKey
     await collect(engine.chat('hi'));
 
     const sys = getSystemPrompt();
-    expect(sys).toContain('first ` | `');
-    expect(sys).toContain('[[node-id-1]]');
-    expect(sys).toContain('[[node-id-2]]');
-    // The slug-shaped example must NOT appear when citationKey is unset
-    // (this is the 0.9.4 fix — it was contradicting UUID-shaped catalog ids).
+    expect(sys).not.toContain('FIRST column');
+    // The engine still tells the model citations are added automatically
+    // — pinned in AIEngine.citationPrompt.test.ts; here we only confirm
+    // the deleted slug-shaped instructional example is absent.
     expect(sys).not.toContain('Cain [[cain]]');
   });
 });

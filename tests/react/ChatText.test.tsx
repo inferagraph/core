@@ -43,28 +43,39 @@ describe('ChatText markdown rendering', () => {
   });
 });
 
-describe('ChatText citations', () => {
-  it('passes [[token]] to the renderCitation callback', () => {
-    const renderCitation = vi.fn((token: string) => <span data-cite>{token}</span>);
+describe('ChatText citations (0.12.0 wire — `[[token|matched-text]]`)', () => {
+  it('passes (token, matchedText) to the renderCitation callback', () => {
+    const renderCitation = vi.fn((token: string, matched: string) => (
+      <span data-cite>{matched}</span>
+    ));
     render(
-      <ChatText text="Hello [[adam]] world" renderCitation={renderCitation} />,
+      <ChatText
+        text="Hello [[adam|Adam]] world"
+        renderCitation={renderCitation}
+      />,
     );
     expect(renderCitation).toHaveBeenCalledTimes(1);
-    expect(renderCitation).toHaveBeenCalledWith('adam');
+    expect(renderCitation).toHaveBeenCalledWith('adam', 'Adam');
   });
 
-  it('renders [[token]] as literal text when renderCitation is omitted', () => {
-    const { container } = render(<ChatText text="Hello [[adam]] world" />);
-    expect(container.textContent ?? '').toContain('[[adam]]');
+  it('renders the matched text as plain text when renderCitation is omitted', () => {
+    const { container } = render(<ChatText text="Hello [[adam|Adam]] world" />);
+    const txt = container.textContent ?? '';
+    expect(txt).toContain('Hello');
+    expect(txt).toContain('Adam');
+    expect(txt).toContain('world');
+    // The wire token must not appear in the rendered text.
+    expect(txt).not.toContain('[[');
+    expect(txt).not.toContain(']]');
   });
 
   it('renders citation alongside markdown', () => {
-    const renderCitation = (token: string) => (
-      <a href={`/person/${token}`}>{token}</a>
+    const renderCitation = (token: string, matched: string) => (
+      <a href={`/person/${token}`}>{matched}</a>
     );
     const { container } = render(
       <ChatText
-        text="**Hello** [[adam]] world"
+        text="**Hello** [[adam|Adam]] world"
         renderCitation={renderCitation}
       />,
     );
@@ -73,6 +84,38 @@ describe('ChatText citations', () => {
     const link = container.querySelector('a');
     expect(link).not.toBeNull();
     expect(link).toHaveAttribute('href', '/person/adam');
+    expect(link).toHaveTextContent('Adam');
+  });
+
+  it('preserves the model casing per match (matched text wins over the token)', () => {
+    const renderCitation = (token: string, matched: string) => (
+      <a href={`/person/${token}`}>{matched}</a>
+    );
+    const { container } = render(
+      <ChatText
+        text="adam [[adam|adam]] and Adam [[adam|Adam]] and ADAM [[adam|ADAM]]"
+        renderCitation={renderCitation}
+      />,
+    );
+    const links = Array.from(container.querySelectorAll('a'));
+    expect(links).toHaveLength(3);
+    expect(links[0]).toHaveTextContent('adam');
+    expect(links[1]).toHaveTextContent('Adam');
+    expect(links[2]).toHaveTextContent('ADAM');
+  });
+
+  it('does NOT match bare `[[slug]]` tokens (no pipe = not a citation)', () => {
+    // 0.12.0 dropped backwards compatibility for the bare-slug wire
+    // shape. Tokens without the `|matched-text` segment fall through
+    // to plain markdown and render as literal text.
+    const renderCitation = vi.fn((token: string, matched: string) => (
+      <a href={`/x/${token}`}>{matched}</a>
+    ));
+    const { container } = render(
+      <ChatText text="Hello [[adam]] world" renderCitation={renderCitation} />,
+    );
+    expect(renderCitation).not.toHaveBeenCalled();
+    expect(container.textContent ?? '').toContain('[[adam]]');
   });
 });
 

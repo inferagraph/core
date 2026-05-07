@@ -1,7 +1,13 @@
 import * as React from 'react';
 import { Marked, type Tokens } from 'marked';
 
-const CITATION_RE = /\[\[([a-z0-9][a-z0-9_-]*)\]\]/gi;
+// 0.12.0 wire format: `[[token|matched-text]]`. Both segments REQUIRED.
+// Tokens lacking the `|matched-text` portion are NOT recognized — they
+// fall through and render as plain text. Per project memory
+// `feedback_no_backcompat_in_inferagraph`, the old bare-`[[slug]]` shape
+// is gone; hosts upgrading from 0.11.x adopt the new shape on
+// consumption.
+const CITATION_RE = /\[\[([a-z0-9][a-z0-9_-]*)\|([^\]]+)\]\]/gi;
 
 /**
  * Per-instance markdown renderer. Crucially, the `html` renderer is
@@ -33,15 +39,23 @@ function escapeHtml(input: string): string {
 }
 
 export interface ChatTextProps {
-  /** The streamed assistant text (may include markdown + `[[id]]` tokens). */
+  /**
+   * The streamed assistant text. May contain markdown and the 0.12.0
+   * citation wire format `[[token|matched-text]]` — both segments
+   * required.
+   */
   text: string;
   /**
-   * Callback to render a citation token. Hosts wire their slug/label/type
-   * resolvers here. When omitted, the library renders the token verbatim
-   * (so `[[adam]]` shows as `[[adam]]` plain-text — useful for previews
-   * but consumers should always provide this in production).
+   * Callback to render a citation token. The library passes both the
+   * citation token (slug / id) and the model's exact matched text so the
+   * host can render `<a href={`/<type>/${slug}`}>{matchedText}</a>` —
+   * the model's casing wins.
+   *
+   * When omitted, the library renders `matchedText` verbatim — useful
+   * for previews; consumers should always provide this in production
+   * to wire up the click target.
    */
-  renderCitation?: (token: string) => React.ReactNode;
+  renderCitation?: (token: string, matchedText: string) => React.ReactNode;
   /** Optional className applied to the wrapping element. Lets the host theme. */
   className?: string;
 }
@@ -68,9 +82,10 @@ export function ChatText(props: ChatTextProps): React.ReactElement {
       nodes.push(renderInline(text.slice(last, match.index), key++));
     }
     const token = match[1];
+    const matchedText = match[2];
     nodes.push(
       <React.Fragment key={`cite-${key++}`}>
-        {renderCitation ? renderCitation(token) : `[[${token}]]`}
+        {renderCitation ? renderCitation(token, matchedText) : matchedText}
       </React.Fragment>,
     );
     last = match.index + match[0].length;

@@ -34,7 +34,10 @@ import type {
   ConversationStore,
   ConversationTurn,
 } from './ConversationStore.js';
-import { injectCitations } from './citationInjector.js';
+import {
+  injectCitations,
+  type CitationCandidate,
+} from './citationInjector.js';
 
 /**
  * Tunables for the AI engine. Phase 1 deliberately keeps this small — chat,
@@ -329,6 +332,19 @@ export class AIEngine {
    * Per chat call the buffer is fully consumed; entries are not repeated.
    */
   private pendingWarmupFailures: string[] = [];
+
+  /**
+   * 0.12.0 — memoized `{ token, title }[]` pairs derived from the WHOLE
+   * store. The injector consumes this list per chat turn; recomputing
+   * on each turn at biblegraph scale (~hundreds to low thousands of
+   * nodes) is single-digit ms, but we cache it keyed by `nodeCount` so
+   * back-to-back turns on a stable graph reuse the same array. When the
+   * node count changes (add/remove), the cache invalidates and rebuilds
+   * on the next access.
+   */
+  private citationCandidatesCache:
+    | { nodeCount: number; candidates: readonly CitationCandidate[] }
+    | undefined;
 
   constructor(
     store: GraphStore,
@@ -1133,23 +1149,24 @@ export class AIEngine {
       }
     }
 
-    // -- 0.11.0 deterministic citation injection. When the engine is
+    // -- 0.12.0 deterministic citation injection. When the engine is
     //    configured with `citationKey`, scan the accumulated assistant
-    //    text for first-occurrence titles and inject `[[citationKey]]`
-    //    inline. If the corrected text differs, emit a `text_replace`
-    //    event so hosts replace whatever streamed-incremental text the
-    //    bubble built up. The model's text-shape no longer matters —
+    //    text for entity-title occurrences anywhere in the WHOLE store
+    //    (not just relevantNodes) and rewrite each into the new
+    //    `[[token|matched-text]]` wire. Out-of-rerank-top-K entities
+    //    that nonetheless show up in the model's prose (e.g. "Father
+    //    of Cain, Abel, and Seth" when only Adam is the rerank focus)
+    //    still get cited. The model's text-shape no longer matters —
     //    citations become a guaranteed property of the chat pipeline.
     if (this.citationKey !== undefined && !signal?.aborted) {
       const fullText = reduced.textBuffer + synthesized;
-      if (fullText.length > 0 && relevantNodes.length > 0) {
-        const corrected = injectCitations(
-          fullText,
-          relevantNodes,
-          this.citationKey,
-        );
-        if (corrected !== fullText) {
-          yield { type: 'text_replace', text: corrected };
+      if (fullText.length > 0) {
+        const candidates = this.buildCitationCandidates();
+        if (candidates.length > 0) {
+          const corrected = injectCitations(fullText, candidates);
+          if (corrected !== fullText) {
+            yield { type: 'text_replace', text: corrected };
+          }
         }
       }
     }
@@ -1671,36 +1688,59 @@ export class AIEngine {
     lines.push('');
     lines.push('Citations:');
     lines.push('');
+    lines.push(
+      'Write naturally using each entity\'s name. The engine adds citation links automatically — you do not need to emit `[[id]]` tokens.',
+    );
     if (this.citationKey !== undefined) {
-      lines.push(
-        'Cite each first-mentioned entity with `[[id]]` where `id` is the value in the LAST column of each catalog row (the citation key — appears AFTER the final ` | `). The host injects citations automatically if you skip them, but emitting them inline produces tighter, lower-latency output.',
-      );
       lines.push('');
       lines.push(
-        'Example: "Cain [[cain]] slew his brother Abel [[abel]] in the field, then was banished to the land of Nod [[land-of-nod]]."',
-      );
-      lines.push('');
-      lines.push(
-        'Note: `highlight()` and `focus()` accept the FIRST column (the canonical id) — use those for tool calls, and the LAST column (the citation key) for `[[...]]` text citations.',
-      );
-    } else {
-      lines.push(
-        'Cite each first-mentioned entity with `[[id]]` where `id` is the catalog id (the value before the first ` | ` in each catalog row). The host injects citations automatically if you skip them, but emitting them inline produces tighter, lower-latency output.',
-      );
-      lines.push('');
-      lines.push(
-        'Example: "The first man [[node-id-1]] and his wife [[node-id-2]] dwelt there."',
+        'Note: `highlight()` and `focus()` accept the FIRST column (the canonical id). Use those for tool calls.',
       );
     }
     lines.push('');
     lines.push(
-      'Every factual claim must reference a node id from the catalog. If the catalog does not contain the answer, say "I do not have data on that" — do not extrapolate or invent.',
+      'Every factual claim must reference an entity from the catalog. If the catalog does not contain the answer, say "I do not have data on that" — do not extrapolate or invent.',
     );
 
     return [
       { role: 'system', content: lines.join('\n') },
       { role: 'user', content: message },
     ];
+  }
+
+  /**
+   * 0.12.0 — derive `{ token, title }` pairs for every node in the store.
+   * The injector matches titles against the whole store so an entity
+   * outside the per-turn rerank top-K (e.g. Seth in a turn focused on
+   * Adam) still gets cited when its title appears in the response.
+   *
+   * Skips nodes missing either a citationKey value (or a usable id
+   * fallback) or a display title — those candidates can't produce a
+   * meaningful link. Memoized on `store.nodeCount`; the cached array
+   * is reused across turns when the graph is stable.
+   */
+  private buildCitationCandidates(): readonly CitationCandidate[] {
+    if (this.citationKey === undefined) return [];
+    const nodeCount = this.store.nodeCount;
+    if (
+      this.citationCandidatesCache !== undefined &&
+      this.citationCandidatesCache.nodeCount === nodeCount
+    ) {
+      return this.citationCandidatesCache.candidates;
+    }
+    const out: CitationCandidate[] = [];
+    for (const node of this.store.getAllNodes()) {
+      const attrs = node.attributes ?? {};
+      const title = pickTitleAttribute(attrs);
+      if (typeof title !== 'string' || title.length === 0) continue;
+      const raw = attrs[this.citationKey];
+      const token =
+        typeof raw === 'string' && raw.length > 0 ? raw : node.id;
+      if (typeof token !== 'string' || token.length === 0) continue;
+      out.push({ token, title });
+    }
+    this.citationCandidatesCache = { nodeCount, candidates: out };
+    return out;
   }
 
   /**

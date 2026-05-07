@@ -133,10 +133,12 @@ describe('AIEngine.buildChatMessages — tool-call examples are host-agnostic', 
     expect(examples).toContain('focus("<node-id>")');
   });
 
-  it('keeps the citationKey-set branch slug-shaped example intact (Cain [[cain]])', async () => {
-    // The slug-shaped citation example is intentional under citationKey
-    // (per 0.9.4); this guard ensures the 0.9.5 cleanup did not also
-    // touch the citation branch.
+  it('does NOT emit instructional `[[token]]` examples (0.12.0 — engine handles citations)', async () => {
+    // 0.12.0 — the prompt no longer asks the model to emit `[[id]]`
+    // tokens (the engine inserts citations after the stream completes).
+    // The slug-shaped instructional example from 0.9.4 is intentionally
+    // gone so the model writes naturally; this guard pins that
+    // deletion.
     const store = makeStore();
     const { provider, getSystemPrompt } = captureSystemPrompt();
     const engine = new AIEngine(store, new QueryEngine(store), {
@@ -146,6 +148,8 @@ describe('AIEngine.buildChatMessages — tool-call examples are host-agnostic', 
 
     await collect(engine.chat('hi'));
 
-    expect(getSystemPrompt()).toContain('Cain [[cain]]');
+    const sys = getSystemPrompt();
+    expect(sys).not.toContain('Cain [[cain]]');
+    expect(sys).not.toContain('[[node-id-1]]');
   });
 });
