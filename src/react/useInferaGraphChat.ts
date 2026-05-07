@@ -111,7 +111,11 @@ async function* runChat(
   opts: ChatOptions,
   ctx: {
     getTransport: () => { chat: (m: string, o?: ChatOptions) => AsyncIterable<ChatEvent> } | null;
-    dispatch: (event: ChatEvent) => void;
+    dispatch: (event: ChatEvent) => {
+      tool: string;
+      appliedIds?: string[];
+      unknownIds?: string[];
+    } | undefined;
     onDiagnostic?: (event: Extract<ChatEvent, { type: 'debug' }>) => void;
     onToolCallOutcome?: (outcome: {
       tool: string;
@@ -140,15 +144,15 @@ async function* runChat(
       ev.type === 'annotate' ||
       ev.type === 'set_inferred_visibility'
     ) {
-      // Dispatch to the renderer; do NOT surface to the host.
-      ctx.dispatch(ev);
-      // Fire an outcome callback so hosts can render "applied / unknown"
-      // badges. The renderer doesn't currently report unknownIds back
-      // through dispatch, so for now we surface the requested ids as
-      // appliedIds. A future enhancement will reconcile against the
-      // store's known-ids set.
+      // Dispatch to the renderer; do NOT surface to the host. The
+      // dispatcher may return a ToolCallOutcome carrying appliedIds /
+      // unknownIds (controller knows which requested ids resolved); when
+      // it does, prefer that over the static `computeToolCallOutcome`
+      // fallback so hosts render real "tried to highlight Z but it
+      // isn't in the graph" badges.
+      const dispatchOutcome = ctx.dispatch(ev);
       if (ctx.onToolCallOutcome) {
-        const outcome = computeToolCallOutcome(ev);
+        const outcome = dispatchOutcome ?? computeToolCallOutcome(ev);
         if (outcome) ctx.onToolCallOutcome(outcome);
       }
       continue;
