@@ -575,29 +575,38 @@ function InferaGraphInner({
       },
       dispatch: (event: ChatEvent) => {
         const controller = controllerRef.current;
-        if (!controller) return;
+        if (!controller) return undefined;
         switch (event.type) {
           case 'apply_filter':
             controller.setFilter(event.predicate);
-            return;
-          case 'highlight':
-            controller.setHighlight(event.ids);
-            return;
-          case 'focus':
-            controller.focusOn(event.nodeId);
-            return;
+            return undefined;
+          case 'highlight': {
+            // 0.9.3: SceneController now returns appliedIds + unknownIds
+            // from setHighlight so the host can render "tried to
+            // highlight Z but it isn't in the graph" badges.
+            const { appliedIds, unknownIds } = controller.setHighlight(
+              event.ids,
+            );
+            return { tool: 'highlight', appliedIds, unknownIds };
+          }
+          case 'focus': {
+            const { appliedIds, unknownIds } = controller.focusOn(
+              event.nodeId,
+            );
+            return { tool: 'focus', appliedIds, unknownIds };
+          }
           case 'annotate':
             controller.annotate(event.nodeId, event.text);
-            return;
+            return undefined;
           case 'set_inferred_visibility':
             // Phase 5: route the LLM's overlay-toggle tool call to
             // the renderer. Subagent A added the ChatEvent variant +
             // `parseToolCall` mapping; Subagent B (this file) wires
             // the dispatch.
             controller.setInferredEdgeVisibility(event.visible);
-            return;
+            return undefined;
           default:
-            return;
+            return undefined;
         }
       },
       onDiagnostic: (event) => {

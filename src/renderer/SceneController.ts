@@ -2003,9 +2003,23 @@ export class SceneController implements InferredEdgeHost {
    * even when "highlighted." This is intentional: visibility is the
    * stronger constraint.
    */
-  setHighlight(ids: ReadonlySet<string>): void {
+  setHighlight(ids: ReadonlySet<string>): {
+    appliedIds: string[];
+    unknownIds: string[];
+  } {
     this.highlightIds = new Set(ids);
     this.applyHighlightMask();
+    // Partition the requested ids against `nodeIdsByIndex` so the host
+    // can render "applied / unknown" outcome badges. The visual effect
+    // is unchanged — meshes already ignore ids they don't carry.
+    const known = new Set(this.nodeIdsByIndex);
+    const appliedIds: string[] = [];
+    const unknownIds: string[] = [];
+    for (const id of ids) {
+      if (known.has(id)) appliedIds.push(id);
+      else unknownIds.push(id);
+    }
+    return { appliedIds, unknownIds };
   }
 
   /** Active highlight set (for tests + introspection). */
@@ -2128,15 +2142,22 @@ export class SceneController implements InferredEdgeHost {
    *
    * No-op when the node is unknown or no layout has run yet.
    */
-  focusOn(nodeId: string): void {
+  focusOn(nodeId: string): {
+    appliedIds: string[];
+    unknownIds: string[];
+  } {
     const idx = this.nodeIdsByIndex.indexOf(nodeId);
-    if (idx < 0) return;
+    if (idx < 0) return { appliedIds: [], unknownIds: [nodeId] };
     const positions = this.layoutEngine.animated
       ? this.layoutEngine.getPositions()
       : this.layoutCache.get(this.layoutMode);
     const pos = positions?.get(nodeId);
-    if (!pos) return;
+    // The id IS registered in nodeIdsByIndex but no position is
+    // available yet (layout hasn't run). Treat as applied — the node
+    // exists, the camera move just couldn't execute this frame.
+    if (!pos) return { appliedIds: [nodeId], unknownIds: [] };
     this.cameraController.focusOn(pos);
+    return { appliedIds: [nodeId], unknownIds: [] };
   }
 
   /**

@@ -35,8 +35,13 @@ export interface InferaGraphChatContext {
    * Dispatch a tool-call event into the SceneController. Implementation
    * lives in `<InferaGraph>` because that's where the controller ref
    * is held.
+   *
+   * May return a {@link ToolCallOutcome} when the controller can report
+   * applied / unknown ids for the dispatched event (today: `highlight`
+   * and `focus`). Returning `undefined` signals the hook should fall
+   * back to its own `computeToolCallOutcome`.
    */
-  dispatch: (event: ChatEvent) => void;
+  dispatch: (event: ChatEvent) => ToolCallOutcome | undefined;
   /**
    * **Optional** — fire when the engine emits a `debug` ChatEvent.
    * Hosts use this to render diagnostic badges underneath assistant

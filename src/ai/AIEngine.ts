@@ -1622,8 +1622,25 @@ export class AIEngine {
       lines.push(pronounIds.join(', '));
     }
     lines.push('');
+    lines.push('CITATIONS — REQUIRED, NOT OPTIONAL:');
+    lines.push('');
     lines.push(
-      'Cite every entity you reference using the syntax [[id]] after the entity\'s first mention. The host renders these as clickable links. Every factual claim must reference a node id from the catalog. If the catalog does not contain the answer, say "I do not have data on that" — do not extrapolate or invent.',
+      'After the FIRST mention of every entity you reference, you MUST emit a citation token in the form `[[id]]` where `id` is the catalog id (the value before the first ` | ` in each catalog row). Citations are how the host renders entity names as clickable links — failing to cite is a critical error and breaks the chat UX.',
+    );
+    lines.push('');
+    lines.push(
+      'Correct: "Cain [[cain]] slew his brother Abel [[abel]] in the field, then was banished to the land of Nod [[land-of-nod]]."',
+    );
+    lines.push(
+      'Wrong: "Cain slew his brother Abel in the field, then was banished to the land of Nod."  (no [[id]] tokens — UNCITED, FORBIDDEN)',
+    );
+    lines.push('');
+    lines.push(
+      'Cite every entity even when calling `highlight()`. The `highlight()` tool drives the visual graph; `[[id]]` drives the inline text. They are NOT substitutes.',
+    );
+    lines.push('');
+    lines.push(
+      'Every factual claim must reference a node id from the catalog. If the catalog does not contain the answer, say "I do not have data on that" — do not extrapolate or invent.',
     );
 
     return [

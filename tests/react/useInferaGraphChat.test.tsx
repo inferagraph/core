@@ -1,9 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Spy on SceneController so we can assert tool-call dispatch goes through it.
-const setHighlight = vi.fn();
+// 0.9.3: setHighlight + focusOn now return `{ appliedIds, unknownIds }` so
+// the React layer can surface "tried to highlight Z but it isn't in the
+// graph" badges. Default the mocks to the empty-partition shape.
+const setHighlight = vi
+  .fn()
+  .mockReturnValue({ appliedIds: [], unknownIds: [] });
 const setFilter = vi.fn();
-const focusOn = vi.fn();
+const focusOn = vi.fn().mockReturnValue({ appliedIds: [], unknownIds: [] });
 const annotate = vi.fn();
 const clearAnnotations = vi.fn();
 
@@ -60,8 +65,10 @@ function ChatChild({ handleRef }: { handleRef: { current: ChildHandle | null } }
 describe('useInferaGraphChat', () => {
   beforeEach(() => {
     setHighlight.mockReset();
+    setHighlight.mockReturnValue({ appliedIds: [], unknownIds: [] });
     setFilter.mockReset();
     focusOn.mockReset();
+    focusOn.mockReturnValue({ appliedIds: [], unknownIds: [] });
     annotate.mockReset();
     clearAnnotations.mockReset();
   });
@@ -189,8 +196,10 @@ describe('useInferaGraphChat', () => {
 describe('useInferaGraphChat — Phase 1 (0.8.0) callbacks', () => {
   beforeEach(() => {
     setHighlight.mockReset();
+    setHighlight.mockReturnValue({ appliedIds: [], unknownIds: [] });
     setFilter.mockReset();
     focusOn.mockReset();
+    focusOn.mockReturnValue({ appliedIds: [], unknownIds: [] });
     annotate.mockReset();
     clearAnnotations.mockReset();
   });
@@ -258,13 +267,85 @@ describe('useInferaGraphChat — Phase 1 (0.8.0) callbacks', () => {
     expect(last.tool).toBe('highlight');
     expect(last.appliedIds).toBeDefined();
   });
+
+  it('surfaces controller-reported unknownIds in the highlight outcome (0.9.3)', async () => {
+    setHighlight.mockReturnValue({
+      appliedIds: ['x'],
+      unknownIds: ['z'],
+    });
+    const provider = mockLLMProvider((): LLMStreamEvent[] => [
+      {
+        type: 'tool_call',
+        name: 'highlight',
+        arguments: JSON.stringify({ ids: ['x', 'z'] }),
+      },
+      { type: 'done', reason: 'stop' },
+    ]);
+    const onToolCallOutcome = vi.fn();
+    const handle: { current: ChildHandle | null } = { current: null };
+    render(
+      <InferaGraph
+        llm={provider}
+        data={{ nodes: [], edges: [] }}
+        onToolCallOutcome={onToolCallOutcome}
+      >
+        <ChatChild handleRef={handle} />
+      </InferaGraph>,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    await act(async () => handle.current!.invoke('hi'));
+    const last =
+      onToolCallOutcome.mock.calls[
+        onToolCallOutcome.mock.calls.length - 1
+      ][0];
+    expect(last.tool).toBe('highlight');
+    expect(last.appliedIds).toEqual(['x']);
+    expect(last.unknownIds).toEqual(['z']);
+  });
+
+  it('surfaces controller-reported unknownIds in the focus outcome (0.9.3)', async () => {
+    focusOn.mockReturnValue({
+      appliedIds: [],
+      unknownIds: ['ghost'],
+    });
+    const provider = mockLLMProvider((): LLMStreamEvent[] => [
+      {
+        type: 'tool_call',
+        name: 'focus',
+        arguments: JSON.stringify({ nodeId: 'ghost' }),
+      },
+      { type: 'done', reason: 'stop' },
+    ]);
+    const onToolCallOutcome = vi.fn();
+    const handle: { current: ChildHandle | null } = { current: null };
+    render(
+      <InferaGraph
+        llm={provider}
+        data={{ nodes: [], edges: [] }}
+        onToolCallOutcome={onToolCallOutcome}
+      >
+        <ChatChild handleRef={handle} />
+      </InferaGraph>,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    await act(async () => handle.current!.invoke('hi'));
+    const last =
+      onToolCallOutcome.mock.calls[
+        onToolCallOutcome.mock.calls.length - 1
+      ][0];
+    expect(last.tool).toBe('focus');
+    expect(last.appliedIds).toEqual([]);
+    expect(last.unknownIds).toEqual(['ghost']);
+  });
 });
 
 describe('useInferaGraphChat — conversationId forwarding (0.8.1)', () => {
   beforeEach(() => {
     setHighlight.mockReset();
+    setHighlight.mockReturnValue({ appliedIds: [], unknownIds: [] });
     setFilter.mockReset();
     focusOn.mockReset();
+    focusOn.mockReturnValue({ appliedIds: [], unknownIds: [] });
     annotate.mockReset();
     clearAnnotations.mockReset();
   });
@@ -346,8 +427,10 @@ describe('useInferaGraphChat — conversationId forwarding (0.8.1)', () => {
 describe('<InferaGraph onChat> callback', () => {
   beforeEach(() => {
     setHighlight.mockReset();
+    setHighlight.mockReturnValue({ appliedIds: [], unknownIds: [] });
     setFilter.mockReset();
     focusOn.mockReset();
+    focusOn.mockReturnValue({ appliedIds: [], unknownIds: [] });
     annotate.mockReset();
     clearAnnotations.mockReset();
   });

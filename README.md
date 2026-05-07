@@ -26,6 +26,11 @@ InferaGraph is a self-contained platform that holds graph data, performs AI reas
 - React entry point + a separate `data` entry for Next.js RSC contexts
 - CSS-themable overlays and controls
 
+## What's new in 0.9.3
+
+- **Citation requirement strengthened.** The chat system-prompt's "cite every entity using `[[id]]`" instruction is now framed as `CITATIONS — REQUIRED, NOT OPTIONAL`, with a concrete `Cain [[cain]]` example and an `UNCITED, FORBIDDEN` counterexample. Tool-use-trained models read soft "cite" verbs as optional; the harder framing matches the pattern already used for `highlight()` higher in the same prompt and stops models from skipping citations on multi-entity answers.
+- **`SceneController.setHighlight` and `focusOn` now return `{ appliedIds, unknownIds }`.** When the LLM dispatches a `highlight()` or `focus()` tool call referencing an id the renderer hasn't seen (model hallucination or stale context), the React layer used to silently swallow the miss. The dispatch path now flows the partition through `onToolCallOutcome`, so hosts can render "tried to highlight `Z` but it isn't in the graph" badges. Existing callers that ignored the void return are unaffected at the call site, but `dispatch` in `InferaGraphChatContext` is now typed `(event) => ToolCallOutcome | undefined` — host adapters that conformed to the previous `void` signature should accept the new return value.
+
 ## What's new in 0.9.1
 
 - **`Datasource` → `DataSource` rename (breaking).** The abstract base class exported from `@inferagraph/core` and `@inferagraph/core/data` is now `DataSource` (camel-cased), matching the naming convention used by every sibling storage package (`CosmosDataSource`, `GremlinDataSource`, `SqlDataSource`, `RedisDataSource`, `FileDataSource`, `LogAnalyticsDataSource`). Behavior is unchanged. Hosts that subclass the base directly should rename `extends Datasource` → `extends DataSource` and update their import.
