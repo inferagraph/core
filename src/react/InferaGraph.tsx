@@ -605,6 +605,19 @@ function InferaGraphInner({
             // the dispatch.
             controller.setInferredEdgeVisibility(event.visible);
             return undefined;
+          // 0.10.0 — host-driven visual-reset commands. Hosts dispatch
+          // these via `useInferaGraphCommands` / the low-level
+          // `useInferaGraphChatContext`. Parameterless — controller
+          // methods compose existing surfaces.
+          case 'clear_visual_state':
+            controller.clearVisualState();
+            return undefined;
+          case 'reset_view':
+            controller.resetView();
+            return undefined;
+          case 'clear_annotations':
+            controller.clearAnnotations();
+            return undefined;
           default:
             return undefined;
         }

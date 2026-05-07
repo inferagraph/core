@@ -2181,6 +2181,39 @@ export class SceneController implements InferredEdgeHost {
     return this.annotationRenderer;
   }
 
+  /**
+   * 0.10.0 — camera-only home command. Snaps the camera back to its
+   * captured initial orientation. The orbit radius is preserved (a
+   * mid-zoom user keeps their zoom level), matching
+   * {@link CameraController.resetRotation}'s default.
+   *
+   * Public counterpart of the new `reset_view` ChatEvent. Composes the
+   * existing CameraController surface — does not introduce new internal
+   * state.
+   */
+  resetView(): void {
+    this.cameraController.resetRotation();
+  }
+
+  /**
+   * 0.10.0 — comprehensive "fresh canvas" reset. Drops the highlight set,
+   * removes every annotation, clears the active filter (every node
+   * visible), and snaps the camera home. Used by the host's
+   * "Clear conversation" UX so the prior answer's dimming + callouts +
+   * scoped filter don't bleed into the next turn.
+   *
+   * Pure composition of existing methods — adding behavior here means
+   * adding it to the underlying surfaces (`setHighlight`,
+   * `clearAnnotations`, `setFilter`, `cameraController.resetRotation`),
+   * never inventing new state.
+   */
+  clearVisualState(): void {
+    this.setHighlight(new Set<string>());
+    this.clearAnnotations();
+    this.setFilter(undefined);
+    this.cameraController.resetRotation();
+  }
+
   /** The "+" hover affordance (exposed for tests + advanced consumers). */
   getExpandAffordance(): ExpandAffordance {
     return this.expandAffordance;

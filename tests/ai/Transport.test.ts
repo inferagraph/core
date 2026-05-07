@@ -303,4 +303,50 @@ describe('httpTransport', () => {
     expect(events.some((e) => e.type === 'debug')).toBe(false);
     expect(events[events.length - 1].type).toBe('done');
   });
+
+  // 0.10.0 — three new parameterless ChatEvents that hosts dispatch via
+  // `useInferaGraphCommands` / `useInferaGraphChatContext`. They round-trip
+  // over the SSE wire too so a server-side route (e.g. an automation script)
+  // can fire a "fresh canvas" reset.
+  it('reconstructs the new clear_visual_state event over the wire', async () => {
+    const sse =
+      `data: ${JSON.stringify({ type: 'clear_visual_state' })}\n\n` +
+      `data: ${JSON.stringify({ type: 'done', reason: 'stop' })}\n\n`;
+    const fetch = vi.fn(async () => sseResponse(sse));
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    const events = await collect(
+      transport.chat('hi', { emitToolCalls: true }),
+    );
+    expect(events.find((e) => e.type === 'clear_visual_state')).toEqual({
+      type: 'clear_visual_state',
+    });
+  });
+
+  it('reconstructs the new reset_view event over the wire', async () => {
+    const sse =
+      `data: ${JSON.stringify({ type: 'reset_view' })}\n\n` +
+      `data: ${JSON.stringify({ type: 'done', reason: 'stop' })}\n\n`;
+    const fetch = vi.fn(async () => sseResponse(sse));
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    const events = await collect(
+      transport.chat('hi', { emitToolCalls: true }),
+    );
+    expect(events.find((e) => e.type === 'reset_view')).toEqual({
+      type: 'reset_view',
+    });
+  });
+
+  it('reconstructs the new clear_annotations event over the wire', async () => {
+    const sse =
+      `data: ${JSON.stringify({ type: 'clear_annotations' })}\n\n` +
+      `data: ${JSON.stringify({ type: 'done', reason: 'stop' })}\n\n`;
+    const fetch = vi.fn(async () => sseResponse(sse));
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    const events = await collect(
+      transport.chat('hi', { emitToolCalls: true }),
+    );
+    expect(events.find((e) => e.type === 'clear_annotations')).toEqual({
+      type: 'clear_annotations',
+    });
+  });
 });

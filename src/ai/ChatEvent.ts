@@ -67,6 +67,37 @@ export type ChatEvent =
       visible: boolean;
     }
   | {
+      /**
+       * 0.10.0 — host-driven "fresh canvas" command. Comprehensive reset:
+       * clears highlights + annotations + filter, and snaps the camera
+       * back to its initial orientation. Parameterless. Hosts dispatch
+       * via `useInferaGraphCommands().clearVisualState()` (semantic
+       * facade) or `useInferaGraphChatContext().dispatch({...})`
+       * (low-level escape hatch).
+       *
+       * Servers MAY emit this on the wire (e.g. an automation route
+       * fires "clear and re-frame" after a long batch), but the
+       * primary use case is host UI ("Clear conversation").
+       */
+      type: 'clear_visual_state';
+    }
+  | {
+      /**
+       * 0.10.0 — camera-only home command. Snaps the camera back to its
+       * captured initial orientation (radius preserved). Parameterless.
+       */
+      type: 'reset_view';
+    }
+  | {
+      /**
+       * 0.10.0 — drop every annotation currently mounted via the
+       * AnnotationRenderer. Parameterless — there is no "clear one"
+       * variant; per-node clearing stays an internal SceneController
+       * affordance, not a chat-event surface.
+       */
+      type: 'clear_annotations';
+    }
+  | {
       type: 'debug';
       /**
        * Diagnostic phase the engine (or host route) is reporting on. Each

@@ -321,6 +321,18 @@ function reconstructChatEvent(parsed: unknown): ChatEvent | null {
       if (typeof p.nodeId !== 'string' || typeof p.text !== 'string') return null;
       return { type: 'annotate', nodeId: p.nodeId, text: p.text };
     }
+    // 0.10.0 — three new parameterless host-driven commands. They round-trip
+    // over the SSE wire so a server-side route can fire a "fresh canvas"
+    // reset just like a host UI button. No fields beyond `type` to validate.
+    case 'clear_visual_state': {
+      return { type: 'clear_visual_state' };
+    }
+    case 'reset_view': {
+      return { type: 'reset_view' };
+    }
+    case 'clear_annotations': {
+      return { type: 'clear_annotations' };
+    }
     case 'done': {
       const reason = p.reason;
       const error = typeof p.error === 'string' ? p.error : undefined;
