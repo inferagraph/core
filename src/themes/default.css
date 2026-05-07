@@ -175,3 +175,20 @@
 .ig-overlay-root > * {
   pointer-events: auto;
 }
+
+/*
+ * Chat-text inline-markdown defaults. The `<ChatText>` component pipes
+ * non-citation segments through marked.parseInline + DOMPurify, producing
+ * <strong>, <em>, and <code> tags. These rules give the rendered HTML
+ * reasonable typography out of the box; hosts can override either by
+ * styling .ig-chat-text directly or by passing a custom className.
+ */
+.ig-chat-text strong { font-weight: 600; }
+.ig-chat-text em { font-style: italic; }
+.ig-chat-text code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+  padding: 0 0.25em;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 3px;
+}

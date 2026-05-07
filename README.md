@@ -26,6 +26,10 @@ InferaGraph is a self-contained platform that holds graph data, performs AI reas
 - React entry point + a separate `data` entry for Next.js RSC contexts
 - CSS-themable overlays and controls
 
+## What's new in 0.10.2
+
+- **`<ChatText>` React component — library now owns chat-text rendering.** Hosts streaming assistant replies were each rolling their own markdown + citation parser (Bible Graph shipped one in `ChatBubble.tsx` last week), pulling `marked` + `isomorphic-dompurify` into the host bundle and re-implementing the `[[id]]` token walk every time. The new component centralizes parse + sanitize + node assembly inside the library so the host's responsibility narrows to CSS styling and citation-link wiring. Pass `text` (the raw streamed string) plus an optional `renderCitation(token)` callback that returns the React node a `[[token]]` should become; the library splits on the citation regex, runs each non-citation segment through `marked.parseInline()` + DOMPurify, and assembles the result. Default class is `.ig-chat-text` — `themes/default.css` and `themes/dark.css` ship `<strong>` / `<em>` / `<code>` typography rules so consumers get reasonable rendering out of the box; pass `className` to override. New runtime deps: `marked` ^18.0.3 and `isomorphic-dompurify` ^3.12.0 (already present in Bible Graph's bundle, so the migration is a net code reduction host-side).
+
 ## What's new in 0.10.1
 
 - **`httpTransport` now reconstructs `set_inferred_visibility` from the SSE wire.** The event has been a member of the `ChatEvent` union since Phase 5 (inferred-relationship overlay toggle), but `reconstructChatEvent` never grew a case for it, so a server-side route emitting `{ type: 'set_inferred_visibility', visible: ... }` was silently dropped on the client. Clients now receive both `visible: true` and `visible: false` faithfully; payloads with a non-boolean `visible` field are rejected at the boundary just like the other event reconstructors. Pre-existing tech debt; no public API change.
