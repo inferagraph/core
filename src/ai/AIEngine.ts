@@ -333,19 +333,6 @@ export class AIEngine {
    */
   private pendingWarmupFailures: string[] = [];
 
-  /**
-   * 0.12.0 — memoized `{ token, title }[]` pairs derived from the WHOLE
-   * store. The injector consumes this list per chat turn; recomputing
-   * on each turn at biblegraph scale (~hundreds to low thousands of
-   * nodes) is single-digit ms, but we cache it keyed by `nodeCount` so
-   * back-to-back turns on a stable graph reuse the same array. When the
-   * node count changes (add/remove), the cache invalidates and rebuilds
-   * on the next access.
-   */
-  private citationCandidatesCache:
-    | { nodeCount: number; candidates: readonly CitationCandidate[] }
-    | undefined;
-
   constructor(
     store: GraphStore,
     _queryEngine: QueryEngine,
@@ -1709,25 +1696,23 @@ export class AIEngine {
   }
 
   /**
-   * 0.12.0 — derive `{ token, title }` pairs for every node in the store.
+   * 0.12.1 — derive `{ token, title }` pairs for every node in the store.
    * The injector matches titles against the whole store so an entity
    * outside the per-turn rerank top-K (e.g. Seth in a turn focused on
    * Adam) still gets cited when its title appears in the response.
    *
    * Skips nodes missing either a citationKey value (or a usable id
    * fallback) or a display title — those candidates can't produce a
-   * meaningful link. Memoized on `store.nodeCount`; the cached array
-   * is reused across turns when the graph is stable.
+   * meaningful link.
+   *
+   * 0.12.1 dropped the previous `nodeCount`-keyed memo. Attribute-only
+   * edits (e.g. a slug rename with no add/remove) leave the count stable
+   * so a count-keyed cache served stale candidates. Per-turn rebuild
+   * cost is single-digit ms at biblegraph scale (~hundreds to low
+   * thousands of nodes); not worth the freshness hazard.
    */
   private buildCitationCandidates(): readonly CitationCandidate[] {
     if (this.citationKey === undefined) return [];
-    const nodeCount = this.store.nodeCount;
-    if (
-      this.citationCandidatesCache !== undefined &&
-      this.citationCandidatesCache.nodeCount === nodeCount
-    ) {
-      return this.citationCandidatesCache.candidates;
-    }
     const out: CitationCandidate[] = [];
     for (const node of this.store.getAllNodes()) {
       const attrs = node.attributes ?? {};
@@ -1739,7 +1724,6 @@ export class AIEngine {
       if (typeof token !== 'string' || token.length === 0) continue;
       out.push({ token, title });
     }
-    this.citationCandidatesCache = { nodeCount, candidates: out };
     return out;
   }
 

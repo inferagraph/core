@@ -159,4 +159,43 @@ describe('AIEngine.chat — server-side citation injection (0.12.0 wire)', () =>
     const events = await collect(engine.chat('Tell me about Cain.'));
     expect(events.find((e) => e.type === 'text_replace')).toBeUndefined();
   });
+
+  it('reflects in-place attribute edits on the next chat turn (no stale candidates)', async () => {
+    // 0.12.1 regression case — earlier code memoized the candidate list
+    // on `store.nodeCount`, so an attribute-only edit (e.g. a slug
+    // rename with no add/remove) was invisible to the next turn. The
+    // fix dropped memoization entirely; per-turn cost is single-digit
+    // ms at biblegraph scale and freshness is mandatory. This test
+    // pins the behavior: rename `cain` → `firstborn-cain` between
+    // turns and verify the second turn cites the new slug.
+    const store = makeStore();
+    const engine = new AIEngine(store, new QueryEngine(store), {
+      citationKey: 'slug',
+    });
+    const provider = mockLLMProvider((): LLMStreamEvent[] => [
+      { type: 'text', delta: 'About Cain.' },
+      { type: 'done', reason: 'stop' },
+    ]);
+    engine.setProvider(provider);
+
+    // First turn — primes any internal caches a previous build may
+    // have populated.
+    await collect(engine.chat('Tell me about Cain.'));
+
+    // In-place attribute edit: change Cain's slug. Same nodeCount,
+    // so a count-keyed memo would have served stale data.
+    const cain = store.getNode('uuid-cain');
+    if (cain === undefined) throw new Error('expected uuid-cain to exist');
+    cain.setAttribute('slug', 'firstborn-cain');
+
+    // Second turn — must use the NEW slug, not a cached old one.
+    const events = await collect(engine.chat('Tell me about Cain again.'));
+    const replace = events.find(
+      (e): e is Extract<ChatEvent, { type: 'text_replace' }> =>
+        e.type === 'text_replace',
+    );
+    expect(replace).toBeDefined();
+    expect(replace!.text).toContain('[[firstborn-cain|Cain]]');
+    expect(replace!.text).not.toContain('[[cain|');
+  });
 });

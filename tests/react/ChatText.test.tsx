@@ -162,6 +162,137 @@ describe('ChatText sanitization', () => {
   });
 });
 
+describe('ChatText markdown wrapping a citation (0.12.1)', () => {
+  // 0.12.0 split the text on citations FIRST, then ran marked on each
+  // non-citation segment. That broke `**[[slug|text]]**` because the
+  // splitter handed marked an orphan `**` on each side of the citation.
+  // 0.12.1 reworks the parser to register `[[slug|text]]` as a marked
+  // inline extension, so the citation lands inside the emphasis token
+  // tree and renders correctly.
+
+  const renderCitation = (token: string, matched: string) => (
+    <a href={`/person/${token}`}>{matched}</a>
+  );
+
+  it('renders **[[slug|text]]** as <strong><a>text</a></strong>', () => {
+    const { container } = render(
+      <ChatText
+        text="Bold-cited: **[[cain|Cain]]** ok."
+        renderCitation={renderCitation}
+      />,
+    );
+    const strong = container.querySelector('strong');
+    expect(strong).not.toBeNull();
+    const link = strong?.querySelector('a');
+    expect(link).not.toBeNull();
+    expect(link).toHaveAttribute('href', '/person/cain');
+    expect(link).toHaveTextContent('Cain');
+    // No orphan asterisks survive.
+    expect(container.textContent ?? '').not.toContain('**');
+  });
+
+  it('renders citation inside *italic* surrounding it', () => {
+    const { container } = render(
+      <ChatText
+        text="*italic [[cain|Cain]] still italic*"
+        renderCitation={renderCitation}
+      />,
+    );
+    const em = container.querySelector('em');
+    expect(em).not.toBeNull();
+    expect(em).toHaveTextContent('italic Cain still italic');
+    const link = em?.querySelector('a');
+    expect(link).not.toBeNull();
+    expect(link).toHaveAttribute('href', '/person/cain');
+  });
+
+  it('renders nested **bold *italic [[slug|text]]* bold**', () => {
+    const { container } = render(
+      <ChatText
+        text="**bold *italic [[cain|Cain]]* bold**"
+        renderCitation={renderCitation}
+      />,
+    );
+    const strong = container.querySelector('strong');
+    expect(strong).not.toBeNull();
+    const em = strong?.querySelector('em');
+    expect(em).not.toBeNull();
+    const link = em?.querySelector('a');
+    expect(link).not.toBeNull();
+    expect(link).toHaveAttribute('href', '/person/cain');
+    expect(link).toHaveTextContent('Cain');
+    expect(container.textContent ?? '').not.toContain('**');
+    // The italic asterisks must also not survive as plain text.
+    const visibleText = container.textContent ?? '';
+    expect(visibleText).toContain('bold italic Cain bold');
+  });
+
+  it('does NOT process citations inside `code` spans (codespan is opaque)', () => {
+    const renderCitationSpy = vi.fn(renderCitation);
+    const { container } = render(
+      <ChatText
+        text="The slug is `code with [[cain|Cain]] inside`."
+        renderCitation={renderCitationSpy}
+      />,
+    );
+    const code = container.querySelector('code');
+    expect(code).not.toBeNull();
+    // The codespan content survives literally — no citation extraction.
+    expect(code?.textContent ?? '').toContain('[[cain|Cain]]');
+    // And no anchor was emitted.
+    expect(container.querySelector('a')).toBeNull();
+    expect(renderCitationSpy).not.toHaveBeenCalled();
+  });
+
+  it('handles plain + citation + plain + emphasis (the common shape)', () => {
+    const { container } = render(
+      <ChatText
+        text="Hello [[cain|Cain]] world *radiant* end."
+        renderCitation={renderCitation}
+      />,
+    );
+    const link = container.querySelector('a');
+    expect(link).not.toBeNull();
+    expect(link).toHaveTextContent('Cain');
+    const em = container.querySelector('em');
+    expect(em).not.toBeNull();
+    expect(em).toHaveTextContent('radiant');
+    expect(container.textContent ?? '').toContain('Hello ');
+    expect(container.textContent ?? '').toContain(' world ');
+    expect(container.textContent ?? '').toContain(' end.');
+  });
+
+  it('handles adjacent citations with text between them', () => {
+    const { container } = render(
+      <ChatText
+        text="[[adam|Adam]] and [[eve|Eve]]"
+        renderCitation={renderCitation}
+      />,
+    );
+    const links = Array.from(container.querySelectorAll('a'));
+    expect(links).toHaveLength(2);
+    expect(links[0]).toHaveAttribute('href', '/person/adam');
+    expect(links[0]).toHaveTextContent('Adam');
+    expect(links[1]).toHaveAttribute('href', '/person/eve');
+    expect(links[1]).toHaveTextContent('Eve');
+  });
+
+  it('still escapes raw HTML in input (sanitization preserved)', () => {
+    const { container } = render(
+      <ChatText
+        text="cite [[cain|Cain]] then <script>alert(1)</script>"
+        renderCitation={renderCitation}
+      />,
+    );
+    expect(container.querySelector('script')).toBeNull();
+    expect(container.innerHTML).not.toContain('<script>');
+    // Citation still renders.
+    const link = container.querySelector('a');
+    expect(link).not.toBeNull();
+    expect(link).toHaveTextContent('Cain');
+  });
+});
+
 describe('ChatText className', () => {
   it('accepts a className override', () => {
     const { container } = render(

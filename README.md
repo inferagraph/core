@@ -26,6 +26,11 @@ InferaGraph is a self-contained platform that holds graph data, performs AI reas
 - React entry point + a separate `data` entry for Next.js RSC contexts
 - CSS-themable overlays and controls
 
+## What's new in 0.12.1
+
+- **`AIEngine.buildCitationCandidates` no longer memoizes.** 0.12.0 keyed the candidate list on `store.nodeCount`, so an attribute-only edit (e.g. a slug rename with no add/remove) left a stale cache in place and the next chat turn cited the old value. Per-turn rebuild cost is single-digit ms at biblegraph scale (~hundreds to low thousands of nodes); not worth the freshness hazard. The candidate list is now rebuilt fresh on every turn.
+- **`<ChatText>` parses citations as a marked inline extension instead of pre-splitting.** 0.12.0 split the text on `[[token|matched-text]]` first and ran `marked.parseInline` on each non-citation segment, which broke `**[[slug|text]]**` (marked saw orphan `**` markers on each side of the citation and dropped the emphasis). 0.12.1 registers a `citation` inline tokenizer on the per-instance `Marked`, lexes the full text once, and walks the resulting token tree to React nodes — so emphasis, italic, and nested emphasis around a citation now render as `<strong><a>...</a></strong>` and friends. Codespans (`` `like this` ``) intentionally stay opaque: a citation token inside backticks renders as literal text in `<code>`. Public API is unchanged (`text`, `renderCitation`, `className`); raw HTML is still escaped per 0.10.3.
+
 ## What's new in 0.12.0
 
 - **Citation wire format becomes `[[token|matched-text]]`.** Both segments are required. The engine now rewrites every entity-name occurrence (not just the first) into the new wire so the host renders one clickable link per mention with the model's exact casing preserved (`"the Fall"` stays lowercase article). Hard break: tokens without the `|matched-text` portion are NOT recognized; hosts upgrading from 0.11.x adopt the new shape on consumption.
