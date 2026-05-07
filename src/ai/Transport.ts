@@ -321,6 +321,25 @@ function reconstructChatEvent(parsed: unknown): ChatEvent | null {
       if (typeof p.nodeId !== 'string' || typeof p.text !== 'string') return null;
       return { type: 'annotate', nodeId: p.nodeId, text: p.text };
     }
+    // 0.10.0 — three new parameterless host-driven commands. They round-trip
+    // over the SSE wire so a server-side route can fire a "fresh canvas"
+    // reset just like a host UI button. No fields beyond `type` to validate.
+    case 'clear_visual_state': {
+      return { type: 'clear_visual_state' };
+    }
+    case 'reset_view': {
+      return { type: 'reset_view' };
+    }
+    case 'clear_annotations': {
+      return { type: 'clear_annotations' };
+    }
+    // 0.10.1 — `set_inferred_visibility` has been a member of the ChatEvent
+    // union since Phase 5, but reconstructChatEvent never grew a case for
+    // it, so server-emitted toggles were silently dropped on the client.
+    case 'set_inferred_visibility': {
+      if (typeof p.visible !== 'boolean') return null;
+      return { type: 'set_inferred_visibility', visible: p.visible };
+    }
     case 'done': {
       const reason = p.reason;
       const error = typeof p.error === 'string' ? p.error : undefined;

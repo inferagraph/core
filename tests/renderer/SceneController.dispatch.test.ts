@@ -345,4 +345,40 @@ describe('SceneController dispatch surfaces', () => {
       expect(container.querySelector('.ig-annotation-overlay')).toBeNull();
     });
   });
+
+  // 0.10.0 — host-driven visual-reset commands. These are the SceneController
+  // counterparts of the new ChatEvent variants `clear_visual_state`,
+  // `reset_view`, and `clear_annotations` (parameterless). Each composes
+  // existing methods; nothing about the underlying state model changes.
+  describe('resetView()', () => {
+    it('snaps the camera back to its captured initial orientation', () => {
+      const camera = ctrl.getCameraController();
+      const spy = vi.spyOn(camera, 'resetRotation');
+      ctrl.resetView();
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('clearVisualState()', () => {
+    it('clears highlight, annotations, filter, and resets the camera', () => {
+      // Pre-populate every channel so the reset has something to drop.
+      ctrl.setHighlight(new Set(['a', 'b']));
+      ctrl.annotate('a', 'note');
+      ctrl.setFilter(() => false); // hide everything
+
+      const camera = ctrl.getCameraController();
+      const cameraSpy = vi.spyOn(camera, 'resetRotation');
+
+      ctrl.clearVisualState();
+
+      // Highlight cleared.
+      expect(Array.from(ctrl.getHighlight())).toEqual([]);
+      // Annotations cleared.
+      expect(ctrl.getAnnotationRenderer().getCount()).toBe(0);
+      // Filter cleared (every node visible again).
+      expect(ctrl.getFilter()({ id: 'x', attributes: {} })).toBe(true);
+      // Camera reset fired.
+      expect(cameraSpy).toHaveBeenCalledTimes(1);
+    });
+  });
 });
