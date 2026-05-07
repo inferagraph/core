@@ -349,4 +349,54 @@ describe('httpTransport', () => {
       type: 'clear_annotations',
     });
   });
+
+  // 0.10.1 — `set_inferred_visibility` has been a member of the ChatEvent
+  // union since Phase 5, but reconstructChatEvent never grew a case for it,
+  // so a server-side route emitting this event would silently drop on the
+  // client. Round-trip both `visible: true` and `visible: false`, and reject
+  // malformed payloads that lack a boolean `visible` field.
+  it('reconstructs set_inferred_visibility (visible: true) over the wire', async () => {
+    const sse =
+      `data: ${JSON.stringify({ type: 'set_inferred_visibility', visible: true })}\n\n` +
+      `data: ${JSON.stringify({ type: 'done', reason: 'stop' })}\n\n`;
+    const fetch = vi.fn(async () => sseResponse(sse));
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    const events = await collect(
+      transport.chat('hi', { emitToolCalls: true }),
+    );
+    expect(events.find((e) => e.type === 'set_inferred_visibility')).toEqual({
+      type: 'set_inferred_visibility',
+      visible: true,
+    });
+  });
+
+  it('reconstructs set_inferred_visibility (visible: false) over the wire', async () => {
+    const sse =
+      `data: ${JSON.stringify({ type: 'set_inferred_visibility', visible: false })}\n\n` +
+      `data: ${JSON.stringify({ type: 'done', reason: 'stop' })}\n\n`;
+    const fetch = vi.fn(async () => sseResponse(sse));
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    const events = await collect(
+      transport.chat('hi', { emitToolCalls: true }),
+    );
+    expect(events.find((e) => e.type === 'set_inferred_visibility')).toEqual({
+      type: 'set_inferred_visibility',
+      visible: false,
+    });
+  });
+
+  it('drops malformed set_inferred_visibility (non-boolean visible)', async () => {
+    const sse =
+      `data: ${JSON.stringify({ type: 'set_inferred_visibility', visible: 'yes' })}\n\n` +
+      `data: ${JSON.stringify({ type: 'done', reason: 'stop' })}\n\n`;
+    const fetch = vi.fn(async () => sseResponse(sse));
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    const events = await collect(
+      transport.chat('hi', { emitToolCalls: true }),
+    );
+    expect(events.some((e) => e.type === 'set_inferred_visibility')).toBe(
+      false,
+    );
+    expect(events[events.length - 1].type).toBe('done');
+  });
 });

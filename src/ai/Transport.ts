@@ -333,6 +333,13 @@ function reconstructChatEvent(parsed: unknown): ChatEvent | null {
     case 'clear_annotations': {
       return { type: 'clear_annotations' };
     }
+    // 0.10.1 — `set_inferred_visibility` has been a member of the ChatEvent
+    // union since Phase 5, but reconstructChatEvent never grew a case for
+    // it, so server-emitted toggles were silently dropped on the client.
+    case 'set_inferred_visibility': {
+      if (typeof p.visible !== 'boolean') return null;
+      return { type: 'set_inferred_visibility', visible: p.visible };
+    }
     case 'done': {
       const reason = p.reason;
       const error = typeof p.error === 'string' ? p.error : undefined;

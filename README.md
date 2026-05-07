@@ -26,6 +26,10 @@ InferaGraph is a self-contained platform that holds graph data, performs AI reas
 - React entry point + a separate `data` entry for Next.js RSC contexts
 - CSS-themable overlays and controls
 
+## What's new in 0.10.1
+
+- **`httpTransport` now reconstructs `set_inferred_visibility` from the SSE wire.** The event has been a member of the `ChatEvent` union since Phase 5 (inferred-relationship overlay toggle), but `reconstructChatEvent` never grew a case for it, so a server-side route emitting `{ type: 'set_inferred_visibility', visible: ... }` was silently dropped on the client. Clients now receive both `visible: true` and `visible: false` faithfully; payloads with a non-boolean `visible` field are rejected at the boundary just like the other event reconstructors. Pre-existing tech debt; no public API change.
+
 ## What's new in 0.10.0
 
 - **Public host-driven dispatch surface (`useInferaGraphCommands`, `useInferaGraphChatContext`).** Until 0.9.5, hosts could only fire visual operations through chat — `useInferaGraphChat()` returned a chat iterator and nothing else. Hosts that wanted to reset highlights when a user clicks "Clear conversation" had to wrap the transport, mint a sentinel chat message, and synthesize an empty-ids `highlight` event by hand. 0.10.0 promotes the renderer's dispatch sink to a public hook. The new `useInferaGraphCommands()` returns a flat semantic facade (`setHighlight`, `focusOn`, `applyFilter`, `setInferredVisibility`, `annotate`, `clearAnnotations`, `resetView`, `clearVisualState`); reach for `useInferaGraphChatContext()` only when you need to dispatch a `ChatEvent` variant the facade doesn't expose. Both hooks throw with a clear message when used outside an `<InferaGraph>` subtree.
