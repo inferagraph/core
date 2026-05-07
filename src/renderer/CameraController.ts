@@ -1,6 +1,38 @@
 import * as THREE from 'three';
-import { TrackballControls } from 'three/examples/jsm/controls/TrackballControls.js';
+import type { TrackballControls as TrackballControlsType } from 'three/examples/jsm/controls/TrackballControls.js';
 import type { Vector3 } from '../types.js';
+
+// `three/examples/jsm/controls/TrackballControls.js` is published as
+// ESM-only. A static `import { TrackballControls } from '...'` is hoisted
+// by esbuild/tsup to a top-level `var TrackballControls_js =
+// require('three/examples/jsm/controls/TrackballControls.js')` in the
+// CJS bundle (`dist/index.cjs`). Node refuses to `require()` ESM, so
+// the moment a CJS caller (e.g. a Next.js server function) `require()`s
+// `@inferagraph/core` — directly or transitively through one of the
+// `@inferagraph/*` datasource / provider packages — module-load
+// crashes with:
+//
+//   require() of ES Module .../TrackballControls.js
+//   from .../@inferagraph/core/dist/index.cjs not supported.
+//
+// Fix: switch to a lazy dynamic `import()`. esbuild preserves dynamic
+// `import()` as native dynamic ESM-import in BOTH the ESM and CJS
+// bundles (verified empirically with tsup 8.5; the CJS output reads
+// `await import('three/examples/...')` verbatim, which Node executes
+// as a real ESM-import even from inside a CJS module). The import
+// only fires when `attach()` / `swapCamera()` runs, which only
+// happens inside a browser — so server-side consumers of `@inferagraph
+// /core/data` (and even of the umbrella `@inferagraph/core` root)
+// never touch TrackballControls during module load.
+let trackballCtorPromise: Promise<typeof TrackballControlsType> | null = null;
+function loadTrackballControls(): Promise<typeof TrackballControlsType> {
+  if (!trackballCtorPromise) {
+    trackballCtorPromise = import(
+      'three/examples/jsm/controls/TrackballControls.js'
+    ).then((mod) => mod.TrackballControls);
+  }
+  return trackballCtorPromise;
+}
 
 /**
  * Wraps Three.js's `TrackballControls` so the rest of InferaGraph can use a
@@ -21,8 +53,17 @@ import type { Vector3 } from '../types.js';
 export class CameraController {
   private container: HTMLElement | null = null;
   private camera: THREE.Camera | null = null;
-  private controls: TrackballControls | null = null;
+  private controls: TrackballControlsType | null = null;
   private target: Vector3 = { x: 0, y: 0, z: 0 };
+
+  /**
+   * Pending `noRotate` request captured while the lazy
+   * TrackballControls module is still loading. Applied to `controls`
+   * the moment the constructor resolves (see {@link attach} /
+   * {@link swapCamera}). `null` means "no pending request — use the
+   * controls' current value or the default".
+   */
+  private pendingNoRotate: boolean | null = null;
 
   /** Default orbit distance — used until `setRadius` is called. */
   private radius = 100;
@@ -41,7 +82,7 @@ export class CameraController {
    */
   private focusAnimation: FocusAnimation | null = null;
 
-  attach(container: HTMLElement, camera: THREE.Camera): void {
+  async attach(container: HTMLElement, camera: THREE.Camera): Promise<void> {
     this.container = container;
     this.camera = camera;
 
@@ -49,12 +90,29 @@ export class CameraController {
     // direction (so the first frame frames the scene).
     this.placeCameraAtRadius();
 
-    this.controls = new TrackballControls(camera, container);
+    // Lazy-load the ESM-only TrackballControls module on first attach.
+    // See module-top comment for why this is dynamic, not static.
+    const Ctor = await loadTrackballControls();
+
+    // Guard against a detach() racing the dynamic import. If the host
+    // tore us down while the module was loading, drop the result on
+    // the floor instead of mounting controls onto a stale container.
+    if (this.container !== container || this.camera !== camera) {
+      return;
+    }
+
+    this.controls = new Ctor(camera, container);
     this.controls.target.set(this.target.x, this.target.y, this.target.z);
     this.controls.rotateSpeed = 3.0;   // a touch quicker than the default 1.0
     this.controls.zoomSpeed = 1.2;
     this.controls.panSpeed = 0.8;
     this.controls.dynamicDampingFactor = 0.2;
+    // Replay any rotation-enabled request that arrived while the
+    // dynamic import was in flight.
+    if (this.pendingNoRotate !== null) {
+      this.controls.noRotate = this.pendingNoRotate;
+      this.pendingNoRotate = null;
+    }
 
     // Capture the initial state so `resetRotation()` is meaningful.
     this.initialPosition = camera.position.clone();
@@ -72,6 +130,9 @@ export class CameraController {
     this.initialPosition = null;
     this.initialUp = null;
     this.initialTarget = null;
+    // Drop any pending rotation request — it belonged to the prior
+    // session. A subsequent attach() starts from the default again.
+    this.pendingNoRotate = null;
   }
 
   /**
@@ -80,11 +141,12 @@ export class CameraController {
    * TrackballControls so gestures bind to the new camera. The previous
    * radius and target are preserved.
    */
-  swapCamera(camera: THREE.Camera): void {
+  async swapCamera(camera: THREE.Camera): Promise<void> {
     if (!this.container) {
       this.camera = camera;
       return;
     }
+    const container = this.container;
     const previousRadius = this.radius;
     const previousTarget = { ...this.target };
 
@@ -96,12 +158,24 @@ export class CameraController {
     this.camera = camera;
     this.placeCameraAtRadius();
 
-    this.controls = new TrackballControls(camera, this.container);
+    // Lazy-load (cached after first call). See module-top comment.
+    const Ctor = await loadTrackballControls();
+
+    // Detach race guard — same rationale as attach().
+    if (this.container !== container || this.camera !== camera) {
+      return;
+    }
+
+    this.controls = new Ctor(camera, container);
     this.controls.target.set(previousTarget.x, previousTarget.y, previousTarget.z);
     this.controls.rotateSpeed = 3.0;
     this.controls.zoomSpeed = 1.2;
     this.controls.panSpeed = 0.8;
     this.controls.dynamicDampingFactor = 0.2;
+    if (this.pendingNoRotate !== null) {
+      this.controls.noRotate = this.pendingNoRotate;
+      this.pendingNoRotate = null;
+    }
 
     this.initialPosition = camera.position.clone();
     this.initialUp = camera.up.clone();
@@ -238,7 +312,13 @@ export class CameraController {
    * scripted camera animation).
    */
   setRotationEnabled(enabled: boolean): void {
-    if (!this.controls) return;
+    if (!this.controls) {
+      // Capture the request so it survives the lazy load gap. The
+      // value is replayed onto `controls.noRotate` once attach() /
+      // swapCamera() finishes mounting the controls instance.
+      this.pendingNoRotate = !enabled;
+      return;
+    }
     this.controls.noRotate = !enabled;
   }
 
@@ -248,7 +328,12 @@ export class CameraController {
    * attached so the default reflects the constructor state.
    */
   isRotationEnabled(): boolean {
-    if (!this.controls) return true;
+    if (!this.controls) {
+      // If a setRotationEnabled call landed before controls finished
+      // loading, surface the pending request so callers see the
+      // intended state, not the as-yet-uninitialized default.
+      return this.pendingNoRotate === null ? true : !this.pendingNoRotate;
+    }
     return !this.controls.noRotate;
   }
 
@@ -298,7 +383,7 @@ export class CameraController {
   /**
    * Expose the underlying TrackballControls for advanced consumers / tests.
    */
-  getControls(): TrackballControls | null {
+  getControls(): TrackballControlsType | null {
     return this.controls;
   }
 

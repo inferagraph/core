@@ -1419,7 +1419,7 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('orthographic camera is axis-aligned on first entry to tree mode regardless of prior graph rotation', () => {
+    it('orthographic camera is axis-aligned on first entry to tree mode regardless of prior graph rotation', async () => {
       // Regression for 0.1.20: on the graph→tree transition, frameToFit's
       // setTarget→placeCameraAtRadius preserved whatever eye direction the
       // (rotated) perspective camera carried, so the orthographic eye ended
@@ -1430,6 +1430,10 @@ describe('SceneController', () => {
       const ctrl = new SceneController({ store, layout: 'graph' });
       ctrl.attach(container);
       ctrl.syncFromStore();
+      // CameraController.attach + applyGraphCamera (called inside
+      // syncFromStore) each fire an async TrackballControls load. Wait
+      // for the latest one to settle before reading controls below.
+      await ctrl.whenCameraReady();
 
       // Pose the perspective camera as if the user had rotated + panned
       // the graph view to a non-trivial off-axis state. Both the camera
@@ -1633,11 +1637,20 @@ describe('SceneController', () => {
     /**
      * Mutate the live camera + controls target so a snapshot taken
      * after this call is distinguishable from any default-framed state.
+     *
+     * Async because `CameraController.attach` / `swapCamera` are now
+     * lazy (the underlying `three/examples/jsm/.../TrackballControls.js`
+     * is loaded via dynamic `import()` to keep the CJS bundle from
+     * top-level `require()`-ing an ESM module — see
+     * `src/renderer/CameraController.ts`). Awaiting `whenCameraReady`
+     * here means callers don't need to thread it through every
+     * `setLayout` toggle.
      */
-    function poseLiveCamera(
+    async function poseLiveCamera(
       ctrl: SceneController,
       pose: { position: [number, number, number]; target: [number, number, number]; zoom?: number },
-    ): void {
+    ): Promise<void> {
+      await ctrl.whenCameraReady();
       const camera = ctrl.getRenderer().getCamera() as unknown as LiveCamera | null;
       const controls = ctrl.getCameraController().getControls();
       if (!camera || !controls) throw new Error('camera/controls not attached');
@@ -1664,14 +1677,14 @@ describe('SceneController', () => {
       };
     }
 
-    it('preserves graph camera state across a tree round-trip', () => {
+    it('preserves graph camera state across a tree round-trip', async () => {
       seedStore(store, family);
       const ctrl = new SceneController({ store, layout: 'graph' });
       ctrl.attach(container);
       ctrl.syncFromStore();
 
       // 1. Pose the graph (perspective) camera somewhere distinctive.
-      poseLiveCamera(ctrl, {
+      await poseLiveCamera(ctrl, {
         position: [5, 6, 7],
         target: [1, 2, 3],
       });
@@ -1680,7 +1693,7 @@ describe('SceneController', () => {
       // 2. Toggle into tree, mutate the tree camera differently, then
       //    toggle back to graph.
       ctrl.setLayout('tree');
-      poseLiveCamera(ctrl, {
+      await poseLiveCamera(ctrl, {
         position: [100, 200, 300],
         target: [50, 60, 70],
         zoom: 2.5,
@@ -1696,7 +1709,7 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('preserves tree camera state across a graph round-trip', () => {
+    it('preserves tree camera state across a graph round-trip', async () => {
       seedStore(store, family);
       const ctrl = new SceneController({ store, layout: 'graph' });
       ctrl.attach(container);
@@ -1706,7 +1719,7 @@ describe('SceneController', () => {
       ctrl.setLayout('tree');
 
       // Pose the tree camera distinctly.
-      poseLiveCamera(ctrl, {
+      await poseLiveCamera(ctrl, {
         position: [11, 22, 33],
         target: [4, 5, 6],
         zoom: 1.75,
@@ -1715,7 +1728,7 @@ describe('SceneController', () => {
 
       // Toggle out + mutate graph + toggle back.
       ctrl.setLayout('graph');
-      poseLiveCamera(ctrl, {
+      await poseLiveCamera(ctrl, {
         position: [-1, -2, -3],
         target: [-4, -5, -6],
       });
@@ -1783,19 +1796,19 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('graph and tree snapshots are isolated — gestures in one mode do not bleed into the other', () => {
+    it('graph and tree snapshots are isolated — gestures in one mode do not bleed into the other', async () => {
       seedStore(store, family);
       const ctrl = new SceneController({ store, layout: 'graph' });
       ctrl.attach(container);
       ctrl.syncFromStore();
 
       // Pose A in graph.
-      poseLiveCamera(ctrl, { position: [1, 1, 1], target: [0, 0, 0] });
+      await poseLiveCamera(ctrl, { position: [1, 1, 1], target: [0, 0, 0] });
       const graphA = readLivePose(ctrl);
 
       // Toggle to tree, pose B.
       ctrl.setLayout('tree');
-      poseLiveCamera(ctrl, { position: [9, 9, 9], target: [8, 8, 8], zoom: 3 });
+      await poseLiveCamera(ctrl, { position: [9, 9, 9], target: [8, 8, 8], zoom: 3 });
       const treeB = readLivePose(ctrl);
 
       // Back to graph — should see pose A, NOT pose B.
@@ -1807,7 +1820,7 @@ describe('SceneController', () => {
 
       // Now mutate graph again to a third pose C — this must NOT leak
       // into the tree snapshot.
-      poseLiveCamera(ctrl, { position: [42, 42, 42], target: [41, 41, 41] });
+      await poseLiveCamera(ctrl, { position: [42, 42, 42], target: [41, 41, 41] });
 
       // Toggle to tree — should see pose B, NOT pose C.
       ctrl.setLayout('tree');
@@ -1819,7 +1832,7 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('syncs CameraController internal state on every snapshot restore', () => {
+    it('syncs CameraController internal state on every snapshot restore', async () => {
       // Regression for the 0.1.18 → 0.1.19 fix: writing camera.position /
       // .quaternion / .zoom in `applyCameraState` is not enough.
       // CameraController caches its own `radius` AND TrackballControls
@@ -1836,9 +1849,9 @@ describe('SceneController', () => {
       ctrl.syncFromStore();
 
       // Pose graph + populate snapshots via a tree round-trip.
-      poseLiveCamera(ctrl, { position: [5, 6, 7], target: [1, 2, 3] });
+      await poseLiveCamera(ctrl, { position: [5, 6, 7], target: [1, 2, 3] });
       ctrl.setLayout('tree');
-      poseLiveCamera(ctrl, {
+      await poseLiveCamera(ctrl, {
         position: [100, 200, 300],
         target: [50, 60, 70],
         zoom: 2.5,
@@ -1857,7 +1870,7 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('preserves graph camera state across a tree round-trip even after CameraController.update() runs', () => {
+    it('preserves graph camera state across a tree round-trip even after CameraController.update() runs', async () => {
       // Same fix, behavioral angle: the user's pose must survive
       // post-restore `update()` ticks. The mock controls don't simulate
       // damping (so an accidentally-missing sync wouldn't drift the
@@ -1869,12 +1882,12 @@ describe('SceneController', () => {
       ctrl.attach(container);
       ctrl.syncFromStore();
 
-      poseLiveCamera(ctrl, { position: [5, 6, 7], target: [1, 2, 3] });
+      await poseLiveCamera(ctrl, { position: [5, 6, 7], target: [1, 2, 3] });
       ctrl.getCameraController().update();
       const graphPose = readLivePose(ctrl);
 
       ctrl.setLayout('tree');
-      poseLiveCamera(ctrl, {
+      await poseLiveCamera(ctrl, {
         position: [100, 200, 300],
         target: [50, 60, 70],
         zoom: 2.5,
