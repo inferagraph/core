@@ -1,8 +1,36 @@
 import * as React from 'react';
-import { marked } from 'marked';
-import DOMPurify from 'isomorphic-dompurify';
+import { Marked, type Tokens } from 'marked';
 
 const CITATION_RE = /\[\[([a-z0-9][a-z0-9_-]*)\]\]/gi;
+
+/**
+ * Per-instance markdown renderer. Crucially, the `html` renderer is
+ * overridden to ESCAPE raw HTML rather than passing it through. This makes
+ * marked itself a sanitizer (no DOM parser dependency required) and lets
+ * the library run cleanly under Node-side SSR / serverless function
+ * runtimes that previously crashed when `isomorphic-dompurify` pulled
+ * `jsdom` → `html-encoding-sniffer` → `@exodus/bytes` (ESM-only).
+ *
+ * We instantiate `Marked` rather than calling `marked.use(...)` so we do
+ * NOT mutate the shared global `marked` singleton — consumers using the
+ * default `marked` export elsewhere are unaffected.
+ */
+const safeMarked = new Marked({
+  renderer: {
+    html(token: Tokens.HTML | Tokens.Tag): string {
+      return escapeHtml(token.text);
+    },
+  },
+});
+
+function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 export interface ChatTextProps {
   /** The streamed assistant text (may include markdown + `[[id]]` tokens). */
@@ -21,7 +49,7 @@ export interface ChatTextProps {
 /**
  * Render an assistant chat message. Splits the text on `[[id]]` citation
  * tokens; runs each non-citation segment through `marked.parseInline()`
- * + DOMPurify; calls `renderCitation` for each token.
+ * with raw-HTML escaping; calls `renderCitation` for each token.
  *
  * Library responsibility: parse + sanitize + emit React nodes.
  * Host responsibility: CSS styling + citation-link wiring.
@@ -55,7 +83,6 @@ export function ChatText(props: ChatTextProps): React.ReactElement {
 
 function renderInline(segment: string, key: number): React.ReactNode {
   if (!segment) return null;
-  const html = marked.parseInline(segment, { async: false }) as string;
-  const safe = DOMPurify.sanitize(html);
-  return <span key={`md-${key}`} dangerouslySetInnerHTML={{ __html: safe }} />;
+  const html = safeMarked.parseInline(segment, { async: false }) as string;
+  return <span key={`md-${key}`} dangerouslySetInnerHTML={{ __html: html }} />;
 }

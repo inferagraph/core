@@ -84,6 +84,39 @@ describe('ChatText sanitization', () => {
     expect(container.querySelector('script')).toBeNull();
     expect(container.innerHTML).not.toContain('<script>');
   });
+
+  it('escapes raw <script> rather than executing or passing through', () => {
+    const { container } = render(
+      <ChatText text="Watch out: <script>alert(1)</script> ok?" />,
+    );
+    // No live script element.
+    expect(container.querySelector('script')).toBeNull();
+    // The rendered HTML must not contain a literal <script> open tag.
+    expect(container.innerHTML).not.toContain('<script>');
+    // The user-visible text should still mention the escaped marker so the
+    // model's intent ("here is the markup the user typed") is preserved.
+    expect(container.textContent ?? '').toContain('alert(1)');
+  });
+
+  it('neutralizes <img onerror> payloads', () => {
+    const { container } = render(
+      <ChatText text='Look: <img src=x onerror=alert(1)> here.' />,
+    );
+    // The dangerous element must not exist as a real DOM node.
+    const img = container.querySelector('img');
+    expect(img).toBeNull();
+    // No live `<img` open-tag substring in HTML — escaped form (`&lt;img`)
+    // is fine because it renders as plain text, not as a real element.
+    expect(container.innerHTML).not.toContain('<img');
+    // The escaped payload should be visible as plain text, not as an
+    // active attribute on any element.
+    const allElements = Array.from(container.querySelectorAll('*'));
+    for (const el of allElements) {
+      for (const attr of Array.from(el.attributes)) {
+        expect(attr.name.toLowerCase()).not.toMatch(/^on/);
+      }
+    }
+  });
 });
 
 describe('ChatText className', () => {
