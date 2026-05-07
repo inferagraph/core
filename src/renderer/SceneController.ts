@@ -2261,9 +2261,22 @@ export class SceneController implements InferredEdgeHost {
       ys.push(p.y);
       zs.push(p.z);
     }
-    const cx = SceneController.percentileMidpoint(xs);
-    const cy = SceneController.percentileMidpoint(ys);
-    const cz = SceneController.percentileMidpoint(zs);
+
+    // Centroid: prefer the active layout's canonical origin when it
+    // declares one (tree layouts recenter around x=0, so consulting
+    // their `getOrigin()` keeps the camera target locked to that center
+    // regardless of how traversal order or `parentEdgeTypes` defaults
+    // shift the underlying positions distribution). Force-directed
+    // layouts return `null` and fall back to the outlier-resistant
+    // 5th-95th percentile midpoint, which is the right heuristic for a
+    // wandering simulated cluster.
+    const origin = this.layoutEngine.getOrigin?.() ?? null;
+    const cx = origin ? origin.x : SceneController.percentileMidpoint(xs);
+    const cy = origin ? origin.y : SceneController.percentileMidpoint(ys);
+    const cz =
+      origin && typeof origin.z === 'number'
+        ? origin.z
+        : SceneController.percentileMidpoint(zs);
 
     // Distance-from-centroid distribution. Use the 95th percentile so a
     // single drifting outlier doesn't define the frame.

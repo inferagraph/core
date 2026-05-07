@@ -27,6 +27,27 @@ export abstract class LayoutEngine {
   abstract tick(): void;
 
   abstract getPositions(): Map<NodeId, Vector3>;
+
+  /**
+   * Canonical center the renderer should aim the camera at, or `null` if
+   * the layout has no canonical center (e.g. force-directed layouts whose
+   * cluster wanders during simulation).
+   *
+   * Returning a non-null origin is how a layout opts out of the
+   * `frameToFit` percentile-midpoint heuristic: the camera target is set
+   * directly to `{x, y, z?}` returned here. This stabilizes camera
+   * framing for layouts that already place their nodes around a known
+   * center (the tidy-tree layout recenters horizontally around x=0, so
+   * its origin is `{x: 0, y: <vertical box midpoint>}`); without it the
+   * percentile midpoint can drift off the canonical center whenever
+   * traversal order shifts (a new default for `parentEdgeTypes`, a
+   * different forest-root iteration order, etc.) and the camera frames
+   * the wrong point.
+   *
+   * Implementations should return `null` rather than throwing when
+   * called before `compute` has run.
+   */
+  abstract getOrigin(): { x: number; y: number; z?: number } | null;
 }
 
 /**

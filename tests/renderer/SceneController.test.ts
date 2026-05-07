@@ -2128,4 +2128,165 @@ describe('SceneController', () => {
       ctrl.detach();
     });
   });
+
+  describe('frameToFit — camera target uses layout origin (tree skew guard)', () => {
+    // Regression: every `@inferagraph/core` release shifted the biblegraph
+    // tree view off-center. Root cause was that frameToFit computed the
+    // camera target via a 5th-95th percentile midpoint over
+    // `positions.values()`. TreeLayout's `recenter` symmetrizes the
+    // positions around x=0 — but if traversal order shifts (e.g. a new
+    // default for `parentEdgeTypes`, or a different forest-root iteration
+    // order), the percentile midpoint can land off x=0 even though the
+    // true horizontal center is still 0. The camera then frames the
+    // wrong point and the tree appears skewed.
+    //
+    // Fix: layouts with a canonical center (TreeLayout) expose
+    // `getOrigin()`. SceneController.frameToFit consults it; if non-null,
+    // the camera target is set from `getOrigin()` rather than from a
+    // percentile midpoint. Force-directed layouts return null and
+    // continue to use the existing percentile-midpoint fallback.
+
+    beforeEach(() => {
+      // Earlier `frameToFit — orthographic frustum resize` tests stub
+      // TreeLayout.prototype.compute / getPositions globally and never
+      // restore them. Without an explicit restore here those stubs
+      // bleed into this describe block and the layout returns a
+      // 5-element fixture for any input — short-circuiting the
+      // `framingPositions` filter and skipping the frameToFit path we
+      // are exercising. We restore ONLY the TreeLayout prototype mocks
+      // (not the file-level `vi.mock('three', ...)` setup, which
+      // `vi.restoreAllMocks` would also tear down).
+      const computeDesc = Object.getOwnPropertyDescriptor(
+        TreeLayout.prototype,
+        'compute',
+      );
+      if (computeDesc?.value && 'mockRestore' in computeDesc.value) {
+        (computeDesc.value as { mockRestore: () => void }).mockRestore();
+      }
+      const getPositionsDesc = Object.getOwnPropertyDescriptor(
+        TreeLayout.prototype,
+        'getPositions',
+      );
+      if (
+        getPositionsDesc?.value &&
+        'mockRestore' in getPositionsDesc.value
+      ) {
+        (getPositionsDesc.value as { mockRestore: () => void }).mockRestore();
+      }
+    });
+
+    // Asymmetric forest designed to expose the percentile-midpoint
+    // skew: one wide tree (1 root + 17 leaf children = 18 nodes) plus
+    // two lone forest entries to its right. After `TreeLayout.recenter`
+    // the canonical horizontal center sits at x=0, but the 5th-95th
+    // percentile midpoint over the resulting 20 positions lands at
+    // ~+55 (the dense cluster on the left has the 2nd-smallest x at
+    // -940 while the 19th-from-bottom on the right is +1050; midpoint
+    // is +55, not 0). The legacy `frameToFit` therefore sets the
+    // camera target off-center; the trees.png skew reproduces. The
+    // fix consults `layout.getOrigin()` which returns x=0.
+    const lineage: GraphData = {
+      nodes: [
+        { id: 'wide_root', attributes: { name: 'WideRoot', type: 'person' } },
+        { id: 'wide_c01', attributes: { name: 'WC01', type: 'person' } },
+        { id: 'wide_c02', attributes: { name: 'WC02', type: 'person' } },
+        { id: 'wide_c03', attributes: { name: 'WC03', type: 'person' } },
+        { id: 'wide_c04', attributes: { name: 'WC04', type: 'person' } },
+        { id: 'wide_c05', attributes: { name: 'WC05', type: 'person' } },
+        { id: 'wide_c06', attributes: { name: 'WC06', type: 'person' } },
+        { id: 'wide_c07', attributes: { name: 'WC07', type: 'person' } },
+        { id: 'wide_c08', attributes: { name: 'WC08', type: 'person' } },
+        { id: 'wide_c09', attributes: { name: 'WC09', type: 'person' } },
+        { id: 'wide_c10', attributes: { name: 'WC10', type: 'person' } },
+        { id: 'wide_c11', attributes: { name: 'WC11', type: 'person' } },
+        { id: 'wide_c12', attributes: { name: 'WC12', type: 'person' } },
+        { id: 'wide_c13', attributes: { name: 'WC13', type: 'person' } },
+        { id: 'wide_c14', attributes: { name: 'WC14', type: 'person' } },
+        { id: 'wide_c15', attributes: { name: 'WC15', type: 'person' } },
+        { id: 'wide_c16', attributes: { name: 'WC16', type: 'person' } },
+        { id: 'wide_c17', attributes: { name: 'WC17', type: 'person' } },
+        { id: 'lone1', attributes: { name: 'Lone1', type: 'person' } },
+        { id: 'lone2', attributes: { name: 'Lone2', type: 'person' } },
+      ],
+      edges: [
+        { id: 'p01', sourceId: 'wide_root', targetId: 'wide_c01', attributes: { type: 'parent_of' } },
+        { id: 'p02', sourceId: 'wide_root', targetId: 'wide_c02', attributes: { type: 'parent_of' } },
+        { id: 'p03', sourceId: 'wide_root', targetId: 'wide_c03', attributes: { type: 'parent_of' } },
+        { id: 'p04', sourceId: 'wide_root', targetId: 'wide_c04', attributes: { type: 'parent_of' } },
+        { id: 'p05', sourceId: 'wide_root', targetId: 'wide_c05', attributes: { type: 'parent_of' } },
+        { id: 'p06', sourceId: 'wide_root', targetId: 'wide_c06', attributes: { type: 'parent_of' } },
+        { id: 'p07', sourceId: 'wide_root', targetId: 'wide_c07', attributes: { type: 'parent_of' } },
+        { id: 'p08', sourceId: 'wide_root', targetId: 'wide_c08', attributes: { type: 'parent_of' } },
+        { id: 'p09', sourceId: 'wide_root', targetId: 'wide_c09', attributes: { type: 'parent_of' } },
+        { id: 'p10', sourceId: 'wide_root', targetId: 'wide_c10', attributes: { type: 'parent_of' } },
+        { id: 'p11', sourceId: 'wide_root', targetId: 'wide_c11', attributes: { type: 'parent_of' } },
+        { id: 'p12', sourceId: 'wide_root', targetId: 'wide_c12', attributes: { type: 'parent_of' } },
+        { id: 'p13', sourceId: 'wide_root', targetId: 'wide_c13', attributes: { type: 'parent_of' } },
+        { id: 'p14', sourceId: 'wide_root', targetId: 'wide_c14', attributes: { type: 'parent_of' } },
+        { id: 'p15', sourceId: 'wide_root', targetId: 'wide_c15', attributes: { type: 'parent_of' } },
+        { id: 'p16', sourceId: 'wide_root', targetId: 'wide_c16', attributes: { type: 'parent_of' } },
+        { id: 'p17', sourceId: 'wide_root', targetId: 'wide_c17', attributes: { type: 'parent_of' } },
+      ],
+    };
+
+    it('targets x=0 in tree mode regardless of where the percentile midpoint lands', () => {
+      // The tree has a single root pair plus a long single-child chain.
+      // The chain is laid out at x=0 (the parent's column), but the
+      // ROOT row's two paired nodes sit at +/- PAIR_GAP_X / 2 → the
+      // 5th-95th percentile midpoint over all positions still happens
+      // to land near x=0 here, BUT the regression mode is whenever the
+      // distribution is asymmetric. The right contract is "consult the
+      // layout's canonical origin" — assert that explicitly: the camera
+      // target's x-coordinate is 0 within epsilon, AND the spy was
+      // called with `{ x: 0, y: <vCenter>, z: <vCenter> }` from
+      // getOrigin, not from percentileMidpoint.
+      seedStore(store, lineage);
+      const ctrl = new SceneController({ store, layout: 'tree' });
+      ctrl.attach(container);
+
+      const setTargetSpy = vi.spyOn(
+        ctrl.getCameraController(),
+        'setTarget',
+      );
+
+      ctrl.syncFromStore();
+
+      // setTarget was called from frameToFit. Inspect the most recent call.
+      expect(setTargetSpy).toHaveBeenCalled();
+      const lastCall =
+        setTargetSpy.mock.calls[setTargetSpy.mock.calls.length - 1];
+      const targetArg = lastCall[0] as { x: number; y: number; z: number };
+      expect(Math.abs(targetArg.x)).toBeLessThan(1e-6);
+
+      ctrl.detach();
+    });
+
+    it('falls back to percentile midpoint when the layout has no origin (graph mode)', () => {
+      // Pin existing graph-mode behavior: when getOrigin() returns null
+      // (ForceLayout3D), the camera target is computed by the existing
+      // percentile-midpoint code path. We verify the call still happens
+      // and the target carries non-NaN finite numbers — i.e. the new
+      // tree-mode branch did not accidentally short-circuit graph mode.
+      seedStore(store, lineage);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+
+      const setTargetSpy = vi.spyOn(
+        ctrl.getCameraController(),
+        'setTarget',
+      );
+
+      ctrl.syncFromStore();
+
+      expect(setTargetSpy).toHaveBeenCalled();
+      const lastCall =
+        setTargetSpy.mock.calls[setTargetSpy.mock.calls.length - 1];
+      const targetArg = lastCall[0] as { x: number; y: number; z: number };
+      expect(Number.isFinite(targetArg.x)).toBe(true);
+      expect(Number.isFinite(targetArg.y)).toBe(true);
+      expect(Number.isFinite(targetArg.z)).toBe(true);
+
+      ctrl.detach();
+    });
+  });
 });

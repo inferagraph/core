@@ -44,4 +44,14 @@ export class ForceLayout3D extends LayoutEngine {
   getPositions(): Map<NodeId, Vector3> {
     return this.simulation.getPositions();
   }
+
+  /**
+   * Force-directed layouts have no canonical center — the cluster
+   * wanders during simulation, and the percentile-midpoint heuristic
+   * inside `frameToFit` produces a sensible camera target in graph
+   * mode. Return `null` to opt out of the origin-based fast path.
+   */
+  getOrigin(): null {
+    return null;
+  }
 }

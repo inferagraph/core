@@ -74,4 +74,15 @@ describe('ForceLayout3D', () => {
     layout.setOptions({ animated: false });
     expect(layout.animated).toBe(false);
   });
+
+  // The force-directed graph layout has no canonical origin (the cluster
+  // wanders during simulation), so `getOrigin()` returns null and the
+  // SceneController falls back to its existing percentile-midpoint
+  // centroid in graph mode.
+  it('returns null from getOrigin (no canonical center)', () => {
+    const layout = new ForceLayout3D();
+    expect(layout.getOrigin()).toBeNull();
+    layout.compute(['a', 'b'], [{ sourceId: 'a', targetId: 'b' }]);
+    expect(layout.getOrigin()).toBeNull();
+  });
 });

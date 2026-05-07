@@ -370,4 +370,133 @@ describe('TreeLayout', () => {
     // `lone` is a separate forest entry: it shares the top row with `a`.
     expect(positions.get('lone')!.y).toBe(positions.get('a')!.y);
   });
+
+  // ---- Canonical origin for camera framing -------------------------------
+  // The tree is recentered horizontally around x=0 in `compute`. The
+  // `frameToFit` camera path needs to know that x=0 is the canonical
+  // horizontal center — a percentile-midpoint over `positions.values()`
+  // is a poor proxy because traversal order can drift the midpoint off
+  // x=0 (the bug that caused recurring tree-skew regressions). The
+  // layout therefore exposes a `getOrigin()` method that returns its
+  // canonical center, and SceneController consults it.
+  describe('getOrigin', () => {
+    it('returns null before compute has run', () => {
+      const layout = new TreeLayout();
+      expect(layout.getOrigin()).toBeNull();
+    });
+
+    it('returns x=0 and y at the bounding-box midpoint for a single root tree', () => {
+      const layout = new TreeLayout();
+      layout.compute(
+        ['root', 'c1', 'c2', 'c3'],
+        [
+          { sourceId: 'root', targetId: 'c1', type: 'parent_of' },
+          { sourceId: 'root', targetId: 'c2', type: 'parent_of' },
+          { sourceId: 'root', targetId: 'c3', type: 'parent_of' },
+        ],
+      );
+
+      const origin = layout.getOrigin();
+      expect(origin).not.toBeNull();
+      expect(origin!.x).toBeCloseTo(0, 6);
+
+      const positions = layout.getPositions();
+      let yMin = Infinity;
+      let yMax = -Infinity;
+      for (const p of positions.values()) {
+        if (p.y < yMin) yMin = p.y;
+        if (p.y > yMax) yMax = p.y;
+      }
+      expect(origin!.y).toBeCloseTo((yMin + yMax) / 2, 6);
+    });
+
+    it('returns x=0 for a multi-root forest', () => {
+      // Two disconnected roots with different child counts. The tree
+      // layout's `recenter` symmetrizes the whole horizontal span around
+      // x=0, so getOrigin().x must be 0 regardless of how many roots
+      // there are or how unbalanced the forest is.
+      const layout = new TreeLayout();
+      layout.compute(
+        ['r1', 'r1c', 'r2', 'r2c1', 'r2c2', 'r2c3'],
+        [
+          { sourceId: 'r1', targetId: 'r1c', type: 'parent_of' },
+          { sourceId: 'r2', targetId: 'r2c1', type: 'parent_of' },
+          { sourceId: 'r2', targetId: 'r2c2', type: 'parent_of' },
+          { sourceId: 'r2', targetId: 'r2c3', type: 'parent_of' },
+        ],
+      );
+      const origin = layout.getOrigin();
+      expect(origin).not.toBeNull();
+      expect(origin!.x).toBeCloseTo(0, 6);
+    });
+
+    it('returns x=0 for a paired-root tree', () => {
+      const layout = new TreeLayout({
+        parentEdgeTypes: ['father_of', 'mother_of', 'parent_of'],
+        pairedEdgeTypes: ['husband_of', 'wife_of', 'married_to'],
+      });
+      layout.compute(
+        ['adam', 'eve', 'cain', 'abel', 'seth'],
+        [
+          { sourceId: 'adam', targetId: 'eve', type: 'husband_of' },
+          { sourceId: 'eve', targetId: 'adam', type: 'wife_of' },
+          { sourceId: 'adam', targetId: 'cain', type: 'father_of' },
+          { sourceId: 'eve', targetId: 'cain', type: 'mother_of' },
+          { sourceId: 'adam', targetId: 'abel', type: 'father_of' },
+          { sourceId: 'eve', targetId: 'abel', type: 'mother_of' },
+          { sourceId: 'adam', targetId: 'seth', type: 'father_of' },
+          { sourceId: 'eve', targetId: 'seth', type: 'mother_of' },
+        ],
+      );
+      const origin = layout.getOrigin();
+      expect(origin).not.toBeNull();
+      expect(origin!.x).toBeCloseTo(0, 6);
+    });
+  });
+
+  // ---- Iteration order of the positions map ------------------------------
+  // Defense-in-depth against camera-target drift: even though
+  // `frameToFit` will use `getOrigin()` rather than a percentile midpoint
+  // in tree mode, the positions map's iteration order should be
+  // deterministic so any downstream consumer (callout placement,
+  // edge-batching, label sort) sees stable order regardless of the
+  // host's `nodeIds` ordering.
+  describe('compute — iteration order', () => {
+    it('iterates positions in lexicographic node-id order', () => {
+      const layout = new TreeLayout();
+      const positions = layout.compute(
+        ['delta', 'alpha', 'charlie', 'bravo'],
+        [
+          { sourceId: 'alpha', targetId: 'bravo', type: 'parent_of' },
+          { sourceId: 'alpha', targetId: 'charlie', type: 'parent_of' },
+          { sourceId: 'alpha', targetId: 'delta', type: 'parent_of' },
+        ],
+      );
+      const ids = Array.from(positions.keys());
+      const sorted = [...ids].sort();
+      expect(ids).toEqual(sorted);
+    });
+
+    it('produces identical position maps and iteration order for shuffled inputs', () => {
+      const edges = [
+        { sourceId: 'alpha', targetId: 'bravo', type: 'parent_of' },
+        { sourceId: 'alpha', targetId: 'charlie', type: 'parent_of' },
+        { sourceId: 'alpha', targetId: 'delta', type: 'parent_of' },
+      ];
+
+      const a = new TreeLayout().compute(
+        ['alpha', 'bravo', 'charlie', 'delta'],
+        edges,
+      );
+      const b = new TreeLayout().compute(
+        ['delta', 'charlie', 'bravo', 'alpha'],
+        edges,
+      );
+
+      expect(Array.from(a.keys())).toEqual(Array.from(b.keys()));
+      for (const id of a.keys()) {
+        expect(b.get(id)).toEqual(a.get(id));
+      }
+    });
+  });
 });

@@ -198,6 +198,21 @@ export class TreeLayout extends LayoutEngine {
     // Recentre horizontally so the whole tree is symmetric around x=0.
     this.recenter();
 
+    // Defense-in-depth: rebuild `positions` in lexicographic node-id
+    // order. The tree-traversal order in `layoutSubtree` depends on the
+    // host's `nodeIds` array order, the forest-root scan order, and the
+    // configured `parentEdgeTypes` set. None of those should leak into
+    // the iteration order of the result map — downstream consumers
+    // (camera framing, callout placement, edge batching) expect a
+    // canonical order so a host's nodeIds shuffle never alters
+    // visualization.
+    const sorted = new Map<NodeId, Vector3>();
+    const ids = Array.from(this.positions.keys()).sort();
+    for (const id of ids) {
+      sorted.set(id, this.positions.get(id)!);
+    }
+    this.positions = sorted;
+
     return this.positions;
   }
 
@@ -207,6 +222,27 @@ export class TreeLayout extends LayoutEngine {
 
   getPositions(): Map<NodeId, Vector3> {
     return this.positions;
+  }
+
+  /**
+   * The canonical center of the laid-out tree. The tidy-tree layout
+   * recenters horizontally around x=0 in {@link compute}, so the
+   * canonical origin's x is always 0; the y component is the midpoint
+   * between the topmost and bottommost rows so the camera centers
+   * vertically on the visible tree even for very tall trees.
+   *
+   * Returns `null` before `compute` has run — there is no meaningful
+   * center for an empty positions map.
+   */
+  getOrigin(): { x: number; y: number; z: number } | null {
+    if (this.positions.size === 0) return null;
+    let yMin = Infinity;
+    let yMax = -Infinity;
+    for (const p of this.positions.values()) {
+      if (p.y < yMin) yMin = p.y;
+      if (p.y > yMax) yMax = p.y;
+    }
+    return { x: 0, y: (yMin + yMax) / 2, z: 0 };
   }
 
   /**
