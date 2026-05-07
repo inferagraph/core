@@ -399,4 +399,31 @@ describe('httpTransport', () => {
     );
     expect(events[events.length - 1].type).toBe('done');
   });
+
+  // 0.11.0 — `text_replace` event surfaces server-injected citations to the
+  // host. Carries the FULL final text (replacing whatever streamed deltas
+  // built up). Round-trips identically to the other carrier events.
+  it('reconstructs text_replace over the wire', async () => {
+    const finalText = 'Cain [[cain]] slew Abel [[abel]].';
+    const sse =
+      `data: ${JSON.stringify({ type: 'text', delta: 'Cain slew Abel.' })}\n\n` +
+      `data: ${JSON.stringify({ type: 'text_replace', text: finalText })}\n\n` +
+      `data: ${JSON.stringify({ type: 'done', reason: 'stop' })}\n\n`;
+    const fetch = vi.fn(async () => sseResponse(sse));
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    const events = await collect(transport.chat('hi'));
+    const replace = events.find((e) => e.type === 'text_replace');
+    expect(replace).toEqual({ type: 'text_replace', text: finalText });
+  });
+
+  it('drops malformed text_replace (non-string text)', async () => {
+    const sse =
+      `data: ${JSON.stringify({ type: 'text_replace', text: 42 })}\n\n` +
+      `data: ${JSON.stringify({ type: 'done', reason: 'stop' })}\n\n`;
+    const fetch = vi.fn(async () => sseResponse(sse));
+    const transport = httpTransport({ url: '/api/chat', fetch });
+    const events = await collect(transport.chat('hi'));
+    expect(events.some((e) => e.type === 'text_replace')).toBe(false);
+    expect(events[events.length - 1].type).toBe('done');
+  });
 });
