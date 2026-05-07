@@ -14,13 +14,16 @@ describe('CameraController.focusOn', () => {
   let nowValue = 0;
   const realNow = performance.now;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     camera = new THREE.PerspectiveCamera(60, 1, 0.1, 5000);
     camera.position.set(0, 0, 100);
     controller = new CameraController();
-    controller.attach(container, camera);
+    // attach() is async — it lazy-loads the ESM-only TrackballControls
+    // module. Awaiting here keeps the per-test setup deterministic so
+    // every `it` block sees `controls` already mounted.
+    await controller.attach(container, camera);
     // Override performance.now so the animation tick is deterministic.
     nowValue = 0;
     Object.defineProperty(performance, 'now', {

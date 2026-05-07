@@ -306,6 +306,14 @@ export class SceneController implements InferredEdgeHost {
   private readonly store: GraphStore;
   private readonly renderer = new WebGLRenderer();
   private readonly cameraController = new CameraController();
+  /**
+   * Tracks the latest in-flight `cameraController.attach()` /
+   * `swapCamera()` promise. Exposed via {@link whenCameraReady} so
+   * advanced consumers (and tests) can await the lazy
+   * TrackballControls module-load before reading {@link
+   * CameraController.getControls}.
+   */
+  private cameraReadyPromise: Promise<void> = Promise.resolve();
   private readonly labelRenderer = new LabelRenderer();
   private readonly annotationRenderer = new AnnotationRenderer();
   private readonly expandAffordance = new ExpandAffordance();
@@ -579,6 +587,19 @@ export class SceneController implements InferredEdgeHost {
     return this.cameraController;
   }
 
+  /**
+   * Resolves once the camera controller has finished mounting its
+   * underlying TrackballControls (an async lazy-import — see
+   * CameraController). Use this from tests + advanced consumers that
+   * need to read or mutate the controls instance immediately after
+   * {@link attach}.
+   *
+   * Resolves to `undefined` immediately when no attach is in flight.
+   */
+  whenCameraReady(): Promise<void> {
+    return this.cameraReadyPromise;
+  }
+
   /** Index of the currently hovered node, if any. */
   getHoveredIndex(): number | null {
     return this.hoveredIndex;
@@ -602,7 +623,24 @@ export class SceneController implements InferredEdgeHost {
       if (camera instanceof THREE.PerspectiveCamera) {
         this.perspectiveCamera = camera;
       }
-      this.cameraController.attach(container, camera);
+      // CameraController.attach is async (lazy-loads the ESM-only
+      // TrackballControls module on first attach — see CameraController.ts).
+      // Fire-and-forget keeps SceneController.attach synchronous so the
+      // React useEffect callsite stays unchanged. The first frame may
+      // render before TrackballControls is mounted; tick() and update()
+      // already null-check `controls`, so the only user-visible effect
+      // is a microtask-or-two delay before drag gestures activate.
+      // The promise is tracked on `cameraReadyPromise` so tests +
+      // advanced consumers can await it via {@link whenCameraReady}.
+      this.cameraReadyPromise = this.cameraController
+        .attach(container, camera)
+        .catch(() => {
+          // Surface failures to the console but never reject the
+          // whenCameraReady contract — callers use it as a "wait until
+          // settled" gate, not an error channel.
+          // eslint-disable-next-line no-console
+          console.warn('[SceneController] cameraController.attach failed');
+        });
       this.raycaster.setCamera(camera);
     }
 
@@ -1128,7 +1166,17 @@ export class SceneController implements InferredEdgeHost {
     }
 
     this.renderer.setCamera(this.orthographicCamera);
-    this.cameraController.swapCamera(this.orthographicCamera);
+    // swapCamera is async (lazy TrackballControls load — see
+    // CameraController.ts). Tracked on cameraReadyPromise so
+    // {@link whenCameraReady} waits for the new controls instance.
+    // The rotation-enabled gate below is enforced by the controller's
+    // `noRotate` cache, which applies once the new controls mount.
+    this.cameraReadyPromise = this.cameraController
+      .swapCamera(this.orthographicCamera)
+      .catch(() => {
+        // eslint-disable-next-line no-console
+        console.warn('[SceneController] cameraController.swapCamera failed');
+      });
     // Rotation makes no sense in a planar tree view — lock it. Zoom + pan
     // stay live so the user can navigate large family trees.
     this.cameraController.setRotationEnabled(false);
@@ -1147,7 +1195,13 @@ export class SceneController implements InferredEdgeHost {
   private applyGraphCamera(): void {
     if (!this.container || !this.perspectiveCamera) return;
     this.renderer.setCamera(this.perspectiveCamera);
-    this.cameraController.swapCamera(this.perspectiveCamera);
+    // swapCamera is async — see comment in applyTreeCamera() above.
+    this.cameraReadyPromise = this.cameraController
+      .swapCamera(this.perspectiveCamera)
+      .catch(() => {
+        // eslint-disable-next-line no-console
+        console.warn('[SceneController] cameraController.swapCamera failed');
+      });
     this.cameraController.setRotationEnabled(true);
     this.raycaster.setCamera(this.perspectiveCamera);
   }

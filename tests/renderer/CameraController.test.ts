@@ -113,38 +113,38 @@ describe('CameraController (TrackballControls-backed)', () => {
   });
 
   describe('attach/detach', () => {
-    it('constructs a TrackballControls bound to the camera + container', () => {
-      controller.attach(container, camera);
+    it('constructs a TrackballControls bound to the camera + container', async () => {
+      await controller.attach(container, camera);
       expect(lastTrackball).not.toBeNull();
       expect(lastTrackball!.camera).toBe(camera);
       expect(lastTrackball!.domElement).toBe(container);
     });
 
-    it('disposes the controls on detach', () => {
-      controller.attach(container, camera);
+    it('disposes the controls on detach', async () => {
+      await controller.attach(container, camera);
       const disposeSpy = lastTrackball!.dispose as ReturnType<typeof vi.fn>;
       controller.detach();
       expect(disposeSpy).toHaveBeenCalled();
       expect(controller.getControls()).toBeNull();
     });
 
-    it('detach without prior attach is a no-op', () => {
+    it('detach without prior attach is a no-op', async () => {
       expect(() => controller.detach()).not.toThrow();
     });
 
-    it('exposes the underlying TrackballControls', () => {
-      controller.attach(container, camera);
+    it('exposes the underlying TrackballControls', async () => {
+      await controller.attach(container, camera);
       expect(controller.getControls()).toBe(lastTrackball);
     });
   });
 
   describe('target', () => {
-    it('defaults target to origin', () => {
+    it('defaults target to origin', async () => {
       expect(controller.getTarget()).toEqual({ x: 0, y: 0, z: 0 });
     });
 
-    it('forwards setTarget into the controls.target', () => {
-      controller.attach(container, camera);
+    it('forwards setTarget into the controls.target', async () => {
+      await controller.attach(container, camera);
       controller.setTarget({ x: 10, y: 20, z: 30 });
       const t = lastTrackball!.target as { x: number; y: number; z: number };
       expect(t.x).toBe(10);
@@ -152,8 +152,8 @@ describe('CameraController (TrackballControls-backed)', () => {
       expect(t.z).toBe(30);
     });
 
-    it('returns a copy of the controls target via getTarget', () => {
-      controller.attach(container, camera);
+    it('returns a copy of the controls target via getTarget', async () => {
+      await controller.attach(container, camera);
       controller.setTarget({ x: 1, y: 2, z: 3 });
       const t = controller.getTarget();
       t.x = 999;
@@ -162,20 +162,20 @@ describe('CameraController (TrackballControls-backed)', () => {
   });
 
   describe('radius', () => {
-    it('exposes a default radius', () => {
+    it('exposes a default radius', async () => {
       expect(controller.getRadius()).toBeGreaterThan(0);
     });
 
-    it('setRadius positions the camera at the requested distance', () => {
-      controller.attach(container, camera);
+    it('setRadius positions the camera at the requested distance', async () => {
+      await controller.attach(container, camera);
       const setSpy = camera.position.set as ReturnType<typeof vi.fn>;
       setSpy.mockClear();
       controller.setRadius(500);
       expect(setSpy).toHaveBeenCalled();
     });
 
-    it('setRadius clamps to a minimum of 1', () => {
-      controller.attach(container, camera);
+    it('setRadius clamps to a minimum of 1', async () => {
+      await controller.attach(container, camera);
       controller.setRadius(0);
       // After clamping the radius should be 1, not 0.
       // We can't read it directly when controls present (it computes
@@ -187,36 +187,36 @@ describe('CameraController (TrackballControls-backed)', () => {
   });
 
   describe('rotation control', () => {
-    it('setRotationEnabled(false) sets noRotate=true on the controls', () => {
-      controller.attach(container, camera);
+    it('setRotationEnabled(false) sets noRotate=true on the controls', async () => {
+      await controller.attach(container, camera);
       controller.setRotationEnabled(false);
       expect(lastTrackball!.noRotate).toBe(true);
     });
 
-    it('setRotationEnabled(true) re-enables rotation', () => {
-      controller.attach(container, camera);
+    it('setRotationEnabled(true) re-enables rotation', async () => {
+      await controller.attach(container, camera);
       controller.setRotationEnabled(false);
       controller.setRotationEnabled(true);
       expect(lastTrackball!.noRotate).toBe(false);
     });
 
-    it('setRotationEnabled is a no-op when not attached', () => {
+    it('setRotationEnabled is a no-op when not attached', async () => {
       expect(() => controller.setRotationEnabled(false)).not.toThrow();
     });
 
-    it('resetRotation calls controls.reset()', () => {
-      controller.attach(container, camera);
+    it('resetRotation calls controls.reset()', async () => {
+      await controller.attach(container, camera);
       const resetSpy = lastTrackball!.reset as ReturnType<typeof vi.fn>;
       controller.resetRotation();
       expect(resetSpy).toHaveBeenCalled();
     });
 
-    it('resetRotation is a no-op when not attached', () => {
+    it('resetRotation is a no-op when not attached', async () => {
       expect(() => controller.resetRotation()).not.toThrow();
     });
 
-    it('isRotationEnabled reflects the underlying noRotate flag', () => {
-      controller.attach(container, camera);
+    it('isRotationEnabled reflects the underlying noRotate flag', async () => {
+      await controller.attach(container, camera);
       expect(controller.isRotationEnabled()).toBe(true);
       controller.setRotationEnabled(false);
       expect(controller.isRotationEnabled()).toBe(false);
@@ -224,14 +224,14 @@ describe('CameraController (TrackballControls-backed)', () => {
       expect(controller.isRotationEnabled()).toBe(true);
     });
 
-    it('isRotationEnabled defaults to true before attach', () => {
+    it('isRotationEnabled defaults to true before attach', async () => {
       expect(controller.isRotationEnabled()).toBe(true);
     });
   });
 
   describe('resetCameraOrientation', () => {
-    it('snaps the camera to axis-aligned along +Z from the target', () => {
-      controller.attach(container, camera);
+    it('snaps the camera to axis-aligned along +Z from the target', async () => {
+      await controller.attach(container, camera);
       controller.setTarget({ x: 50, y: -20, z: 0 });
       controller.setRadius(400);
 
@@ -253,21 +253,21 @@ describe('CameraController (TrackballControls-backed)', () => {
       expect(lookAtSpy).toHaveBeenCalled();
     });
 
-    it('is a no-op when not attached', () => {
+    it('is a no-op when not attached', async () => {
       expect(() => controller.resetCameraOrientation()).not.toThrow();
     });
   });
 
   describe('update', () => {
-    it('forwards update() to the trackball controls', () => {
-      controller.attach(container, camera);
+    it('forwards update() to the trackball controls', async () => {
+      await controller.attach(container, camera);
       const spy = lastTrackball!.update as ReturnType<typeof vi.fn>;
       spy.mockClear();
       controller.update();
       expect(spy).toHaveBeenCalled();
     });
 
-    it('update without controls is a no-op', () => {
+    it('update without controls is a no-op', async () => {
       expect(() => controller.update()).not.toThrow();
     });
   });
@@ -279,8 +279,8 @@ describe('CameraController (TrackballControls-backed)', () => {
     // damping (rotation / zoom / pan inertia) on the next update(),
     // sliding the camera away from the just-restored snapshot.
 
-    it('updates the cached radius from the live camera + target', () => {
-      controller.attach(container, camera);
+    it('updates the cached radius from the live camera + target', async () => {
+      await controller.attach(container, camera);
 
       // Move the camera + target so the live distance no longer matches
       // the controller's default radius (100).
@@ -299,8 +299,8 @@ describe('CameraController (TrackballControls-backed)', () => {
       expect((controller as unknown as { radius: number }).radius).toBeCloseTo(50, 6);
     });
 
-    it('zeros TrackballControls damping accumulators so the next update() is a no-op', () => {
-      controller.attach(container, camera);
+    it('zeros TrackballControls damping accumulators so the next update() is a no-op', async () => {
+      await controller.attach(container, camera);
       const c = lastTrackball as unknown as Record<string, unknown>;
 
       // Seed residual damping state directly on the mock — these are
@@ -325,8 +325,8 @@ describe('CameraController (TrackballControls-backed)', () => {
       expect(c._touchZoomDistanceStart).toBe(25);
     });
 
-    it('refreshes the change-detector slots so no spurious change events fire', () => {
-      controller.attach(container, camera);
+    it('refreshes the change-detector slots so no spurious change events fire', async () => {
+      await controller.attach(container, camera);
       const c = lastTrackball as unknown as Record<string, unknown>;
 
       // Seed the detector with stale values different from the live camera.
@@ -344,7 +344,7 @@ describe('CameraController (TrackballControls-backed)', () => {
       expect(c._lastZoom).toBe(1.75);
     });
 
-    it('is a no-op when not attached', () => {
+    it('is a no-op when not attached', async () => {
       // Before attach, there are no controls + no camera. Must not throw.
       expect(() => controller.syncFromCamera()).not.toThrow();
     });
