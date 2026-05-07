@@ -110,6 +110,19 @@ export interface AIEngineConfig {
    * array when a {@link ConversationStore} is set. Default 8.
    */
   priorTurnLimit?: number;
+  /**
+   * When set, names a node attribute key whose value is the citation
+   * token format (e.g., 'slug'). The catalog block will include a
+   * separate citation-key column, and the system prompt's citation
+   * requirement instructs the model to use that column for `[[...]]`
+   * tokens. When unset, citations use the catalog's primary id (the
+   * `node.id` value, typically a UUID for stable backends).
+   *
+   * Hosts whose ids are user-friendly (slugs/short names) can leave
+   * this unset; hosts with UUID ids should set this to the friendly
+   * attribute key (Bible Graph: `'slug'`).
+   */
+  citationKey?: string;
 }
 
 /** Internal: which embedding storage path is currently active. */
@@ -268,6 +281,7 @@ export class AIEngine {
   private readonly chatRerankCandidates: number;
   private readonly chatRerankTopK: number;
   private readonly priorTurnLimit: number;
+  private readonly citationKey: string | undefined;
   private readonly inspector: SchemaInspector;
   private readonly keywordEngine: SearchEngine;
   private provider: LLMProvider | undefined;
@@ -337,6 +351,10 @@ export class AIEngine {
     this.chatRerankCandidates = config?.chatRerankCandidates ?? 20;
     this.chatRerankTopK = config?.chatRerankTopK ?? 8;
     this.priorTurnLimit = config?.priorTurnLimit ?? 8;
+    this.citationKey =
+      typeof config?.citationKey === 'string' && config.citationKey.length > 0
+        ? config.citationKey
+        : undefined;
     this.inspector = new SchemaInspector(store, {
       maxSamplesPerAttribute: this.schemaSampleSize,
     });
@@ -1550,7 +1568,7 @@ export class AIEngine {
     opts?: { pronounIds?: ReadonlyArray<string> },
   ): LLMMessage[] {
     const schemaBlock = renderSchemaBlock(schema, this.schemaSampleSize);
-    const catalogBlock = renderCatalogBlock(relevantNodes);
+    const catalogBlock = renderCatalogBlock(relevantNodes, this.citationKey);
     const contentBlock = renderContentBlock(
       relevantNodes,
       this.chatContentSize,
@@ -1578,17 +1596,17 @@ export class AIEngine {
       '  - `apply_filter(spec)` — restrict visibility. Use ONLY when the user EXPLICITLY asks to filter ("show only X", "hide events"). Do NOT auto-filter on questions about the data — that hides the answer.',
       '  - `annotate(nodeId, text)` — attach a sticky note to a node.',
       '',
-      'Examples:',
-      '  User: "Who lived in Eden?"',
-      '  → text: "Adam and Eve dwelt in the Garden of Eden."',
-      '  → highlight(["garden-of-eden", "adam", "eve"])  ← all three: the place asked about plus the people who lived there.',
+      'Examples (placeholders in `<...>` stand in for real ids — copy ids verbatim from the catalog below):',
+      '  User asks about a place and the people who occupy it:',
+      '  → text: a short answer naming the place and the people.',
+      '  → highlight(["<node-id-1>", "<node-id-2>", "<node-id-3>"])  ← all three: the subject of the question plus the objects of the answer.',
       '',
-      '  User: "Tell me about Noah."',
-      '  → text: a short biography',
-      '  → highlight(["noah"])',
-      '  → focus("noah")',
+      '  User asks about a single entity:',
+      '  → text: a short biography or description.',
+      '  → highlight(["<node-id>"])',
+      '  → focus("<node-id>")',
       '',
-      '  User: "How do I use this?"',
+      '  User asks a meta question (e.g. "How do I use this?"):',
       '  → text only — no graph entities involved.',
       '',
       'Dataset schema (attribute keys and a sample of observed values):',
@@ -1624,20 +1642,40 @@ export class AIEngine {
     lines.push('');
     lines.push('CITATIONS — REQUIRED, NOT OPTIONAL:');
     lines.push('');
-    lines.push(
-      'After the FIRST mention of every entity you reference, you MUST emit a citation token in the form `[[id]]` where `id` is the catalog id (the value before the first ` | ` in each catalog row). Citations are how the host renders entity names as clickable links — failing to cite is a critical error and breaks the chat UX.',
-    );
-    lines.push('');
-    lines.push(
-      'Correct: "Cain [[cain]] slew his brother Abel [[abel]] in the field, then was banished to the land of Nod [[land-of-nod]]."',
-    );
-    lines.push(
-      'Wrong: "Cain slew his brother Abel in the field, then was banished to the land of Nod."  (no [[id]] tokens — UNCITED, FORBIDDEN)',
-    );
-    lines.push('');
-    lines.push(
-      'Cite every entity even when calling `highlight()`. The `highlight()` tool drives the visual graph; `[[id]]` drives the inline text. They are NOT substitutes.',
-    );
+    if (this.citationKey !== undefined) {
+      lines.push(
+        'After the FIRST mention of every entity you reference, you MUST emit a citation token in the form `[[id]]` where `id` is the value in the LAST column of each catalog row (the citation key — appears AFTER the final ` | `). Citations are how the host renders entity names as clickable links — failing to cite is a critical error and breaks the chat UX.',
+      );
+      lines.push('');
+      lines.push(
+        'Correct: "Cain [[cain]] slew his brother Abel [[abel]] in the field, then was banished to the land of Nod [[land-of-nod]]."',
+      );
+      lines.push(
+        'Wrong: "Cain slew his brother Abel in the field, then was banished to the land of Nod."  (no [[id]] tokens — UNCITED, FORBIDDEN)',
+      );
+      lines.push('');
+      lines.push(
+        'Cite every entity even when calling `highlight()`. The `highlight()` tool drives the visual graph; `[[id]]` drives the inline text. They are NOT substitutes.',
+      );
+      lines.push(
+        'Note: `highlight()` and `focus()` accept the FIRST column (the canonical id) — use those for tool calls, and the LAST column (the citation key) for `[[...]]` text citations.',
+      );
+    } else {
+      lines.push(
+        'After the FIRST mention of every entity you reference, you MUST emit a citation token in the form `[[id]]` where `id` is the catalog id (the value before the first ` | ` in each catalog row). Citations are how the host renders entity names as clickable links — failing to cite is a critical error and breaks the chat UX.',
+      );
+      lines.push('');
+      lines.push(
+        'Correct: "The first man [[node-id-1]] and his wife [[node-id-2]] dwelt there."',
+      );
+      lines.push(
+        'Wrong: "The first man and his wife dwelt there."  (no [[id]] tokens — UNCITED, FORBIDDEN)',
+      );
+      lines.push('');
+      lines.push(
+        'Cite every entity even when calling `highlight()`. The `highlight()` tool drives the visual graph; `[[id]]` drives the inline text. They are NOT substitutes.',
+      );
+    }
     lines.push('');
     lines.push(
       'Every factual claim must reference a node id from the catalog. If the catalog does not contain the answer, say "I do not have data on that" — do not extrapolate or invent.',
@@ -2208,8 +2246,18 @@ function flattenMessages(messages: LLMMessage[]): string {
  * attributes follow as `key=value` pairs, alphabetized, with array values
  * joined by `,`. Empty input yields `(no nodes)` so the prompt never has a
  * blank section.
+ *
+ * When `citationKey` is provided, each row gains a trailing column carrying
+ * the value of `node.attributes[citationKey]` (or `node.id` if that
+ * attribute is missing/non-string). The system prompt's citation rule
+ * points the model at this LAST column for `[[...]]` tokens, decoupling
+ * the human-friendly citation token from the canonical (often UUID) id
+ * used by tool calls.
  */
-function renderCatalogBlock(nodes: ReadonlyArray<NodeData>): string {
+function renderCatalogBlock(
+  nodes: ReadonlyArray<NodeData>,
+  citationKey: string | undefined,
+): string {
   if (nodes.length === 0) return '(no nodes)';
   const lines: string[] = [];
   for (const node of nodes) {
@@ -2232,7 +2280,15 @@ function renderCatalogBlock(nodes: ReadonlyArray<NodeData>): string {
       extras.push(`${key}=${rendered}`);
     }
     const extrasJoined = extras.length > 0 ? ` | ${extras.join('; ')}` : '';
-    lines.push(`${node.id} | ${title} | ${type}${extrasJoined}`);
+    const baseRow = `${node.id} | ${title} | ${type}${extrasJoined}`;
+    if (citationKey !== undefined) {
+      const raw = attrs[citationKey];
+      const citationValue =
+        typeof raw === 'string' && raw.length > 0 ? raw : node.id;
+      lines.push(`${baseRow} | ${citationValue}`);
+    } else {
+      lines.push(baseRow);
+    }
   }
   return lines.join('\n');
 }

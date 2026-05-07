@@ -26,6 +26,14 @@ InferaGraph is a self-contained platform that holds graph data, performs AI reas
 - React entry point + a separate `data` entry for Next.js RSC contexts
 - CSS-themable overlays and controls
 
+## What's new in 0.9.5
+
+- **Tool-call examples in the chat system prompt are now host-agnostic.** The `Examples:` block previously demonstrated `highlight()` / `focus()` calls with literal Bible-Graph slugs (`highlight(["garden-of-eden", "adam", "eve"])`, `focus("noah")`). On UUID-keyed hosts those literals contradicted the catalog rows the model was actually reading and obscured the SHAPE of valid tool-call arguments. The examples now use `<node-id-N>` / `<node-id>` placeholders wrapped in angle brackets so a model reading the prompt understands the call shape without mistaking the placeholder for a real id. Strictly a prompt-content change; no public API surface moves. The slug-shaped citation example (`Cain [[cain]]`) under the `citationKey`-set branch is unchanged — it is intentionally aligned with the catalog's last column per 0.9.4.
+
+## What's new in 0.9.4
+
+- **`citationKey` config aligns the catalog id with the cite-token example.** 0.9.3's strengthened citation prompt instructed the model to cite using the catalog's first column, but the concrete example showed a slug-shaped token (`Cain [[cain]]`) while real catalog rows on UUID-keyed hosts (Bible Graph) carried UUID ids. Tool-use-trained models read the contradiction as "the rule does not match the data" and silently dropped citations for the whole turn. New optional `AIEngineConfig.citationKey` names a node attribute (e.g., `'slug'`) whose value is the citation token. When set, the catalog gains a trailing column carrying that value, and the system prompt instructs the model to cite using the LAST column — adding a note that `highlight()` / `focus()` still take the FIRST (canonical) column. When unset, behavior matches 0.9.3 except the example uses generic `[[node-id-N]]` placeholders so it no longer contradicts UUID-shaped catalog ids. Strictly additive — hosts that don't set `citationKey` see zero behavior change beyond the example wording.
+
 ## What's new in 0.9.3
 
 - **Citation requirement strengthened.** The chat system-prompt's "cite every entity using `[[id]]`" instruction is now framed as `CITATIONS — REQUIRED, NOT OPTIONAL`, with a concrete `Cain [[cain]]` example and an `UNCITED, FORBIDDEN` counterexample. Tool-use-trained models read soft "cite" verbs as optional; the harder framing matches the pattern already used for `highlight()` higher in the same prompt and stops models from skipping citations on multi-entity answers.
