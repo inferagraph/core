@@ -28,3 +28,12 @@
   --ig-expand-border: 1px solid rgba(255, 255, 255, 0.15);
   --ig-expand-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
 }
+
+/*
+ * Chat-text dark-theme override — bump the inline <code> background to
+ * a translucent light tint so it reads against dark surfaces. Hosts can
+ * still override by styling .ig-chat-text in their own stylesheet.
+ */
+.ig-chat-text code {
+  background: rgba(255, 255, 255, 0.08);
+}
