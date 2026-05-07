@@ -1,6 +1,6 @@
 # @inferagraph/core
 
-AI-powered knowledge graph platform with WebGL visualization. **v0.9.0** — diagnostic-surface warmup events + nominal-type fix across entry points + batched inferred-edge prompt mode + `InMemoryCacheProvider`.
+AI-powered knowledge graph platform with WebGL visualization. **v0.9.1** — abstract base class renamed `Datasource` → `DataSource` for camel-case symmetry with sibling storage packages.
 
 InferaGraph is a self-contained platform that holds graph data, performs AI reasoning via LLM, and renders interactive 3D visualizations. The consuming application is a thin shell that feeds data and displays results — it never invokes the LLM directly.
 
@@ -25,6 +25,10 @@ InferaGraph is a self-contained platform that holds graph data, performs AI reas
 - Pluggable LLM providers (Anthropic, OpenAI, Azure AI Foundry); host-blind core
 - React entry point + a separate `data` entry for Next.js RSC contexts
 - CSS-themable overlays and controls
+
+## What's new in 0.9.1
+
+- **`Datasource` → `DataSource` rename (breaking).** The abstract base class exported from `@inferagraph/core` and `@inferagraph/core/data` is now `DataSource` (camel-cased), matching the naming convention used by every sibling storage package (`CosmosDataSource`, `GremlinDataSource`, `SqlDataSource`, `RedisDataSource`, `FileDataSource`, `LogAnalyticsDataSource`). Behavior is unchanged. Hosts that subclass the base directly should rename `extends Datasource` → `extends DataSource` and update their import.
 
 ## What's new in 0.9.0
 
