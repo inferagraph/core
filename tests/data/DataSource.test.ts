@@ -1,12 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
-import { Datasource } from '../../src/data/Datasource.js';
+import { DataSource } from '../../src/data/DataSource.js';
 import type { DataAdapterConfig } from '../../src/data/DataAdapter.js';
 import type {
   NodeId, NodeData, GraphData, ContentData,
   PaginationOptions, PaginatedResult, DataFilter,
 } from '../../src/types.js';
 
-class TestDatasource extends Datasource {
+class TestDataSource extends DataSource {
   readonly name = 'test-datasource';
   private connected = false;
 
@@ -51,32 +51,32 @@ class TestDatasource extends Datasource {
   }
 }
 
-describe('Datasource', () => {
+describe('DataSource', () => {
   it('should not be instantiable directly', () => {
     // TypeScript prevents instantiation of abstract classes at compile time.
     // At runtime we verify our concrete subclass works.
-    expect(() => new TestDatasource()).not.toThrow();
+    expect(() => new TestDataSource()).not.toThrow();
   });
 
   it('should require concrete subclass to implement name', () => {
-    const ds = new TestDatasource();
+    const ds = new TestDataSource();
     expect(ds.name).toBe('test-datasource');
   });
 
   describe('connect / disconnect lifecycle', () => {
     it('should not be connected initially', () => {
-      const ds = new TestDatasource();
+      const ds = new TestDataSource();
       expect(ds.isConnected()).toBe(false);
     });
 
     it('should connect successfully', async () => {
-      const ds = new TestDatasource();
+      const ds = new TestDataSource();
       await ds.connect();
       expect(ds.isConnected()).toBe(true);
     });
 
     it('should disconnect successfully', async () => {
-      const ds = new TestDatasource();
+      const ds = new TestDataSource();
       await ds.connect();
       await ds.disconnect();
       expect(ds.isConnected()).toBe(false);
@@ -85,50 +85,50 @@ describe('Datasource', () => {
 
   describe('DataAdapter interface compliance', () => {
     it('should implement getInitialView', async () => {
-      const ds = new TestDatasource();
+      const ds = new TestDataSource();
       const result = await ds.getInitialView();
       expect(result).toEqual({ nodes: [], edges: [] });
     });
 
     it('should implement getNode', async () => {
-      const ds = new TestDatasource();
+      const ds = new TestDataSource();
       const result = await ds.getNode('any');
       expect(result).toBeUndefined();
     });
 
     it('should implement getNeighbors', async () => {
-      const ds = new TestDatasource();
+      const ds = new TestDataSource();
       const result = await ds.getNeighbors('any');
       expect(result).toEqual({ nodes: [], edges: [] });
     });
 
     it('should implement findPath', async () => {
-      const ds = new TestDatasource();
+      const ds = new TestDataSource();
       const result = await ds.findPath('a', 'b');
       expect(result).toEqual({ nodes: [], edges: [] });
     });
 
     it('should implement search', async () => {
-      const ds = new TestDatasource();
+      const ds = new TestDataSource();
       const result = await ds.search('query');
       expect(result).toEqual({ items: [], total: 0, hasMore: false });
     });
 
     it('should implement filter', async () => {
-      const ds = new TestDatasource();
+      const ds = new TestDataSource();
       const result = await ds.filter({ types: ['test'] });
       expect(result).toEqual({ items: [], total: 0, hasMore: false });
     });
 
     it('should implement getContent', async () => {
-      const ds = new TestDatasource();
+      const ds = new TestDataSource();
       const result = await ds.getContent('any');
       expect(result).toBeUndefined();
     });
   });
 
   it('should be assignable to DataAdapter type', () => {
-    const ds: TestDatasource = new TestDatasource();
+    const ds: TestDataSource = new TestDataSource();
     // Verify the datasource satisfies the DataAdapter interface
     // by checking all required methods exist
     expect(typeof ds.getInitialView).toBe('function');

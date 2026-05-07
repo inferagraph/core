@@ -9,7 +9,7 @@ import type {
  * Extends the DataAdapter interface with lifecycle management
  * (connect/disconnect) for datasources that need persistent connections.
  */
-export abstract class Datasource implements DataAdapter {
+export abstract class DataSource implements DataAdapter {
   /** Human-readable name of the datasource */
   abstract readonly name: string;
 

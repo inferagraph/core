@@ -214,7 +214,7 @@ export type { ExportOptions, NodePosition, EdgePosition } from './export/ExportE
 export type { DataAdapter, DataAdapterConfig } from './data/DataAdapter.js';
 export { StaticDataAdapter } from './data/StaticDataAdapter.js';
 export { DataManager } from './data/DataManager.js';
-export { Datasource } from './data/Datasource.js';
+export { DataSource } from './data/DataSource.js';
 export { MemoryManager } from './data/MemoryManager.js';
 export type {
   MemoryManagedStore,
