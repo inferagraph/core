@@ -9,6 +9,12 @@
  * Per memory `feedback_inferagraph_chat_text_plus_full_visual.md` — soft
  * "prefer" verbs fail; explicit MUST/REQUIRED framing works. Per memory
  * `feedback_tdd_discipline.md` — failing test FIRST, then implement.
+ *
+ * 0.9.4 update: the slug-shaped concrete example (`Cain [[cain]]`) now
+ * appears only when the engine is configured with `citationKey`. The
+ * tests that assert that example pass `citationKey: 'slug'` so the engine
+ * emits the slug-shaped example. See `AIEngine.citationKey.test.ts` for
+ * the unset-branch coverage.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -77,7 +83,11 @@ describe('AIEngine.buildChatMessages — citation requirement is mandatory', () 
   it('shows a concrete "Cain [[cain]]" example so the format is unambiguous', async () => {
     const store = makeStore();
     const { provider, getSystemPrompt } = captureSystemPrompt();
-    const engine = new AIEngine(store, new QueryEngine(store));
+    // 0.9.4: slug-shaped examples now require citationKey. With it set, the
+    // catalog gains a 4th slug column and the example matches the catalog.
+    const engine = new AIEngine(store, new QueryEngine(store), {
+      citationKey: 'slug',
+    });
     engine.setProvider(provider);
 
     await collect(engine.chat('hi'));
