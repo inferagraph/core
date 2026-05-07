@@ -1,14 +1,15 @@
 /**
- * 0.9.3 — citation requirement strengthened.
+ * 0.9.3 — citation rule appears in the prompt.
  *
- * The chat system-prompt previously stated `Cite every entity ... using the
- * syntax [[id]] after the entity's first mention.` That soft "cite" verb is
- * read by tool-use-trained models as optional. We replicate the hard "MUST"
- * framing already used for the `highlight()` tool higher in the same prompt.
+ * 0.11.0 update: deterministic citation injection now guarantees `[[id]]`
+ * tokens regardless of the model's text shape, so the prompt no longer
+ * needs alarmist "REQUIRED, NOT OPTIONAL" / "UNCITED, FORBIDDEN" framing.
+ * Belt-and-suspenders: keep the rule in the prompt (sometimes saves a
+ * post-processor pass) but with neutral wording. These tests now pin the
+ * surviving signal — the rule is still present, the example is still
+ * concrete, and the model is still pointed at the right column.
  *
- * Per memory `feedback_inferagraph_chat_text_plus_full_visual.md` — soft
- * "prefer" verbs fail; explicit MUST/REQUIRED framing works. Per memory
- * `feedback_tdd_discipline.md` — failing test FIRST, then implement.
+ * Per memory `feedback_tdd_discipline.md` — failing test FIRST.
  *
  * 0.9.4 update: the slug-shaped concrete example (`Cain [[cain]]`) now
  * appears only when the engine is configured with `citationKey`. The
@@ -68,8 +69,8 @@ function captureSystemPrompt(): {
   };
 }
 
-describe('AIEngine.buildChatMessages — citation requirement is mandatory', () => {
-  it('emits the hard "REQUIRED, NOT OPTIONAL" framing', async () => {
+describe('AIEngine.buildChatMessages — citation rule is present', () => {
+  it('points the model at the citation token format `[[id]]`', async () => {
     const store = makeStore();
     const { provider, getSystemPrompt } = captureSystemPrompt();
     const engine = new AIEngine(store, new QueryEngine(store));
@@ -77,7 +78,9 @@ describe('AIEngine.buildChatMessages — citation requirement is mandatory', () 
 
     await collect(engine.chat('hi'));
 
-    expect(getSystemPrompt()).toContain('REQUIRED, NOT OPTIONAL');
+    const sys = getSystemPrompt();
+    expect(sys).toContain('Citations:');
+    expect(sys).toContain('[[id]]');
   });
 
   it('shows a concrete "Cain [[cain]]" example so the format is unambiguous', async () => {
@@ -95,7 +98,7 @@ describe('AIEngine.buildChatMessages — citation requirement is mandatory', () 
     expect(getSystemPrompt()).toContain('Cain [[cain]]');
   });
 
-  it('shows a "UNCITED, FORBIDDEN" counterexample', async () => {
+  it('mentions that the host injects citations automatically when the model skips them', async () => {
     const store = makeStore();
     const { provider, getSystemPrompt } = captureSystemPrompt();
     const engine = new AIEngine(store, new QueryEngine(store));
@@ -103,18 +106,20 @@ describe('AIEngine.buildChatMessages — citation requirement is mandatory', () 
 
     await collect(engine.chat('hi'));
 
-    expect(getSystemPrompt()).toContain('UNCITED, FORBIDDEN');
+    expect(getSystemPrompt()).toMatch(/host injects citations automatically/);
   });
 
-  it('clarifies that highlight() does NOT substitute for [[id]] citations', async () => {
+  it('points tool calls (highlight/focus) at the FIRST column when citationKey is set', async () => {
     const store = makeStore();
     const { provider, getSystemPrompt } = captureSystemPrompt();
-    const engine = new AIEngine(store, new QueryEngine(store));
+    const engine = new AIEngine(store, new QueryEngine(store), {
+      citationKey: 'slug',
+    });
     engine.setProvider(provider);
 
     await collect(engine.chat('hi'));
 
     const sys = getSystemPrompt();
-    expect(sys).toMatch(/highlight\(\).*NOT substitutes|NOT substitutes/);
+    expect(sys).toMatch(/highlight\(\).*FIRST column|FIRST column/);
   });
 });

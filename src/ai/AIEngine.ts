@@ -34,6 +34,7 @@ import type {
   ConversationStore,
   ConversationTurn,
 } from './ConversationStore.js';
+import { injectCitations } from './citationInjector.js';
 
 /**
  * Tunables for the AI engine. Phase 1 deliberately keeps this small — chat,
@@ -919,6 +920,11 @@ export class AIEngine {
           signal,
         )) {
           if (out.type === 'text') assistantText += out.delta;
+          // 0.11.0 — `text_replace` carries the citation-corrected final
+          // text. Use IT for conversation-store persistence so prior turns
+          // (and the pronoun-resolve `retrievedNodeIds` plumbing) see the
+          // cited form rather than the streamed-uncited fragments.
+          if (out.type === 'text_replace') assistantText = out.text;
           yield out;
         }
         break;
@@ -1118,10 +1124,33 @@ export class AIEngine {
     //    The synthesized text is grounded in the FIRST retrieved node's
     //    content (first paragraph, capped at 200 chars) — NOT a "Showing
     //    Adam, Eve, ..." catalog roll-up.
+    let synthesized = '';
     if (reduced.textCount === 0 && !signal?.aborted) {
       const synth = synthesizeGroundedText(relevantNodes);
       if (synth !== undefined) {
+        synthesized = synth;
         yield { type: 'text', delta: synth };
+      }
+    }
+
+    // -- 0.11.0 deterministic citation injection. When the engine is
+    //    configured with `citationKey`, scan the accumulated assistant
+    //    text for first-occurrence titles and inject `[[citationKey]]`
+    //    inline. If the corrected text differs, emit a `text_replace`
+    //    event so hosts replace whatever streamed-incremental text the
+    //    bubble built up. The model's text-shape no longer matters —
+    //    citations become a guaranteed property of the chat pipeline.
+    if (this.citationKey !== undefined && !signal?.aborted) {
+      const fullText = reduced.textBuffer + synthesized;
+      if (fullText.length > 0 && relevantNodes.length > 0) {
+        const corrected = injectCitations(
+          fullText,
+          relevantNodes,
+          this.citationKey,
+        );
+        if (corrected !== fullText) {
+          yield { type: 'text_replace', text: corrected };
+        }
       }
     }
 
@@ -1640,40 +1669,27 @@ export class AIEngine {
       lines.push(pronounIds.join(', '));
     }
     lines.push('');
-    lines.push('CITATIONS — REQUIRED, NOT OPTIONAL:');
+    lines.push('Citations:');
     lines.push('');
     if (this.citationKey !== undefined) {
       lines.push(
-        'After the FIRST mention of every entity you reference, you MUST emit a citation token in the form `[[id]]` where `id` is the value in the LAST column of each catalog row (the citation key — appears AFTER the final ` | `). Citations are how the host renders entity names as clickable links — failing to cite is a critical error and breaks the chat UX.',
+        'Cite each first-mentioned entity with `[[id]]` where `id` is the value in the LAST column of each catalog row (the citation key — appears AFTER the final ` | `). The host injects citations automatically if you skip them, but emitting them inline produces tighter, lower-latency output.',
       );
       lines.push('');
       lines.push(
-        'Correct: "Cain [[cain]] slew his brother Abel [[abel]] in the field, then was banished to the land of Nod [[land-of-nod]]."',
-      );
-      lines.push(
-        'Wrong: "Cain slew his brother Abel in the field, then was banished to the land of Nod."  (no [[id]] tokens — UNCITED, FORBIDDEN)',
+        'Example: "Cain [[cain]] slew his brother Abel [[abel]] in the field, then was banished to the land of Nod [[land-of-nod]]."',
       );
       lines.push('');
-      lines.push(
-        'Cite every entity even when calling `highlight()`. The `highlight()` tool drives the visual graph; `[[id]]` drives the inline text. They are NOT substitutes.',
-      );
       lines.push(
         'Note: `highlight()` and `focus()` accept the FIRST column (the canonical id) — use those for tool calls, and the LAST column (the citation key) for `[[...]]` text citations.',
       );
     } else {
       lines.push(
-        'After the FIRST mention of every entity you reference, you MUST emit a citation token in the form `[[id]]` where `id` is the catalog id (the value before the first ` | ` in each catalog row). Citations are how the host renders entity names as clickable links — failing to cite is a critical error and breaks the chat UX.',
+        'Cite each first-mentioned entity with `[[id]]` where `id` is the catalog id (the value before the first ` | ` in each catalog row). The host injects citations automatically if you skip them, but emitting them inline produces tighter, lower-latency output.',
       );
       lines.push('');
       lines.push(
-        'Correct: "The first man [[node-id-1]] and his wife [[node-id-2]] dwelt there."',
-      );
-      lines.push(
-        'Wrong: "The first man and his wife dwelt there."  (no [[id]] tokens — UNCITED, FORBIDDEN)',
-      );
-      lines.push('');
-      lines.push(
-        'Cite every entity even when calling `highlight()`. The `highlight()` tool drives the visual graph; `[[id]]` drives the inline text. They are NOT substitutes.',
+        'Example: "The first man [[node-id-1]] and his wife [[node-id-2]] dwelt there."',
       );
     }
     lines.push('');

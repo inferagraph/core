@@ -286,6 +286,14 @@ function reconstructChatEvent(parsed: unknown): ChatEvent | null {
       if (typeof p.delta !== 'string') return null;
       return { type: 'text', delta: p.delta };
     }
+    // 0.11.0 — `text_replace` carries the full citation-corrected final
+    // text. Round-trips identically to the other carrier events; hosts
+    // replace any accumulated streaming text with `text` when they see
+    // this event.
+    case 'text_replace': {
+      if (typeof p.text !== 'string') return null;
+      return { type: 'text_replace', text: p.text };
+    }
     case 'apply_filter': {
       const spec = p.spec;
       if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return null;

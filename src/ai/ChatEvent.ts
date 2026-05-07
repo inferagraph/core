@@ -31,6 +31,23 @@ export type ChatEvent =
       delta: string;
     }
   | {
+      /**
+       * 0.11.0 — full-text replacement. Emitted by the engine AFTER the
+       * model stream completes when a post-processing pass (e.g.
+       * deterministic citation injection) produced text that differs
+       * from the concatenation of the streamed `text` deltas. Hosts
+       * MUST replace any accumulated streaming text with `text` so the
+       * final bubble matches the corrected output.
+       *
+       * Carries the FULL final text (no diff format) so downstream
+       * consumers (React hook, host renderer) only need a single
+       * "set" operation. Engines that have nothing to correct simply
+       * skip emitting this event.
+       */
+      type: 'text_replace';
+      text: string;
+    }
+  | {
       type: 'apply_filter';
       /** Raw filter spec the LLM emitted (for inspection / debug). */
       spec: FilterSpec;
