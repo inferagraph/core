@@ -76,7 +76,15 @@ vi.mock('three', () => {
           }),
           x: 0, y: 0, z: 0, w: 1,
         };
-        this.up = { x: 0, y: 1, z: 0, clone: vi.fn().mockReturnValue({ x: 0, y: 1, z: 0 }), copy: vi.fn().mockReturnThis() };
+        this.up = {
+          x: 0, y: 1, z: 0,
+          set: vi.fn().mockImplementation(function (this: { x: number; y: number; z: number }, x: number, y: number, z: number) {
+            this.x = x; this.y = y; this.z = z;
+            return this;
+          }),
+          clone: vi.fn().mockReturnValue({ x: 0, y: 1, z: 0 }),
+          copy: vi.fn().mockReturnThis(),
+        };
       }
     },
     OrthographicCamera: class MockOrthographicCamera {
@@ -1406,7 +1414,19 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('does not reset orientation in graph mode framing', () => {
+    it('resets orientation on first-entry graph mode framing (0.14.2: t2 fix)', () => {
+      // Pre-0.14.2 contract: graph first-entry skipped resetCameraOrientation,
+      // letting placeCameraAtRadius preserve whatever inherited orbit direction
+      // the perspective camera had. That inherited direction came from
+      // CameraController.attach against the default target (0,0,0), or from a
+      // prior swap against the OUT-going mode's target — either way, off-axis
+      // for the freshly-framed graph cluster. The result was the t2 symptom:
+      // perspective camera ended up far below the cluster looking up, putting
+      // nodes at the top of the canvas.
+      // 0.14.2 contract: graph first-entry calls resetCameraOrientation AFTER
+      // frameToFit, snapping the camera to (target.x, target.y, target.z + radius)
+      // looking at target — the canonical "viewing the cluster from the front"
+      // pose. Free rotation stays enabled.
       seedStore(store, family);
       const ctrl = new SceneController({ store, layout: 'graph' });
       ctrl.attach(container);
@@ -1415,7 +1435,7 @@ describe('SceneController', () => {
         'resetCameraOrientation',
       );
       ctrl.syncFromStore();
-      expect(resetSpy).not.toHaveBeenCalled();
+      expect(resetSpy).toHaveBeenCalled();
       ctrl.detach();
     });
 
@@ -2067,8 +2087,14 @@ describe('SceneController', () => {
       );
     }
 
-    it('resizes the orthographic frustum to fit the tree extent on first entry to tree mode', async () => {
+    it('sizes the orthographic frustum to fit the bounding box of positions on first entry to tree mode', async () => {
+      // 0.14.2 contract: the orthographic frustum is sized from the
+      // bounding BOX of the input positions (per-axis at fillFactor),
+      // NOT the bounding sphere. Sphere sizing left tall narrow trees
+      // filling ~80% of canvas height but only ~20% of canvas width —
+      // the t1 root cause. Box sizing fits BOTH axes at fillFactor.
       seedStore(store, family);
+      // Stub spreads 5 nodes along x at ±400 with y=z=0 → bbox 800×0.
       stubLayoutPositions(400, 5);
 
       const ctrl = new SceneController({ store, layout: 'tree' });
@@ -2079,18 +2105,17 @@ describe('SceneController', () => {
       const cam = ctrl.getRenderer().getCamera() as InstanceType<
         typeof THREE.OrthographicCamera
       >;
-      // Sanity: tree mode must have an orthographic camera.
       expect(cam).toBeInstanceOf(THREE.OrthographicCamera);
 
-      // The framedRadius is ~400 (95th-percentile distance from origin
-      // for our stubbed positions). With a 0.8 fill factor, the half-
-      // height of the frustum should be ~400 / 0.8 = 500, i.e. the
-      // top-bottom span should be at least 1000 world units. The seeded
-      // default of 600 (top=300, bottom=-300) would FAIL this check.
+      // bbox spanX = 800. With fillFactor = 0.8, the frustum width must
+      // be at least 800 / 0.8 = 1000 so the tree fits at 80% horizontal
+      // fill. The seeded 600-unit default (top=300, bottom=-300, width
+      // = 800 at 4:3 aspect) would NOT fit a 800-wide bbox at 80%.
       const fillFactor = 0.8;
-      const expectedMinSpan = 2 * (400 / fillFactor); // 1000
-      const span = cam.top - cam.bottom;
-      expect(span).toBeGreaterThanOrEqual(expectedMinSpan);
+      const bboxSpanX = 800;
+      const expectedMinHorizontalSpan = bboxSpanX / fillFactor; // 1000
+      const horizontal = cam.right - cam.left;
+      expect(horizontal).toBeGreaterThanOrEqual(expectedMinHorizontalSpan - 1e-6);
 
       ctrl.detach();
     });
@@ -2117,9 +2142,9 @@ describe('SceneController', () => {
 
       const horizontal = cam.right - cam.left;
       const vertical = cam.top - cam.bottom;
-      // Confirm we are NOT looking at the seeded 600-unit default.
-      // framedRadius=400 / fillFactor=0.8 → vertical span >= 1000.
-      expect(vertical).toBeGreaterThanOrEqual(1000);
+      // 0.14.2: bbox spanX=800 must fit at fillFactor=0.8 → horizontal
+      // span >= 1000. vertical follows from aspect = horizontal / 3.
+      expect(horizontal).toBeGreaterThanOrEqual(800 / 0.8 - 1e-6);
       expect(horizontal / vertical).toBeCloseTo(3, 1);
 
       ctrl.detach();

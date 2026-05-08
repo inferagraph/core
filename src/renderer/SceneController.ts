@@ -935,16 +935,17 @@ export class SceneController implements InferredEdgeHost {
     // have hidden a chunk of the data set; centering the camera on the
     // unfiltered centroid would leave the visible cluster off-axis.
     this.frameToFit(this.framingPositions(positions));
-    // Tree first-entry: re-assert axis-alignment AFTER frameToFit so the
-    // orthographic eye is purely along +Z relative to the freshly-framed
-    // tree centroid. (frameToFit's setTarget→placeCameraAtRadius preserves
-    // whatever direction the prior eye vector pointed in — which, on the
-    // graph→tree transition, can carry residual X/Y components from the
-    // prior perspective camera state. Resetting last guarantees a clean
-    // axis-aligned eye regardless of the incoming state.)
-    if (this.layoutMode === 'tree') {
-      this.cameraController.resetCameraOrientation();
-    }
+    // First-entry default for BOTH modes: re-assert axis-alignment
+    // AFTER frameToFit so the eye vector points purely along +Z
+    // relative to the freshly-framed centroid. Tree mode needs this
+    // for orthographic axis-alignment (locked rotation makes any
+    // residual tilt look broken). Graph mode also needs this on first
+    // entry: TrackballControls' inherited orbit direction from the
+    // attach-time placeCameraAtRadius (against the default target
+    // 0,0,0) can place the perspective camera way off-axis — t2 root
+    // cause. Free rotation stays enabled for graph; resetCameraOrientation
+    // only sets initial pose, not interaction state.
+    this.cameraController.resetCameraOrientation();
   }
 
   /**
@@ -1445,6 +1446,19 @@ export class SceneController implements InferredEdgeHost {
       } else {
         this.graphCameraSnapshot = null;
         this.frameToFit(this.framingPositions(positions));
+        // Graph first-entry default: place perspective camera along +Z
+        // from the framed target. Without this, the camera retains
+        // whatever orbit direction was inherited from prior state — on
+        // a tree→graph first transition that's the swap-time
+        // placeCameraAtRadius result against the OLD tree target,
+        // which puts the camera far off-axis (t2 root cause: y=-231
+        // looking up at a cluster centered at y=4, putting nodes at
+        // the top of the canvas). resetCameraOrientation snaps the
+        // camera to (target.x, target.y, target.z + radius) looking at
+        // target — the canonical "viewing the cluster from the front"
+        // pose. Free rotation stays enabled (applyGraphCamera already
+        // set rotationEnabled=true).
+        this.cameraController.resetCameraOrientation();
       }
     }
   }
@@ -2408,12 +2422,22 @@ export class SceneController implements InferredEdgeHost {
       });
       return;
     }
-    let __dbgMinX = Infinity, __dbgMaxX = -Infinity, __dbgMinY = Infinity, __dbgMaxY = -Infinity;
+    const xs: number[] = [];
+    const ys: number[] = [];
+    const zs: number[] = [];
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
     for (const p of positions.values()) {
-      if (p.x < __dbgMinX) __dbgMinX = p.x;
-      if (p.x > __dbgMaxX) __dbgMaxX = p.x;
-      if (p.y < __dbgMinY) __dbgMinY = p.y;
-      if (p.y > __dbgMaxY) __dbgMaxY = p.y;
+      xs.push(p.x);
+      ys.push(p.y);
+      zs.push(p.z);
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+      if (p.z < minZ) minZ = p.z;
+      if (p.z > maxZ) maxZ = p.z;
     }
     // eslint-disable-next-line no-console
     console.log('[ig-debug] frameToFit: ENTRY', {
@@ -2421,38 +2445,35 @@ export class SceneController implements InferredEdgeHost {
       positions: positions.size,
       container: `${containerWidth}x${containerHeight}`,
       bounds: {
-        minX: __dbgMinX, maxX: __dbgMaxX,
-        minY: __dbgMinY, maxY: __dbgMaxY,
-        spanX: __dbgMaxX - __dbgMinX,
-        spanY: __dbgMaxY - __dbgMinY,
+        minX, maxX, minY, maxY, minZ, maxZ,
+        spanX: maxX - minX,
+        spanY: maxY - minY,
+        spanZ: maxZ - minZ,
       },
+      bboxCenter: { x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: (minZ + maxZ) / 2 },
       origin: this.layoutEngine.getOrigin?.() ?? null,
     });
 
-    const xs: number[] = [];
-    const ys: number[] = [];
-    const zs: number[] = [];
-    for (const p of positions.values()) {
-      xs.push(p.x);
-      ys.push(p.y);
-      zs.push(p.z);
-    }
-
-    // Centroid: prefer the active layout's canonical origin when it
-    // declares one (tree layouts recenter around x=0, so consulting
-    // their `getOrigin()` keeps the camera target locked to that center
-    // regardless of how traversal order or `parentEdgeTypes` defaults
-    // shift the underlying positions distribution). Force-directed
-    // layouts return `null` and fall back to the outlier-resistant
-    // 5th-95th percentile midpoint, which is the right heuristic for a
-    // wandering simulated cluster.
-    const origin = this.layoutEngine.getOrigin?.() ?? null;
-    const cx = origin ? origin.x : SceneController.percentileMidpoint(xs);
-    const cy = origin ? origin.y : SceneController.percentileMidpoint(ys);
-    const cz =
-      origin && typeof origin.z === 'number'
-        ? origin.z
-        : SceneController.percentileMidpoint(zs);
+    // Centroid: bounding-box center of the input positions. This is the
+    // robust choice for two reasons:
+    //   1. Host-side filtering (e.g. biblegraph's tree-mode "people only"
+    //      filter) shrinks the visible subset. The full layout's
+    //      canonical origin (`getOrigin()` in tree mode) reflects the
+    //      UNFILTERED tree, which can be far from the visible subset's
+    //      actual center. Prior to 0.14.2 we used `getOrigin()` here and
+    //      the camera centered on the wrong point — t1/t3 root cause.
+    //   2. The cache-hit path in `computeActiveLayout` returns positions
+    //      without re-running `engine.compute()` on a freshly-created
+    //      engine instance. So `getOrigin()` could legitimately return
+    //      null on layout re-entry. Bbox-center sidesteps that entirely.
+    // Outlier-resistance: for graph mode (perspective + free orbit) a
+    // single drifting node could expand the bbox unhelpfully. The
+    // sphere-radius math below uses the 95th-percentile distance, which
+    // already trims outliers when computing how far back the camera
+    // should orbit; the bbox center is fine as the focal point.
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const cz = (minZ + maxZ) / 2;
 
     // Distance-from-centroid distribution. Use the 95th percentile so a
     // single drifting outlier doesn't define the frame.
@@ -2501,14 +2522,28 @@ export class SceneController implements InferredEdgeHost {
     // relative to that target, so a centered frustum keeps panning
     // gestures consistent with the perspective path.
     if (camera instanceof THREE.OrthographicCamera) {
-      const halfHeight = framedRadius / fillFactor;
-      // Container aspect — guaranteed valid here because the 0-dim
-      // early-return at the top of this method ran first. No stale-
-      // camera fallback: the previous implementation echoed the
-      // hardcoded `applyTreeCamera` seed (worldHeight=600, worldWidth=
-      // 600*4/3) onto subsequent frames and was the t1 / t3 pollution
-      // path.
+      // Size the orthographic frustum from the bounding BOX of the
+      // input positions, not the bounding SPHERE. Sphere-based sizing
+      // (the prior `framedRadius / fillFactor` approach) leaves a tall
+      // narrow tree filling ~80% of canvas HEIGHT but only ~20% of
+      // canvas WIDTH — the tree looks tiny in canvas. Bounding-box
+      // sizing fits both axes independently at fillFactor.
+      //
+      // Per-axis fitting: pick the larger of the two height
+      // requirements so both width and height bounds fit at fillFactor.
+      //   halfHeight ≥ halfBboxHeight / fillFactor
+      //   halfWidth = halfHeight * aspect ≥ halfBboxWidth / fillFactor
+      //   ⇒ halfHeight ≥ halfBboxWidth / fillFactor / aspect
+      // Floor at 50 world units so single-node or zero-extent bboxes
+      // still produce a visible frustum.
       const aspect = containerWidth / containerHeight;
+      const halfBboxHeight = (maxY - minY) / 2;
+      const halfBboxWidth = (maxX - minX) / 2;
+      const halfHeight = Math.max(
+        halfBboxHeight / fillFactor,
+        halfBboxWidth / fillFactor / aspect,
+        50,
+      );
       const halfWidth = halfHeight * aspect;
       camera.top = halfHeight;
       camera.bottom = -halfHeight;
@@ -2551,19 +2586,6 @@ export class SceneController implements InferredEdgeHost {
     // to tree mode the saved snapshot's eye vector is restored without
     // a frameToFit, so we never want this method to mutate orientation.
     // Graph mode keeps its free-rotation eye vector untouched as well.
-  }
-
-  /**
-   * Mean of the 5th and 95th percentiles of a sorted-or-unsorted numeric
-   * array. Used by {@link frameToFit} to compute an outlier-resistant
-   * centroid.
-   */
-  private static percentileMidpoint(values: number[]): number {
-    if (values.length === 0) return 0;
-    const sorted = values.slice().sort((a, b) => a - b);
-    const lo = sorted[Math.floor(sorted.length * 0.05)];
-    const hi = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
-    return (lo + hi) / 2;
   }
 
   private createLayoutEngine(mode: LayoutMode): LayoutEngine {
