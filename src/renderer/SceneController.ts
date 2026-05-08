@@ -569,6 +569,10 @@ export class SceneController implements InferredEdgeHost {
   private readonly _projectVec = new THREE.Vector3();
 
   constructor(options: SceneControllerOptions) {
+    // eslint-disable-next-line no-console
+    console.log('[ig-debug] @inferagraph/core SceneController instantiated', {
+      initialLayout: options.layout ?? 'graph',
+    });
     this.store = options.store;
     this.layoutMode = options.layout ?? 'graph';
     this.parentEdgeTypes = options.parentEdgeTypes;
@@ -850,6 +854,14 @@ export class SceneController implements InferredEdgeHost {
    */
   syncFromStore(): void {
     if (!this.container) return;
+    // eslint-disable-next-line no-console
+    console.log('[ig-debug] syncFromStore: ENTRY', {
+      mode: this.layoutMode,
+      container: `${this.container.clientWidth}x${this.container.clientHeight}`,
+      nodes: this.store.getAllNodes().length,
+      edges: this.store.getAllEdges().length,
+      dataVersionPre: this.dataVersion,
+    });
 
     // Clear any previous meshes so we can rebuild from scratch.
     this.teardownGraphMeshes();
@@ -1288,6 +1300,17 @@ export class SceneController implements InferredEdgeHost {
    * rewritten.
    */
   setLayout(mode: LayoutMode): void {
+    // eslint-disable-next-line no-console
+    console.log('[ig-debug] setLayout: ENTRY', {
+      from: this.layoutMode,
+      to: mode,
+      container: this.container
+        ? `${this.container.clientWidth}x${this.container.clientHeight}`
+        : 'NO_CONTAINER',
+      dataVersion: this.dataVersion,
+      treeSnapshotPresent: !!this.treeCameraSnapshot,
+      graphSnapshotPresent: !!this.graphCameraSnapshot,
+    });
     if (mode === this.layoutMode) return;
 
     // Capture container dimensions ONCE at the top of the method and
@@ -1353,6 +1376,18 @@ export class SceneController implements InferredEdgeHost {
         containerWidth,
         containerHeight,
       );
+      // eslint-disable-next-line no-console
+      console.log('[ig-debug] setLayout(tree): snapshot decision', {
+        snapshotPresent: !!this.treeCameraSnapshot,
+        valid: validTree,
+        snapshotDataVersion: this.treeCameraSnapshot?.dataVersion,
+        currentDataVersion: this.dataVersion,
+        snapshotDims: this.treeCameraSnapshot
+          ? `${this.treeCameraSnapshot.containerWidth}x${this.treeCameraSnapshot.containerHeight}`
+          : null,
+        currentDims: `${containerWidth}x${containerHeight}`,
+        path: validTree && this.treeCameraSnapshot && this.orthographicCamera ? 'restore' : 'frameToFit',
+      });
       if (validTree && this.treeCameraSnapshot && this.orthographicCamera) {
         applyCameraState(
           this.orthographicCamera,
@@ -1389,6 +1424,18 @@ export class SceneController implements InferredEdgeHost {
         containerWidth,
         containerHeight,
       );
+      // eslint-disable-next-line no-console
+      console.log('[ig-debug] setLayout(graph): snapshot decision', {
+        snapshotPresent: !!this.graphCameraSnapshot,
+        valid: validGraph,
+        snapshotDataVersion: this.graphCameraSnapshot?.dataVersion,
+        currentDataVersion: this.dataVersion,
+        snapshotDims: this.graphCameraSnapshot
+          ? `${this.graphCameraSnapshot.containerWidth}x${this.graphCameraSnapshot.containerHeight}`
+          : null,
+        currentDims: `${containerWidth}x${containerHeight}`,
+        path: validGraph && this.graphCameraSnapshot && this.perspectiveCamera ? 'restore' : 'frameToFit',
+      });
       if (validGraph && this.graphCameraSnapshot && this.perspectiveCamera) {
         applyCameraState(
           this.perspectiveCamera,
@@ -2339,7 +2386,11 @@ export class SceneController implements InferredEdgeHost {
    *      the cluster sphere should subtend ~80% of the viewport height.
    */
   private frameToFit(positions: Map<string, Vector3>): void {
-    if (positions.size === 0) return;
+    if (positions.size === 0) {
+      // eslint-disable-next-line no-console
+      console.log('[ig-debug] frameToFit: EARLY-RETURN positions.size=0');
+      return;
+    }
     // Guard 0-dim container: aspect math is undefined here. The
     // ResizeObserver-driven `resize()` path will trigger another
     // frameToFit once the container has real dimensions; until then
@@ -2349,7 +2400,34 @@ export class SceneController implements InferredEdgeHost {
     // its 4:3 default into the post-layout frame).
     const containerWidth = this.container?.clientWidth ?? 0;
     const containerHeight = this.container?.clientHeight ?? 0;
-    if (containerWidth <= 0 || containerHeight <= 0) return;
+    if (containerWidth <= 0 || containerHeight <= 0) {
+      // eslint-disable-next-line no-console
+      console.log('[ig-debug] frameToFit: EARLY-RETURN 0-dim', {
+        containerWidth,
+        containerHeight,
+      });
+      return;
+    }
+    let __dbgMinX = Infinity, __dbgMaxX = -Infinity, __dbgMinY = Infinity, __dbgMaxY = -Infinity;
+    for (const p of positions.values()) {
+      if (p.x < __dbgMinX) __dbgMinX = p.x;
+      if (p.x > __dbgMaxX) __dbgMaxX = p.x;
+      if (p.y < __dbgMinY) __dbgMinY = p.y;
+      if (p.y > __dbgMaxY) __dbgMaxY = p.y;
+    }
+    // eslint-disable-next-line no-console
+    console.log('[ig-debug] frameToFit: ENTRY', {
+      mode: this.layoutMode,
+      positions: positions.size,
+      container: `${containerWidth}x${containerHeight}`,
+      bounds: {
+        minX: __dbgMinX, maxX: __dbgMaxX,
+        minY: __dbgMinY, maxY: __dbgMaxY,
+        spanX: __dbgMaxX - __dbgMinX,
+        spanY: __dbgMaxY - __dbgMinY,
+      },
+      origin: this.layoutEngine.getOrigin?.() ?? null,
+    });
 
     const xs: number[] = [];
     const ys: number[] = [];
@@ -2438,6 +2516,34 @@ export class SceneController implements InferredEdgeHost {
       camera.right = halfWidth;
       camera.updateProjectionMatrix();
     }
+    // eslint-disable-next-line no-console
+    console.log('[ig-debug] frameToFit: EXIT', {
+      mode: this.layoutMode,
+      target: { x: cx, y: cy, z: cz },
+      framedRadius,
+      radius,
+      cameraType:
+        camera instanceof THREE.OrthographicCamera
+          ? 'ortho'
+          : camera instanceof THREE.PerspectiveCamera
+          ? 'persp'
+          : 'unknown',
+      orthoFrustum:
+        camera instanceof THREE.OrthographicCamera
+          ? {
+              top: camera.top,
+              bottom: camera.bottom,
+              left: camera.left,
+              right: camera.right,
+              spanX: camera.right - camera.left,
+              spanY: camera.top - camera.bottom,
+            }
+          : null,
+      perspPos:
+        camera instanceof THREE.PerspectiveCamera
+          ? { x: camera.position.x, y: camera.position.y, z: camera.position.z }
+          : null,
+    });
 
     // Axis-alignment for tree mode is owned by the FIRST-ENTRY default
     // path in `setLayout` / `syncFromStore`, which calls
