@@ -147,8 +147,6 @@ export class CameraController {
       return;
     }
     const container = this.container;
-    const previousRadius = this.radius;
-    const previousTarget = { ...this.target };
 
     if (this.controls) {
       this.controls.dispose();
@@ -167,7 +165,20 @@ export class CameraController {
     }
 
     this.controls = new Ctor(camera, container);
-    this.controls.target.set(previousTarget.x, previousTarget.y, previousTarget.z);
+    // Use the LIVE this.target / this.radius rather than values captured
+    // at swap entry. While we awaited the TrackballControls module
+    // load, the host can synchronously call frameToFit (or any other
+    // setTarget/setRadius path), advancing this.target and this.radius
+    // to the new framing values. Reseating controls.target with a
+    // captured-pre-await `previousTarget` would silently revert the
+    // trackball's orbit center to the stale value, and per-frame
+    // `controls.update()` would then orbit around (and `lookAt`) the
+    // wrong point — every node renders shifted relative to canvas
+    // center. Same hazard for radius. This was the t1/t3 visual bug
+    // root cause on initial mount: frameToFit logged correct target/
+    // frustum but the rendered frame used controls.target=(0,0,0)
+    // because `previousTarget` was captured before frameToFit ran.
+    this.controls.target.set(this.target.x, this.target.y, this.target.z);
     this.controls.rotateSpeed = 3.0;
     this.controls.zoomSpeed = 1.2;
     this.controls.panSpeed = 0.8;
@@ -180,7 +191,6 @@ export class CameraController {
     this.initialPosition = camera.position.clone();
     this.initialUp = camera.up.clone();
     this.initialTarget = this.controls.target.clone();
-    this.radius = previousRadius;
   }
 
   /** The active camera. */
