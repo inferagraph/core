@@ -78,6 +78,60 @@ export interface CameraSnapshot {
 }
 
 /**
+ * A {@link CameraSnapshot} stamped with the data + container context it
+ * was captured against. Used at restore time to detect "stale" snapshots
+ * — the layout coordinates moved (data reload) or the viewport changed
+ * shape (container resize) — so the controller can fall back to a fresh
+ * `frameToFit` instead of restoring a frame that no longer makes sense
+ * against the current scene.
+ *
+ *   - `state`: the underlying camera transform (target / position / zoom).
+ *   - `dataVersion`: monotonic counter bumped by `syncFromStore`. A
+ *     restored snapshot is only valid when its `dataVersion` matches the
+ *     controller's current `dataVersion`.
+ *   - `containerWidth` / `containerHeight`: the viewport dimensions at
+ *     capture time. The aspect ratio is checked against the live
+ *     container at restore time; a delta > 1% invalidates the snapshot.
+ */
+interface VersionedCameraSnapshot {
+  state: CameraSnapshot;
+  dataVersion: number;
+  containerWidth: number;
+  containerHeight: number;
+}
+
+/**
+ * Decide whether `snapshot` can be restored verbatim against the current
+ * scene state. A snapshot is valid iff:
+ *   - its `dataVersion` matches the controller's current dataVersion
+ *     (no `syncFromStore` happened since capture), AND
+ *   - the container's current aspect ratio is within 1% of the
+ *     snapshot's captured aspect ratio.
+ *
+ * 0-dim containers (width === 0 || height === 0) ALWAYS invalidate —
+ * we can't compute a meaningful aspect comparison and frameToFit will
+ * itself early-return until dims are valid.
+ */
+function isSnapshotValid(
+  snapshot: VersionedCameraSnapshot | null,
+  currentDataVersion: number,
+  currentWidth: number,
+  currentHeight: number,
+): boolean {
+  if (!snapshot) return false;
+  if (snapshot.dataVersion !== currentDataVersion) return false;
+  if (currentWidth <= 0 || currentHeight <= 0) return false;
+  if (snapshot.containerWidth <= 0 || snapshot.containerHeight <= 0) return false;
+  const snapshotAspect = snapshot.containerWidth / snapshot.containerHeight;
+  const currentAspect = currentWidth / currentHeight;
+  if (!Number.isFinite(snapshotAspect) || !Number.isFinite(currentAspect)) {
+    return false;
+  }
+  const delta = Math.abs(snapshotAspect - currentAspect) / snapshotAspect;
+  return delta < 0.01;
+}
+
+/**
  * Capture the live camera + controls target into a {@link CameraSnapshot}.
  * Reads the orientation off the camera's quaternion (kept in sync by Three's
  * `lookAt` and the trackball gestures) and the orbit center from
@@ -401,12 +455,23 @@ export class SceneController implements InferredEdgeHost {
    * The two views are completely independent: mutating the live camera
    * while in graph mode never touches `treeCameraSnapshot` and vice versa.
    *
-   * Cleared by {@link syncFromStore} because new layout positions
-   * invalidate any saved frame (the saved target / radius reference the
-   * old coordinate space).
+   * Snapshots are stamped with the {@link dataVersion} + container
+   * dimensions at capture time. At restore time {@link isSnapshotValid}
+   * verifies the snapshot is still meaningful against the current scene
+   * (no data reload, no significant aspect change). Stale snapshots are
+   * discarded and the next entry frames fresh.
    */
-  private graphCameraSnapshot: CameraSnapshot | null = null;
-  private treeCameraSnapshot: CameraSnapshot | null = null;
+  private graphCameraSnapshot: VersionedCameraSnapshot | null = null;
+  private treeCameraSnapshot: VersionedCameraSnapshot | null = null;
+
+  /**
+   * Monotonic counter incremented by {@link syncFromStore} every time
+   * the underlying graph data is reloaded. Used by
+   * {@link isSnapshotValid} to detect stale per-mode camera snapshots
+   * whose target / radius reference an outdated coordinate space.
+   * Mode toggles do NOT bump this — only data reloads do.
+   */
+  private dataVersion: number = 0;
 
   private nodeRender: NodeRenderConfig | undefined;
   private tooltip: TooltipConfig | undefined;
@@ -822,11 +887,14 @@ export class SceneController implements InferredEdgeHost {
     this.layoutCache.clear();
 
     // Saved per-mode camera snapshots reference the prior layout's
-    // coordinates and bounding radius. Drop them so the next entry into
-    // the inactive mode falls through to the first-entry default
-    // (frameToFit + tree axis-align) instead of restoring stale state.
-    this.graphCameraSnapshot = null;
-    this.treeCameraSnapshot = null;
+    // coordinates and bounding radius. Bump `dataVersion` so the next
+    // restore attempt for either mode is rejected by `isSnapshotValid`
+    // and falls through to a fresh `frameToFit`. We deliberately keep
+    // the snapshot fields populated — the dataVersion stamp is the
+    // single source of truth for staleness, and threading both
+    // mechanisms (null-out + version bump) would just duplicate
+    // semantics.
+    this.dataVersion++;
 
     if (nodes.length === 0) return;
 
@@ -1129,40 +1197,27 @@ export class SceneController implements InferredEdgeHost {
   /**
    * Switch to the orthographic camera + lock rotation. Lazily builds the
    * camera on first call. Keeps zoom + pan enabled.
+   *
+   * Invariant: `applyTreeCamera` only MOUNTS the camera object — it does
+   * NOT size the frustum. Sizing is owned by either {@link frameToFit}
+   * (first-entry / invalid-snapshot path) or {@link applyCameraState}
+   * (valid-snapshot path). Both are guaranteed to run before the first
+   * frame after this method, so the placeholder bounds we construct
+   * here are never actually rendered.
    */
   private applyTreeCamera(): void {
     if (!this.container) return;
-    const width = this.container.clientWidth || 800;
-    const height = this.container.clientHeight || 600;
 
     if (!this.orthographicCamera) {
-      // World-space height is set by `frameToFit` after the layout runs.
-      // Seed with sensible defaults so the camera object is valid before
-      // the first `frameToFit`.
-      const aspect = width / height;
-      const worldHeight = 600;
-      const worldWidth = worldHeight * aspect;
-      const ortho = new THREE.OrthographicCamera(
-        -worldWidth / 2,
-        worldWidth / 2,
-        worldHeight / 2,
-        -worldHeight / 2,
-        -10000,
-        10000,
-      );
+      // Placeholder bounds — overwritten by frameToFit / applyCameraState
+      // before any frame is drawn. Hardcoding a "sensible default" here
+      // would pollute later aspect calculations when the container has
+      // 0 dimensions at frameToFit time (the bug t1 / t3 root cause).
+      const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, -10000, 10000);
       ortho.position.set(0, 0, 500);
       ortho.up.set(0, 1, 0);
       ortho.lookAt(new THREE.Vector3(0, 0, 0));
       this.orthographicCamera = ortho;
-    } else {
-      // Keep the projection matrix in sync with the current viewport.
-      const aspect = width / height;
-      const worldHeight =
-        this.orthographicCamera.top - this.orthographicCamera.bottom;
-      const worldWidth = worldHeight * aspect;
-      this.orthographicCamera.left = -worldWidth / 2;
-      this.orthographicCamera.right = worldWidth / 2;
-      this.orthographicCamera.updateProjectionMatrix();
     }
 
     this.renderer.setCamera(this.orthographicCamera);
@@ -1235,14 +1290,31 @@ export class SceneController implements InferredEdgeHost {
   setLayout(mode: LayoutMode): void {
     if (mode === this.layoutMode) return;
 
+    // Capture container dimensions ONCE at the top of the method and
+    // thread them through to every downstream dimension consumer
+    // (snapshot capture, validity check, frameToFit). Reading
+    // `container.clientWidth/Height` at multiple instants used to be
+    // the t3 root cause: `applyTreeCamera` and `frameToFit` could see
+    // different dims if the layout settled mid-toggle, producing
+    // skewed aspect math.
+    const containerWidth = this.container?.clientWidth ?? 0;
+    const containerHeight = this.container?.clientHeight ?? 0;
+
     // 1. Snapshot the OUTGOING mode's camera state (pan / zoom / rotation /
     //    target) before we touch any cameras. This is the single point at
     //    which user gestures in the soon-to-be-inactive mode are captured.
+    //    The snapshot is stamped with the current dataVersion + container
+    //    dims so a later restore can validate freshness.
     const outgoingMode = this.layoutMode;
     const outgoingCamera = this.renderer.getCamera();
     if (outgoingCamera) {
       const outgoingTarget = this.cameraController.getTarget();
-      const snapshot = captureCameraState(outgoingCamera, outgoingTarget);
+      const snapshot: VersionedCameraSnapshot = {
+        state: captureCameraState(outgoingCamera, outgoingTarget),
+        dataVersion: this.dataVersion,
+        containerWidth,
+        containerHeight,
+      };
       if (outgoingMode === 'graph') {
         this.graphCameraSnapshot = snapshot;
       } else {
@@ -1270,23 +1342,32 @@ export class SceneController implements InferredEdgeHost {
       // meshes so toggling modes preserves the visibility predicate.
       this.applyFilterMask();
 
-      // 2. Restore the saved tree-mode camera if we have one; otherwise
+      // 2. Restore the saved tree-mode camera if it's still valid for
+      //    the current scene (dataVersion + aspect match); otherwise
       //    fall through to the first-entry default (frameToFit on the
-      //    visible subset, then axis-align). The reset MUST run AFTER
-      //    frameToFit: frameToFit's setTarget→placeCameraAtRadius
-      //    preserves the prior eye direction, which on the graph→tree
-      //    transition still carries residual X/Y components from the
-      //    perspective camera. Resetting last guarantees the orthographic
-      //    eye is purely along +Z relative to the freshly-framed tree
-      //    centroid.
-      if (this.treeCameraSnapshot && this.orthographicCamera) {
+      //    visible subset, then axis-align). Invalid snapshots are
+      //    discarded so the next capture starts clean.
+      const validTree = isSnapshotValid(
+        this.treeCameraSnapshot,
+        this.dataVersion,
+        containerWidth,
+        containerHeight,
+      );
+      if (validTree && this.treeCameraSnapshot && this.orthographicCamera) {
         applyCameraState(
           this.orthographicCamera,
           this.cameraController,
-          this.treeCameraSnapshot,
+          this.treeCameraSnapshot.state,
         );
       } else {
+        this.treeCameraSnapshot = null;
         this.frameToFit(this.framingPositions(positions));
+        // Axis-align AFTER frameToFit: frameToFit's setTarget→
+        // placeCameraAtRadius preserves the prior eye direction, which
+        // on the graph→tree transition still carries residual X/Y
+        // components from the perspective camera. Resetting last
+        // guarantees the orthographic eye is purely along +Z relative
+        // to the freshly-framed tree centroid.
         this.cameraController.resetCameraOrientation();
       }
     } else {
@@ -1299,16 +1380,23 @@ export class SceneController implements InferredEdgeHost {
       // meshes so toggling modes preserves the visibility predicate.
       this.applyFilterMask();
 
-      // 2. Restore the saved graph-mode camera if we have one; otherwise
+      // 2. Restore the saved graph-mode camera if still valid; otherwise
       //    fall through to the first-entry default (frameToFit only —
       //    graph mode owns its free-rotation eye vector).
-      if (this.graphCameraSnapshot && this.perspectiveCamera) {
+      const validGraph = isSnapshotValid(
+        this.graphCameraSnapshot,
+        this.dataVersion,
+        containerWidth,
+        containerHeight,
+      );
+      if (validGraph && this.graphCameraSnapshot && this.perspectiveCamera) {
         applyCameraState(
           this.perspectiveCamera,
           this.cameraController,
-          this.graphCameraSnapshot,
+          this.graphCameraSnapshot.state,
         );
       } else {
+        this.graphCameraSnapshot = null;
         this.frameToFit(this.framingPositions(positions));
       }
     }
@@ -2252,6 +2340,16 @@ export class SceneController implements InferredEdgeHost {
    */
   private frameToFit(positions: Map<string, Vector3>): void {
     if (positions.size === 0) return;
+    // Guard 0-dim container: aspect math is undefined here. The
+    // ResizeObserver-driven `resize()` path will trigger another
+    // frameToFit once the container has real dimensions; until then
+    // there is nothing meaningful we can do. We deliberately do NOT
+    // fall back to a stale `camera.top - camera.bottom` aspect — that
+    // was the t1 / t3 pollution path (the orthographic seed leaked
+    // its 4:3 default into the post-layout frame).
+    const containerWidth = this.container?.clientWidth ?? 0;
+    const containerHeight = this.container?.clientHeight ?? 0;
+    if (containerWidth <= 0 || containerHeight <= 0) return;
 
     const xs: number[] = [];
     const ys: number[] = [];
@@ -2326,18 +2424,13 @@ export class SceneController implements InferredEdgeHost {
     // gestures consistent with the perspective path.
     if (camera instanceof THREE.OrthographicCamera) {
       const halfHeight = framedRadius / fillFactor;
-      // Container aspect (with 0-protection). Fall back to the camera's
-      // existing aspect (right - left) / (top - bottom), and finally to
-      // 1.0 so we never produce a degenerate zero-width frustum.
-      const w = this.container?.clientWidth ?? 0;
-      const h = this.container?.clientHeight ?? 0;
-      let aspect = w > 0 && h > 0 ? w / h : 0;
-      if (!Number.isFinite(aspect) || aspect <= 0) {
-        const camWidth = camera.right - camera.left;
-        const camHeight = camera.top - camera.bottom;
-        aspect = camHeight > 0 ? camWidth / camHeight : 1;
-        if (!Number.isFinite(aspect) || aspect <= 0) aspect = 1;
-      }
+      // Container aspect — guaranteed valid here because the 0-dim
+      // early-return at the top of this method ran first. No stale-
+      // camera fallback: the previous implementation echoed the
+      // hardcoded `applyTreeCamera` seed (worldHeight=600, worldWidth=
+      // 600*4/3) onto subsequent frames and was the t1 / t3 pollution
+      // path.
+      const aspect = containerWidth / containerHeight;
       const halfWidth = halfHeight * aspect;
       camera.top = halfHeight;
       camera.bottom = -halfHeight;

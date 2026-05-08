@@ -1965,10 +1965,13 @@ describe('SceneController', () => {
       ctrl.detach();
     });
 
-    it('clears snapshots on syncFromStore so stale frames do not leak across data changes', () => {
+    it('invalidates snapshots on syncFromStore so stale frames do not leak across data changes', () => {
       // syncFromStore invalidates layout positions; the saved snapshots
       // reference the old coordinate space. After a sync, the next entry
       // into a mode must re-initialize via frameToFit (first-entry path).
+      // Mechanism: dataVersion bump in syncFromStore makes the next
+      // isSnapshotValid() check fail, frameToFit fires, and the
+      // setLayout body discards the stale snapshot.
       seedStore(store, family);
       const ctrl = new SceneController({ store });
       ctrl.attach(container);
@@ -1983,10 +1986,24 @@ describe('SceneController', () => {
       // @ts-expect-error — internal access for the assertion
       expect(ctrl['treeCameraSnapshot']).not.toBeNull();
 
-      // Re-sync (e.g. fresh data load) must wipe both snapshots.
+      // Re-sync (e.g. fresh data load). dataVersion bumps; the
+      // snapshots' embedded dataVersion is now stale.
+      // @ts-expect-error — internal access
+      const beforeVersion = ctrl['dataVersion'] as number;
       ctrl.syncFromStore();
-      // @ts-expect-error — internal access for the assertion
-      expect(ctrl['graphCameraSnapshot']).toBeNull();
+      // @ts-expect-error — internal access
+      const afterVersion = ctrl['dataVersion'] as number;
+      expect(afterVersion).toBe(beforeVersion + 1);
+
+      // Behavior assertion: the next setLayout must reframe (call
+      // frameToFit) instead of restoring the now-stale snapshot. Spy
+      // on frameToFit and verify it fires on the round-trip.
+      // @ts-expect-error — accessing private for behavioral assertion
+      const frameSpy = vi.spyOn(ctrl, 'frameToFit');
+      ctrl.setLayout('tree');
+      expect(frameSpy).toHaveBeenCalled();
+      // The stale snapshot was also discarded as a side-effect of the
+      // restore-rejection path.
       // @ts-expect-error — internal access for the assertion
       expect(ctrl['treeCameraSnapshot']).toBeNull();
 
@@ -2285,6 +2302,259 @@ describe('SceneController', () => {
       expect(Number.isFinite(targetArg.x)).toBe(true);
       expect(Number.isFinite(targetArg.y)).toBe(true);
       expect(Number.isFinite(targetArg.z)).toBe(true);
+
+      ctrl.detach();
+    });
+  });
+
+  describe('mode-switch lifecycle (t1/t2/t3 regression guards)', () => {
+    // Three symptoms this block defends:
+    //   t1 — Initial tree render too small. Cause: `applyTreeCamera` seeded
+    //        the orthographic frustum with a hardcoded worldHeight=600,
+    //        which polluted later `frameToFit` aspect math.
+    //   t2 — After tree→graph, graph nodes render mostly above the
+    //        viewport. Cause: stale snapshots restored verbatim against
+    //        new layout positions.
+    //   t3 — After graph→tree, tree appears left-skewed. Cause: container
+    //        dims read at two different instants (T1 in applyTreeCamera,
+    //        T2 in frameToFit) drift across resizes.
+    //
+    // Fix:
+    //   - Drop the worldHeight=600 seed; placeholder bounds (-1..1).
+    //   - Snapshot validity check: dataVersion match + container aspect
+    //     within 1%. Otherwise, frameToFit reframes.
+    //   - Single (width,height) capture per setLayout, threaded through to
+    //     applyTreeCamera/applyGraphCamera + frameToFit.
+    //   - frameToFit returns early when container has zero dims; no
+    //     fallback to stale camera.top/bottom for aspect.
+
+    const family: GraphData = {
+      nodes: [
+        { id: 'adam', attributes: { name: 'Adam', type: 'person' } },
+        { id: 'eve', attributes: { name: 'Eve', type: 'person' } },
+        { id: 'cain', attributes: { name: 'Cain', type: 'person' } },
+      ],
+      edges: [
+        { id: 'm1', sourceId: 'adam', targetId: 'eve', attributes: { type: 'husband_of' } },
+        { id: 'p1', sourceId: 'adam', targetId: 'cain', attributes: { type: 'father_of' } },
+      ],
+    };
+
+    type LiveCamera = {
+      position: {
+        set: (x: number, y: number, z: number) => unknown;
+        x: number;
+        y: number;
+        z: number;
+      };
+      zoom?: number;
+      updateProjectionMatrix?: () => void;
+    };
+
+    async function poseLiveCamera(
+      ctrl: SceneController,
+      pose: { position: [number, number, number]; target: [number, number, number]; zoom?: number },
+    ): Promise<void> {
+      await ctrl.whenCameraReady();
+      const camera = ctrl.getRenderer().getCamera() as unknown as LiveCamera | null;
+      const controls = ctrl.getCameraController().getControls();
+      if (!camera || !controls) throw new Error('camera/controls not attached');
+      camera.position.set(pose.position[0], pose.position[1], pose.position[2]);
+      controls.target.set(pose.target[0], pose.target[1], pose.target[2]);
+      if (typeof pose.zoom === 'number' && typeof camera.zoom === 'number') {
+        camera.zoom = pose.zoom;
+        camera.updateProjectionMatrix?.();
+      }
+    }
+
+    function readTarget(ctrl: SceneController): { x: number; y: number; z: number } {
+      const t = ctrl.getCameraController().getTarget();
+      return { x: t.x, y: t.y, z: t.z };
+    }
+
+    function setContainerDims(el: HTMLElement, w: number, h: number): void {
+      Object.defineProperty(el, 'clientWidth', { value: w, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: h, configurable: true });
+    }
+
+    it('a — round-trip preserves position when stable (graph→tree→graph)', async () => {
+      // Pose the graph camera at a distinct target, round-trip through
+      // tree, and assert the graph target survives unchanged. No
+      // syncFromStore between toggles, no resize — snapshot must be
+      // judged "valid" and restored verbatim.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      await poseLiveCamera(ctrl, {
+        position: [10, 10, 10],
+        target: [50, 30, 0],
+      });
+      const posed = readTarget(ctrl);
+      expect(posed).toEqual({ x: 50, y: 30, z: 0 });
+
+      ctrl.setLayout('tree');
+      ctrl.setLayout('graph');
+
+      const restored = readTarget(ctrl);
+      expect(restored).toEqual({ x: 50, y: 30, z: 0 });
+
+      ctrl.detach();
+    });
+
+    it('b — round-trip reframes when data changed via syncFromStore', async () => {
+      // Pose graph, toggle into tree, fire syncFromStore (bumps
+      // dataVersion → invalidates snapshots), toggle back to graph.
+      // Saved target must NOT be restored verbatim — frameToFit reframes
+      // to the freshly-laid-out cluster centroid.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      await poseLiveCamera(ctrl, {
+        position: [10, 10, 10],
+        target: [50, 30, 0],
+      });
+
+      ctrl.setLayout('tree');
+      // Data changes between modes — bump dataVersion, invalidate snapshots.
+      ctrl.syncFromStore();
+      ctrl.setLayout('graph');
+
+      const restored = readTarget(ctrl);
+      // The graph snapshot was invalidated. The fresh frame is centered
+      // on the layout, NOT the user's prior (50, 30, 0).
+      const savedTarget = { x: 50, y: 30, z: 0 };
+      const same =
+        restored.x === savedTarget.x &&
+        restored.y === savedTarget.y &&
+        restored.z === savedTarget.z;
+      expect(same).toBe(false);
+
+      ctrl.detach();
+    });
+
+    it('c — round-trip reframes when container aspect changed > 1%', async () => {
+      // Pose graph at 800x600 (aspect 1.333), toggle into tree, resize
+      // container to 1600x600 (aspect 2.667 — way outside 1% tolerance),
+      // toggle back to graph. Saved snapshot must be discarded;
+      // frameToFit reframes.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      await poseLiveCamera(ctrl, {
+        position: [10, 10, 10],
+        target: [50, 30, 0],
+      });
+
+      ctrl.setLayout('tree');
+      // Resize the container BEFORE returning to graph mode.
+      setContainerDims(container, 1600, 600);
+      ctrl.setLayout('graph');
+
+      const restored = readTarget(ctrl);
+      const savedTarget = { x: 50, y: 30, z: 0 };
+      const same =
+        restored.x === savedTarget.x &&
+        restored.y === savedTarget.y &&
+        restored.z === savedTarget.z;
+      expect(same).toBe(false);
+
+      ctrl.detach();
+    });
+
+    it('d — 0-dim container at init produces no NaN, frames correctly after later resize', async () => {
+      // Mount with zero-dim container (typical SSR / pre-layout DOM
+      // moment). setLayout('tree') must not crash and must not produce
+      // NaN on the camera. Then resize and re-trigger; the camera must
+      // frame around the layout origin.
+      const zero = makeContainer(0, 0);
+      document.body.innerHTML = '';
+      document.body.appendChild(zero);
+
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(zero);
+      ctrl.syncFromStore();
+
+      // Toggle to tree on a zero-dim container. Must not crash, must not
+      // produce NaN positions.
+      expect(() => ctrl.setLayout('tree')).not.toThrow();
+
+      const THREE = await import('three');
+      const cam = ctrl.getRenderer().getCamera();
+      expect(cam).toBeInstanceOf(THREE.OrthographicCamera);
+      const ortho = cam as InstanceType<typeof THREE.OrthographicCamera>;
+      expect(Number.isFinite(ortho.left)).toBe(true);
+      expect(Number.isFinite(ortho.right)).toBe(true);
+      expect(Number.isFinite(ortho.top)).toBe(true);
+      expect(Number.isFinite(ortho.bottom)).toBe(true);
+
+      const target = readTarget(ctrl);
+      expect(Number.isFinite(target.x)).toBe(true);
+      expect(Number.isFinite(target.y)).toBe(true);
+      expect(Number.isFinite(target.z)).toBe(true);
+
+      // Now give it real dimensions and re-frame via the public resize
+      // path. This simulates the ResizeObserver firing once the layout
+      // settles; the next frameToFit call must produce a sensible frame.
+      setContainerDims(zero, 1200, 800);
+      ctrl.resize();
+      // Force a fresh frame — toggle out and back.
+      ctrl.setLayout('graph');
+      ctrl.setLayout('tree');
+
+      const targetAfter = readTarget(ctrl);
+      // x must be 0 — TreeLayout.getOrigin() is x=0 (canonical center).
+      expect(Math.abs(targetAfter.x)).toBeLessThan(1e-6);
+
+      ctrl.detach();
+    });
+
+    it('e — tree initial frustum sized to layout, NOT the legacy worldHeight=600 seed', async () => {
+      // Three nodes in a small tree → modest layout extent. Before the
+      // fix, applyTreeCamera seeded worldHeight=600 (top - bottom = 600)
+      // and frameToFit's aspect math could echo that. After the fix,
+      // the camera.top - camera.bottom must reflect the small layout
+      // extent (no 600-unit floor).
+      //
+      // Concretely the family fixture lays out roughly 3 cards within
+      // ~150 world units of the origin in the y axis; the framedRadius
+      // is small enough that span << 600.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'tree' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      const THREE = await import('three');
+      const cam = ctrl.getRenderer().getCamera();
+      expect(cam).toBeInstanceOf(THREE.OrthographicCamera);
+      const ortho = cam as InstanceType<typeof THREE.OrthographicCamera>;
+      const span = Math.abs(ortho.top - ortho.bottom);
+      // Strict assertion: would have been ≥ 600 with the legacy seed
+      // and small layout extents. Our small fixture should produce a
+      // span well below 600.
+      expect(span).toBeLessThan(600);
+
+      ctrl.detach();
+    });
+
+    it('f — pin 0.13.0 contract: tree skew guard still passes (target.x === 0)', () => {
+      // Companion to the existing tree-skew-guard test. We don't modify
+      // that test; we just re-run the same shape of assertion here under
+      // the new lifecycle to make sure our changes don't regress
+      // getOrigin() consultation.
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'tree' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      const target = readTarget(ctrl);
+      expect(Math.abs(target.x)).toBeLessThan(1e-6);
 
       ctrl.detach();
     });
