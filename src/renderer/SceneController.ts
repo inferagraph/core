@@ -465,6 +465,27 @@ export class SceneController implements InferredEdgeHost {
   private treeCameraSnapshot: VersionedCameraSnapshot | null = null;
 
   /**
+   * One-shot flag set to `true` whenever {@link setLayout} restored a saved
+   * per-mode camera snapshot. Consumed (reset to `false`) on the very next
+   * {@link setFilter} call so that call's `frameToFit` is skipped — otherwise
+   * it would overwrite the freshly-restored camera.
+   *
+   * The race this guards: biblegraph's view-mode toggle re-runs BOTH the
+   * `<InferaGraph>` layout AND filter React effects in the same render
+   * (the host's "tree-mode shows only people" UX rule changes
+   * `effectiveFilters` whenever `viewMode` changes). The layout effect
+   * runs first and restores the snapshot; without this guard the filter
+   * effect that fires immediately after unconditionally reframes, undoing
+   * the restore.
+   *
+   * Only set to `true` on the snapshot-RESTORE branches; set to `false` on
+   * the fallback (frameToFit + reset) branches so the flag has a defined
+   * value after every `setLayout`. Consumed by `setFilter` regardless of
+   * which branch ran.
+   */
+  private snapshotJustApplied = false;
+
+  /**
    * Monotonic counter incremented by {@link syncFromStore} every time
    * the underlying graph data is reloaded. Used by
    * {@link isSnapshotValid} to detect stale per-mode camera snapshots
@@ -1360,6 +1381,10 @@ export class SceneController implements InferredEdgeHost {
           this.cameraController,
           this.treeCameraSnapshot.state,
         );
+        // Tell the next setFilter call (if any) to skip its reframe so the
+        // restored camera survives the layout+filter effect double-fire
+        // on a view-mode toggle. See snapshotJustApplied docstring.
+        this.snapshotJustApplied = true;
       } else {
         this.treeCameraSnapshot = null;
         this.frameToFit(this.framingPositions(positions));
@@ -1370,6 +1395,9 @@ export class SceneController implements InferredEdgeHost {
         // guarantees the orthographic eye is purely along +Z relative
         // to the freshly-framed tree centroid.
         this.cameraController.resetCameraOrientation();
+        // First-entry / invalid-snapshot path: setFilter SHOULD reframe
+        // normally; nothing to guard.
+        this.snapshotJustApplied = false;
       }
     } else {
       this.teardownTreeMeshes();
@@ -1396,6 +1424,10 @@ export class SceneController implements InferredEdgeHost {
           this.cameraController,
           this.graphCameraSnapshot.state,
         );
+        // Tell the next setFilter call (if any) to skip its reframe so the
+        // restored camera survives the layout+filter effect double-fire
+        // on a view-mode toggle. See snapshotJustApplied docstring.
+        this.snapshotJustApplied = true;
       } else {
         this.graphCameraSnapshot = null;
         this.frameToFit(this.framingPositions(positions));
@@ -1412,6 +1444,9 @@ export class SceneController implements InferredEdgeHost {
         // pose. Free rotation stays enabled (applyGraphCamera already
         // set rotationEnabled=true).
         this.cameraController.resetCameraOrientation();
+        // First-entry / invalid-snapshot path: setFilter SHOULD reframe
+        // normally; nothing to guard.
+        this.snapshotJustApplied = false;
       }
     }
   }
@@ -2028,6 +2063,16 @@ export class SceneController implements InferredEdgeHost {
     // eventual `syncFromStore` will frame correctly using the
     // now-correct `visibleNodeIds`.
     if (this.nodeIdsByIndex.length === 0) return;
+    // Race guard: on a host-driven view-mode toggle, biblegraph's
+    // `<InferaGraph>` re-runs the layout AND filter effects in the same
+    // render. setLayout has just restored the saved per-mode camera
+    // snapshot; reframing here would undo that. Consume the one-shot
+    // flag so independent later setFilter calls (no preceding restore)
+    // still reframe normally.
+    if (this.snapshotJustApplied) {
+      this.snapshotJustApplied = false;
+      return;
+    }
     const positions = this.layoutEngine.animated
       ? this.layoutEngine.getPositions()
       : this.layoutCache.get(this.layoutMode);

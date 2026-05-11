@@ -2029,6 +2029,57 @@ describe('SceneController', () => {
 
       ctrl.detach();
     });
+
+    // Regression: 0.14.4 — biblegraph's view-mode toggle re-runs BOTH the
+    // setLayout and setFilter React effects in the same render (the host's
+    // tree-mode "persons only" rule changes `effectiveFilters` whenever
+    // viewMode changes). setLayout correctly restored the saved per-mode
+    // snapshot, but the subsequent setFilter unconditionally called
+    // frameToFit and overwrote the restored camera. Fix: SceneController
+    // tracks `snapshotJustApplied`; setFilter consumes the flag and skips
+    // its frameToFit exactly once when a snapshot was just restored, so
+    // independent later filter changes still reframe correctly.
+    it('preserves restored camera state when setFilter runs after setLayout', async () => {
+      seedStore(store, family);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      // Pose graph + populate both snapshots via a tree round-trip so the
+      // round-trip back to graph is a RESTORE (not first-entry frameToFit).
+      await poseLiveCamera(ctrl, { position: [5, 6, 7], target: [1, 2, 3] });
+      ctrl.setLayout('tree');
+      await poseLiveCamera(ctrl, {
+        position: [100, 200, 300],
+        target: [50, 60, 70],
+        zoom: 2.5,
+      });
+
+      // Round-trip back: this restores graphCameraSnapshot — no frameToFit.
+      ctrl.setLayout('graph');
+      const restoredPose = readLivePose(ctrl);
+
+      // Now simulate the host's filter effect firing right after setLayout
+      // on the same render. Spy on frameToFit and assert setFilter does
+      // NOT call it — otherwise it would overwrite the restored camera.
+      // @ts-expect-error — accessing private for a behavior assertion
+      const frameSpy = vi.spyOn(ctrl, 'frameToFit');
+      ctrl.setFilter((n) => n.attributes.type === 'person');
+      expect(frameSpy).not.toHaveBeenCalled();
+
+      // Camera state must still match the restored snapshot.
+      const afterFilter = readLivePose(ctrl);
+      expect(afterFilter.position).toEqual(restoredPose.position);
+      expect(afterFilter.target).toEqual(restoredPose.target);
+
+      // The flag is consumed: an INDEPENDENT subsequent setFilter call
+      // (no preceding setLayout snapshot-restore) must reframe again.
+      ctrl.setFilter((n) => n.attributes.type === 'person' && n.id !== 'cain');
+      expect(frameSpy).toHaveBeenCalledTimes(1);
+
+      frameSpy.mockRestore();
+      ctrl.detach();
+    });
   });
 
   describe('frameToFit — orthographic frustum resize (tree mode)', () => {
