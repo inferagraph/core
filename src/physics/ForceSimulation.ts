@@ -3,6 +3,7 @@ import { BarnesHut } from './BarnesHut.js';
 import { SpringForce } from './forces/SpringForce.js';
 import { CenteringForce } from './forces/CenteringForce.js';
 import { DampingForce } from './forces/DampingForce.js';
+import { debugLog } from '../utils/debugLog.js';
 
 interface SimulationNode {
   id: NodeId;
@@ -25,6 +26,11 @@ export class ForceSimulation {
   private running = false;
 
   setNodes(nodeIds: NodeId[]): void {
+    try {
+      debugLog(
+        `[ig-pos:engineOp] op=ForceSimulation.setNodes nodeCount=${nodeIds.length} prevNodeCount=${this.nodes.length} (re-randomization)`,
+      );
+    } catch {}
     // Spread initial positions across a 400-unit cube. The previous 200-unit
     // spread combined with 0.1.10's tight spring rest length crushed even
     // small graphs into a single pile during the first dozen ticks.

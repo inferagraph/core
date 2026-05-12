@@ -39,6 +39,7 @@ import {
 import { PulseController, type PulseOption } from './PulseController.js';
 import { describeNode } from '../utils/describeNode.js';
 import type { EdgeLabelMap } from '../utils/aggregateEdges.js';
+import { debugLog } from '../utils/debugLog.js';
 import type { InferredEdge } from '../ai/InferredEdge.js';
 import type { InferredEdgeHost } from './types.js';
 
@@ -53,6 +54,38 @@ function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// IG_DEBUG-gated diagnostic helpers (position sampling + engine identity)
+function igPosSample(
+  positions: Map<string, Vector3> | undefined | null,
+): Array<{ id: string; x: number; y: number; z: number }> {
+  const out: Array<{ id: string; x: number; y: number; z: number }> = [];
+  if (!positions) return out;
+  let i = 0;
+  for (const [id, p] of positions) {
+    if (i >= 3) break;
+    out.push({
+      id,
+      x: Number(p.x.toFixed(2)),
+      y: Number(p.y.toFixed(2)),
+      z: Number(p.z.toFixed(2)),
+    });
+    i++;
+  }
+  return out;
+}
+function igPosChecksum(positions: Map<string, Vector3> | undefined | null): number {
+  if (!positions) return 0;
+  let s = 0;
+  for (const [, p] of positions) {
+    s += p.x * 1 + p.y * 100 + p.z * 10000;
+  }
+  return Number(s.toFixed(3));
+}
+function igEngineId(engine: LayoutEngine | undefined | null): string {
+  if (!engine) return 'null';
+  return (engine as unknown as { __debugId?: string }).__debugId ?? 'no-id';
 }
 
 /**
@@ -549,14 +582,33 @@ export class SceneController implements InferredEdgeHost {
    * underlying graph data changes (in `syncFromStore`) so stale positions
    * don't outlive the data they describe.
    *
-   * Static (non-animated) layouts (e.g. {@link TreeLayout}) take advantage
-   * of this cache so toggling away and back doesn't re-run the layout.
-   * Animated layouts (e.g. {@link ForceLayout3D}) always recompute on entry
-   * — their internal physics state needs seeding and the recompute is cheap
-   * — but their entry still goes through the same single-engine pathway
-   * so the inactive layout remains untouched.
+   * Both static (e.g. {@link TreeLayout}) AND animated layouts (e.g.
+   * {@link ForceLayout3D}) take advantage of this cache so toggling away
+   * and back doesn't re-run the layout. Animated layouts ride the cache
+   * in concert with {@link layoutEngines} below: the engine instance is
+   * preserved across toggles, so the per-frame `tick()` driver reads
+   * position state from the SAME ForceLayout3D the cache snapshot came
+   * from. The cache hit on re-entry simply skips a fresh re-seed of
+   * physics state — the engine's running positions remain authoritative
+   * for live frames.
    */
   private layoutCache = new Map<LayoutMode, Map<string, Vector3>>();
+
+  /**
+   * Per-mode LayoutEngine instances. Lazily populated by {@link setLayout}
+   * (and the constructor for the initial mode); a given mode's engine is
+   * constructed at most once per sync window. Toggling away and back
+   * reuses the same engine instance — critical for animated layouts whose
+   * internal physics state (positions, velocities, alpha) would otherwise
+   * be re-randomized on every re-entry and visually jump the graph.
+   *
+   * Cleared wholesale by {@link syncFromStore} together with
+   * {@link layoutCache} so a fresh data load builds fresh engines against
+   * the new node/edge set.
+   */
+  private layoutEngines = new Map<LayoutMode, LayoutEngine>();
+  // IG_DEBUG-gated diagnostic
+  private __firstTickAfterSetLayoutPending: boolean = false;
 
   private hoveredIndex: number | null = null;
   private pointerX: number = 0;
@@ -595,6 +647,12 @@ export class SceneController implements InferredEdgeHost {
     this.parentEdgeTypes = options.parentEdgeTypes;
     this.pairedEdgeTypes = options.pairedEdgeTypes;
     this.layoutEngine = this.createLayoutEngine(this.layoutMode);
+    this.layoutEngines.set(this.layoutMode, this.layoutEngine);
+    try {
+      debugLog(
+        `[ig-pos:engine-create] mode=${this.layoutMode} newEngineId=${igEngineId(this.layoutEngine)} (constructor)`,
+      );
+    } catch {}
     this.nodeRender = options.nodeRender;
     this.tooltip = options.tooltip;
     this.incomingEdgeLabels = options.incomingEdgeLabels;
@@ -870,6 +928,12 @@ export class SceneController implements InferredEdgeHost {
    * meshes that the WebGLRenderer renders. Idempotent.
    */
   syncFromStore(): void {
+    try {
+      const stack = new Error().stack?.split('\n').slice(1, 5).join(' | ') ?? '';
+      debugLog(
+        `[ig-pos:syncFromStore:enter] dataVersion(before)=${this.dataVersion} layoutMode=${this.layoutMode} engineMapSize=${this.layoutEngines.size} stack=${stack}`,
+      );
+    } catch {}
     if (!this.container) return;
 
     // Clear any previous meshes so we can rebuild from scratch.
@@ -901,11 +965,29 @@ export class SceneController implements InferredEdgeHost {
     // Meshes` after the meshes exist.
     this.recomputeVisibility();
 
-    // The graph data just changed — every cached layout is stale. Drop
-    // them so the next entry into any mode (active or otherwise) recomputes
-    // from the fresh data. We deliberately do NOT pre-populate inactive
-    // modes' caches: only the active layout runs on sync.
+    // The graph data just changed — every cached layout AND engine is
+    // stale (engines hold seeded positions for the OLD node set). Drop
+    // both maps so the next entry into any mode (active or otherwise)
+    // builds a fresh engine and recomputes from the fresh data. We
+    // deliberately do NOT pre-populate inactive modes: only the active
+    // layout's engine is constructed below.
     this.layoutCache.clear();
+    this.layoutEngines.clear();
+    try {
+      debugLog(`[ig-pos:syncFromStore:cleared-engines] layoutMode=${this.layoutMode}`);
+    } catch {}
+    // Re-register the active engine in the freshly-cleared map. The
+    // existing `this.layoutEngine` instance is reused — its `compute()`
+    // (called below via `computeActiveLayout`) re-seeds internal state
+    // against the new node/edge set, so we don't need a fresh object.
+    // Inactive engines were purged by the clear and will be rebuilt on
+    // their next `setLayout` entry.
+    this.layoutEngines.set(this.layoutMode, this.layoutEngine);
+    try {
+      debugLog(
+        `[ig-pos:syncFromStore:reregister-active-engine] mode=${this.layoutMode} engineId=${igEngineId(this.layoutEngine)}`,
+      );
+    } catch {}
 
     // Saved per-mode camera snapshots reference the prior layout's
     // coordinates and bounding radius. Bump `dataVersion` so the next
@@ -984,6 +1066,11 @@ export class SceneController implements InferredEdgeHost {
     edges: ReturnType<GraphStore['getAllEdges']>,
     positions: Map<string, Vector3>,
   ): void {
+    try {
+      debugLog(
+        `[ig-pos:buildMeshes:graph] positionsCount=${positions.size} checksum=${igPosChecksum(positions)} sample=${JSON.stringify(igPosSample(positions))}`,
+      );
+    } catch {}
     const nodeMesh = new NodeMesh(this.nodeRender);
     nodeMesh.createInstancedMesh(this.nodesByIndex.length);
     nodeMesh.setNodeIds(this.nodeIdsByIndex);
@@ -1103,6 +1190,11 @@ export class SceneController implements InferredEdgeHost {
    * change a per-frame no-op (no rebuild).
    */
   private buildTreeMeshes(positions: Map<string, Vector3>): void {
+    try {
+      debugLog(
+        `[ig-pos:buildMeshes:tree] positionsCount=${positions.size} checksum=${igPosChecksum(positions)} sample=${JSON.stringify(igPosSample(positions))}`,
+      );
+    } catch {}
     const treeNodeMesh = new TreeNodeMesh();
     const entries: Array<{
       id: string;
@@ -1310,6 +1402,15 @@ export class SceneController implements InferredEdgeHost {
    * rewritten.
    */
   setLayout(mode: LayoutMode): void {
+    try {
+      const mapDump: Array<{ mode: string; id: string }> = [];
+      for (const [m, e] of this.layoutEngines) {
+        mapDump.push({ mode: m, id: igEngineId(e) });
+      }
+      debugLog(
+        `[ig-pos:setLayout:enter] incoming=${mode} current=${this.layoutMode} engineMapSize=${this.layoutEngines.size} engineMap=${JSON.stringify(mapDump)}`,
+      );
+    } catch {}
     if (mode === this.layoutMode) return;
 
     // Capture container dimensions ONCE at the top of the method and
@@ -1345,7 +1446,35 @@ export class SceneController implements InferredEdgeHost {
     }
 
     this.layoutMode = mode;
-    this.layoutEngine = this.createLayoutEngine(mode);
+    // Reuse a previously-built engine for this mode if one exists; only
+    // construct a fresh engine on the FIRST entry into a mode within a
+    // sync window. This preserves animated layouts' internal physics
+    // state across mode toggles — without it, every graph→tree→graph
+    // round-trip re-randomizes node positions because the new
+    // ForceLayout3D's seed positions come from `Math.random()`.
+    let engine = this.layoutEngines.get(mode);
+    const __engineHit = !!engine;
+    if (!engine) {
+      engine = this.createLayoutEngine(mode);
+      this.layoutEngines.set(mode, engine);
+      try {
+        debugLog(`[ig-pos:engine-create] mode=${mode} newEngineId=${igEngineId(engine)}`);
+      } catch {}
+    }
+    this.layoutEngine = engine;
+    try {
+      debugLog(
+        `[ig-pos:engine-lookup] mode=${mode} hit=${__engineHit} engineId=${igEngineId(engine)}`,
+      );
+      if (__engineHit) {
+        debugLog(`[ig-pos:engine-reuse] mode=${mode} existingEngineId=${igEngineId(engine)}`);
+      }
+      // Reset the per-engine tick counter so we can log first-N ticks after a re-entry.
+      if (mode === 'graph' && (engine as unknown as { resetTickCounter?: () => void }).resetTickCounter) {
+        (engine as unknown as { resetTickCounter: () => void }).resetTickCounter();
+        this.__firstTickAfterSetLayoutPending = true;
+      }
+    } catch {}
 
     if (this.nodeIdsByIndex.length === 0) return;
 
@@ -1456,6 +1585,11 @@ export class SceneController implements InferredEdgeHost {
    * node geometry/style is baked into the InstancedMesh on construction.
    */
   setNodeRender(config: NodeRenderConfig | undefined): void {
+    try {
+      debugLog(
+        `[ig-pos:setNodeRender] willSyncFromStore=${!!(this.container && this.nodeMesh)} configRef=${config ? 'present' : 'undef'}`,
+      );
+    } catch {}
     this.nodeRender = config;
     if (this.container && this.nodeMesh) {
       this.syncFromStore();
@@ -1552,31 +1686,48 @@ export class SceneController implements InferredEdgeHost {
    * `setLayout` go — it guarantees the inactive layout's `compute()` is
    * NEVER invoked, no matter how many times the consumer toggles modes.
    *
-   * Cache rules:
-   *  - Static layouts (e.g. {@link TreeLayout}, `animated === false`):
-   *    cached. A toggle away and back skips the recompute entirely.
-   *  - Animated layouts (e.g. {@link ForceLayout3D}, `animated === true`):
-   *    always recompute on entry so the engine's internal physics state
-   *    is seeded for the per-frame `tick()`. We still cache the freshly
-   *    computed positions so consumers (like {@link applyPulse}) that read
-   *    `getPositions()` between ticks see a consistent snapshot.
+   * Cache rules (uniform for static AND animated layouts):
+   *  - Cache hit: return the cached positions directly. The
+   *    corresponding engine instance is preserved in
+   *    {@link layoutEngines} across toggles, so its internal state
+   *    (TreeLayout's deterministic compute output OR ForceLayout3D's
+   *    running physics) is intact and the per-frame `tick()` driver in
+   *    graph mode reads from the SAME engine the cache snapshot was
+   *    seeded from. Re-entry to a mode is therefore visually stable —
+   *    nodes pick up exactly where they left off.
+   *  - Cache miss: first encounter with this mode in the current sync
+   *    window. Run `engine.compute()` (which seeds animated engines'
+   *    physics state and populates static engines' final positions) and
+   *    store the result.
    *
-   * The cache is invalidated wholesale by {@link syncFromStore} whenever
-   * the underlying graph data changes.
+   * The cache + engine map are invalidated wholesale by
+   * {@link syncFromStore} whenever the underlying graph data changes.
    */
   private computeActiveLayout(): Map<string, Vector3> {
     const mode = this.layoutMode;
     const engine = this.layoutEngine;
 
-    // Static layouts: short-circuit on cache hit. The inactive engine is
-    // never touched even if a stale entry for the OTHER mode lives in the
-    // cache — we only ever read by the active mode key.
-    if (!engine.animated) {
-      const cached = this.layoutCache.get(mode);
-      if (cached) return cached;
+    const cached = this.layoutCache.get(mode);
+    try {
+      debugLog(
+        `[ig-pos:computeActiveLayout:enter] mode=${mode} cacheHit=${!!cached} engineId=${igEngineId(engine)} cacheKeys=${JSON.stringify([...this.layoutCache.keys()])}`,
+      );
+    } catch {}
+    if (cached) {
+      try {
+        debugLog(
+          `[ig-pos:positions:cached] mode=${mode} count=${cached.size} checksum=${igPosChecksum(cached)} sample=${JSON.stringify(igPosSample(cached))}`,
+        );
+      } catch {}
+      return cached;
     }
 
     const positions = engine.compute(this.nodeIdsByIndex, this.edgeEndpoints);
+    try {
+      debugLog(
+        `[ig-pos:positions:computed] mode=${mode} engineId=${igEngineId(engine)} count=${positions.size} checksum=${igPosChecksum(positions)} sample=${JSON.stringify(igPosSample(positions))}`,
+      );
+    } catch {}
     this.layoutCache.set(mode, positions);
     return positions;
   }
@@ -1612,6 +1763,16 @@ export class SceneController implements InferredEdgeHost {
 
     // Drive animated layouts.
     if (this.layoutEngine.animated && this.nodeIdsByIndex.length > 0) {
+      // IG_DEBUG-gated diagnostic: log positions snapshot on first tick after a setLayout
+      if (this.__firstTickAfterSetLayoutPending) {
+        try {
+          const positionsBefore = this.layoutEngine.getPositions();
+          debugLog(
+            `[ig-pos:tick:first-after-setLayout] mode=${this.layoutMode} engineId=${igEngineId(this.layoutEngine)} count=${positionsBefore.size} checksum=${igPosChecksum(positionsBefore)} sample=${JSON.stringify(igPosSample(positionsBefore))}`,
+          );
+        } catch {}
+        this.__firstTickAfterSetLayoutPending = false;
+      }
       this.layoutEngine.tick();
       const positions = this.layoutEngine.getPositions();
       this.applyPositions(positions);

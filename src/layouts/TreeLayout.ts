@@ -1,5 +1,6 @@
 import type { NodeId, Vector3, LayoutOptions } from '../types.js';
 import { LayoutEngine, type LayoutEdgeInput } from './LayoutEngine.js';
+import { debugLog } from '../utils/debugLog.js';
 
 /**
  * Hierarchical tidy-tree layout. Drives the "tree" view mode for any
@@ -96,17 +97,27 @@ export class TreeLayout extends LayoutEngine {
   private readonly pairedTypes: ReadonlySet<string>;
 
   private positions = new Map<NodeId, Vector3>();
+  // IG_DEBUG-gated diagnostic
+  public __debugId: string = 'tree-' + Math.random().toString(36).slice(2, 7);
 
   constructor(options?: TreeLayoutOptions) {
     super({ animated: false, ...options });
     this.parentTypes = new Set(options?.parentEdgeTypes ?? ['parent_of']);
     this.pairedTypes = new Set(options?.pairedEdgeTypes ?? []);
+    try {
+      debugLog(`[ig-pos:engine-ctor] kind=TreeLayout id=${this.__debugId}`);
+    } catch {}
   }
 
   compute(
     nodeIds: NodeId[],
     edges: Array<LayoutEdgeInput>,
   ): Map<NodeId, Vector3> {
+    try {
+      debugLog(
+        `[ig-pos:engineOp] op=compute kind=TreeLayout id=${this.__debugId} nodeCount=${nodeIds.length} edgeCount=${edges.length}`,
+      );
+    } catch {}
     this.positions.clear();
     if (nodeIds.length === 0) return this.positions;
 

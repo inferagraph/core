@@ -491,6 +491,56 @@ describe('SceneController', () => {
       expect(ctrl.getLayoutEngine()).toBe(before);
     });
 
+    it('graph layout positions are stable across mode toggles', () => {
+      // Regression: SceneController.setLayout used to construct a fresh
+      // LayoutEngine on every entry, so the force-directed graph mode
+      // re-randomized node positions every time the user toggled away
+      // and back. The fix persists the engine instance per mode in a
+      // Map so the second `setLayout('graph')` reuses the original
+      // ForceLayout3D and the cached positions stay valid.
+      seedStore(store, sample);
+      const ctrl = new SceneController({ store, layout: 'graph' });
+      ctrl.attach(container);
+      ctrl.syncFromStore();
+
+      const snapshotGraphPositions = (): Map<
+        string,
+        { x: number; y: number; z: number }
+      > => {
+        // @ts-expect-error — internal access for the assertion
+        const cache = ctrl['layoutCache'] as Map<
+          string,
+          Map<string, { x: number; y: number; z: number }>
+        >;
+        const positions = cache.get('graph');
+        expect(positions, 'graph layout cache must be populated').toBeTruthy();
+        return new Map(
+          [...positions!].map(([k, v]) => [k, { x: v.x, y: v.y, z: v.z }]),
+        );
+      };
+
+      // First entry: snapshot the freshly-seeded graph positions.
+      const first = snapshotGraphPositions();
+
+      // Round-trip through tree mode.
+      ctrl.setLayout('tree');
+      ctrl.setLayout('graph');
+
+      // Same engine instance survives the round-trip.
+      const second = snapshotGraphPositions();
+
+      expect(new Set(second.keys())).toEqual(new Set(first.keys()));
+      const EPS = 1e-6;
+      for (const [id, before] of first) {
+        const after = second.get(id)!;
+        expect(Math.abs(after.x - before.x)).toBeLessThan(EPS);
+        expect(Math.abs(after.y - before.y)).toBeLessThan(EPS);
+        expect(Math.abs(after.z - before.z)).toBeLessThan(EPS);
+      }
+
+      ctrl.detach();
+    });
+
     it('mounts tree-view objects + an OrthographicCamera on toggle to tree, and restores the perspective camera on toggle back', async () => {
       // A small bidirectional family with a marriage so the tree pipeline
       // exercises both parent edges and spouse edges.
@@ -1578,12 +1628,14 @@ describe('SceneController', () => {
     });
 
     it('paintNode reads cached positions when the active layout is static (regression for tree-mode hover)', () => {
-      // Round-trip into tree mode: graph → tree → graph → tree. On the
-      // second entry into tree mode `computeActiveLayout` short-circuits on
-      // a cache hit, so the freshly-constructed TreeLayout's internal
-      // positions map stays empty. paintNode therefore MUST read from the
-      // cache for static layouts (else the tree card would slam to {0,0,0}
-      // on every hover).
+      // Round-trip into tree mode: graph → tree → graph → tree. With
+      // persistent per-mode engines (Option B), the TreeLayout instance
+      // is reused on re-entry and its `getPositions()` is still
+      // populated from the first `compute`. The cache is the canonical
+      // read site for static layouts regardless — paintNode must read
+      // from it (the historical bug here was paintNode reading from a
+      // re-constructed TreeLayout whose positions map was empty, slamming
+      // the card to {0,0,0} on hover).
       seedStore(store, family);
       const ctrl = new SceneController({ store, layout: 'graph' });
       ctrl.attach(container);
@@ -1593,11 +1645,7 @@ describe('SceneController', () => {
       ctrl.setLayout('graph');
       ctrl.setLayout('tree');
 
-      // Precondition: the new TreeLayout instance's live positions are
-      // empty (cache hit re-entry).
-      expect(ctrl.getLayoutEngine().getPositions().size).toBe(0);
-
-      // The cache, on the other hand, must be populated.
+      // The cache must be populated on a static-layout re-entry.
       // @ts-expect-error — internal access
       const cached = ctrl['layoutCache'].get('tree') as Map<string, { x: number; y: number; z: number }>;
       expect(cached).toBeTruthy();
@@ -1616,8 +1664,8 @@ describe('SceneController', () => {
       expect(updateSpy).toHaveBeenCalledTimes(1);
       const [passedId, passedPos] = updateSpy.mock.calls[0];
       expect(passedId).toBe(targetId);
-      // Must equal the CACHED position; if the engine were used we'd see
-      // {0,0,0} (engine.getPositions() is empty here).
+      // Must equal the cached position — paintNode's static-layout
+      // branch reads from `layoutCache`, not the engine.
       expect(passedPos).toEqual(cachedPos);
 
       ctrl.detach();
@@ -1927,27 +1975,32 @@ describe('SceneController', () => {
     it('hover does not displace tree-view cards after a graph→tree round-trip', () => {
       // Regression for the 0.1.18 → 0.1.19 fix: on a SECOND entry into
       // tree mode the cache short-circuits `engine.compute()`, so the
-      // (newly constructed) TreeLayout's internal positions map stays
-      // empty even though the cached map is populated. `paintNode` must
-      // therefore read from the layout cache, not the engine — otherwise
-      // every hover repaint shoves the card to the origin.
+      // tree mesh is built from the cached positions. `paintNode` must
+      // also read from the layout cache (not from per-frame engine
+      // state) — otherwise every hover repaint could shove the card to
+      // the origin.
       seedStore(store, family);
       const ctrl = new SceneController({ store, layout: 'graph' });
       ctrl.attach(container);
       ctrl.syncFromStore();
 
-      // Visit tree once (populates the cache).
+      // Visit tree once (populates the cache + the tree engine).
       ctrl.setLayout('tree');
       // Round-trip back through graph.
       ctrl.setLayout('graph');
       // Re-enter tree — cache HIT, engine.compute() is NOT called.
       ctrl.setLayout('tree');
 
-      // The new TreeLayout instance's positions map must indeed be
-      // empty here (sanity check — exercises the precondition this test
-      // exists to defend against).
-      const liveEnginePositions = ctrl.getLayoutEngine().getPositions();
-      expect(liveEnginePositions.size).toBe(0);
+      // The layout cache must remain populated across the round-trip;
+      // it is the source of truth `paintNode` reads from for static
+      // layouts, regardless of what the engine's internal state holds.
+      // @ts-expect-error — internal access for a behavioral assertion
+      const cachedPositions = ctrl['layoutCache'].get('tree') as Map<
+        string,
+        { x: number; y: number; z: number }
+      >;
+      expect(cachedPositions).toBeTruthy();
+      expect(cachedPositions.size).toBeGreaterThan(0);
 
       // The tree node mesh built from the cache, however, has a card
       // for every node. Capture the as-built position of the first card
