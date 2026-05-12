@@ -70,7 +70,7 @@ const useClientPlugin = (entryBasenames: string[]) => ({
 // prepends it to `index.*` and `react.*` outputs (entryBasenames),
 // leaving `data.*` clean for server-side / RSC consumers.
 export default defineConfig({
-  entry: ['src/data.ts', 'src/index.ts', 'src/react.ts'],
+  entry: ['src/data.ts', 'src/index.ts', 'src/react.ts', 'src/server.ts'],
   format: ['esm', 'cjs'],
   dts: true,
   sourcemap: true,

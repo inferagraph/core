@@ -222,6 +222,66 @@ describe('InferredEdgeMesh', () => {
     });
   });
 
+  describe('updatePositions — per-tick endpoint refresh', () => {
+    it('rewrites the position buffer in place without re-allocating the TypedArray', () => {
+      const initialPositions = makePositions([
+        ['a', { x: 0, y: 0, z: 0 }],
+        ['b', { x: 10, y: 0, z: 0 }],
+      ]);
+      mesh.setInferredEdges([makeEdge('a', 'b')], initialPositions);
+      const geometry = (mesh.getMesh() as unknown as { geometry: unknown }).geometry as {
+        getAttribute: (name: string) => { array: Float32Array; needsUpdate: boolean };
+      };
+      const attrBefore = geometry.getAttribute('position');
+      const typedArrayBefore = attrBefore.array;
+      attrBefore.needsUpdate = false;
+
+      const updated = makePositions([
+        ['a', { x: 100, y: 200, z: 300 }],
+        ['b', { x: 400, y: 500, z: 600 }],
+      ]);
+      mesh.updatePositions(updated);
+
+      const attrAfter = geometry.getAttribute('position');
+      // Same TypedArray reference — no re-allocation.
+      expect(attrAfter.array).toBe(typedArrayBefore);
+      // Buffer reflects new positions.
+      expect(Array.from(attrAfter.array.slice(0, 6))).toEqual([100, 200, 300, 400, 500, 600]);
+      // needsUpdate flipped true so three.js re-uploads the buffer.
+      expect(attrAfter.needsUpdate).toBe(true);
+    });
+
+    it('skips edges whose source or target is missing from the new positions map', () => {
+      const initial = makePositions([
+        ['a', { x: 0, y: 0, z: 0 }],
+        ['b', { x: 10, y: 0, z: 0 }],
+        ['c', { x: 20, y: 0, z: 0 }],
+      ]);
+      mesh.setInferredEdges([makeEdge('a', 'b'), makeEdge('b', 'c')], initial);
+      const geometry = (mesh.getMesh() as unknown as { geometry: unknown }).geometry as {
+        getAttribute: (name: string) => { array: Float32Array };
+      };
+      const arrBefore = Array.from(geometry.getAttribute('position').array.slice(0, 12));
+
+      // Drop 'c' from the map — second edge has no target position.
+      const partial = makePositions([
+        ['a', { x: 1, y: 1, z: 1 }],
+        ['b', { x: 2, y: 2, z: 2 }],
+      ]);
+      expect(() => mesh.updatePositions(partial)).not.toThrow();
+      const arrAfter = Array.from(geometry.getAttribute('position').array.slice(0, 12));
+      // First edge updated.
+      expect(arrAfter.slice(0, 6)).toEqual([1, 1, 1, 2, 2, 2]);
+      // Second edge's slot untouched (skipped, prior values retained).
+      expect(arrAfter.slice(6, 12)).toEqual(arrBefore.slice(6, 12));
+    });
+
+    it('is a safe no-op when no edges have been pushed', () => {
+      const positions = makePositions([['a', { x: 1, y: 2, z: 3 }]]);
+      expect(() => mesh.updatePositions(positions)).not.toThrow();
+    });
+  });
+
   describe('setVisibility — overlay toggle', () => {
     it('sets the underlying mesh visible flag without rebuilding', () => {
       const positions = makePositions([

@@ -201,6 +201,25 @@ describe('GraphProvider', () => {
     expect(seen[0]).toBe(seen[seen.length - 1]);
   });
 
+  it('installs the inferredEdgeStore prop on the AIEngine', async () => {
+    const store = {
+      get: vi.fn(),
+      getAll: vi.fn().mockResolvedValue([]),
+      getAllForNode: vi.fn(),
+      set: vi.fn(),
+      clear: vi.fn(),
+    };
+    let captured: ReturnType<typeof useGraphContext> | null = null;
+    await act(async () => {
+      render(
+        <GraphProvider inferredEdgeStore={store}>
+          <ContextReader onContext={(ctx) => { captured = ctx; }} />
+        </GraphProvider>,
+      );
+    });
+    expect(captured!.aiEngine.getInferredEdgeStore()).toBe(store);
+  });
+
   it('should throw when useGraphContext is used outside of GraphProvider', () => {
     function BadComponent() {
       useGraphContext();

@@ -246,35 +246,53 @@ describe('SceneController inferred-edge dispatch', () => {
 
   describe('setInferredEdges (graph mode)', () => {
     it('caches the input for later replay', () => {
-      const positions = new Map([
-        ['a', { x: 0, y: 0, z: 0 }],
-        ['b', { x: 10, y: 0, z: 0 }],
-      ]);
       const edges = [makeInferred('a', 'b')];
-      ctrl.setInferredEdges(edges, positions);
+      ctrl.setInferredEdges(edges);
       expect(ctrl.getInferredEdges()).toEqual(edges);
     });
 
     it('dispatches to the active InferredEdgeMesh', () => {
       const mesh = ctrl.getInferredEdgeMesh()!;
       const spy = vi.spyOn(mesh, 'setInferredEdges');
-      const positions = new Map([
-        ['a', { x: 0, y: 0, z: 0 }],
-        ['b', { x: 10, y: 0, z: 0 }],
-      ]);
-      ctrl.setInferredEdges([makeInferred('a', 'b')], positions);
+      ctrl.setInferredEdges([makeInferred('a', 'b')]);
       expect(spy).toHaveBeenCalledTimes(1);
     });
 
     it('snapshots the input so caller mutations do not leak into the cache', () => {
-      const positions = new Map([
-        ['a', { x: 0, y: 0, z: 0 }],
-        ['b', { x: 10, y: 0, z: 0 }],
-      ]);
       const edges: InferredEdge[] = [makeInferred('a', 'b')];
-      ctrl.setInferredEdges(edges, positions);
+      ctrl.setInferredEdges(edges);
       edges.push(makeInferred('b', 'c'));
       expect(ctrl.getInferredEdges()).toHaveLength(1);
+    });
+  });
+
+  describe('per-tick positioning', () => {
+    it('forwards layout positions to InferredEdgeMesh.updatePositions on each tick', () => {
+      ctrl.setInferredEdges([makeInferred('a', 'b')]);
+      const mesh = ctrl.getInferredEdgeMesh()!;
+      const spy = vi.spyOn(mesh, 'updatePositions');
+      // Drive a single tick via the public per-frame entry. The tick
+      // method is private, but `applyPositions` is invoked through it on
+      // every animated frame; we exercise it via the layout-engine's
+      // public positions map.
+      const positions = new Map([
+        ['a', { x: 1, y: 2, z: 3 }],
+        ['b', { x: 4, y: 5, z: 6 }],
+        ['c', { x: 7, y: 8, z: 9 }],
+      ]);
+      (ctrl as unknown as { applyPositions(p: Map<string, { x: number; y: number; z: number }>): void }).applyPositions(positions);
+      expect(spy).toHaveBeenCalledWith(positions);
+    });
+
+    it('skips updatePositions when no inferred edges are active', () => {
+      const mesh = ctrl.getInferredEdgeMesh()!;
+      const spy = vi.spyOn(mesh, 'updatePositions');
+      const positions = new Map([
+        ['a', { x: 1, y: 2, z: 3 }],
+        ['b', { x: 4, y: 5, z: 6 }],
+      ]);
+      (ctrl as unknown as { applyPositions(p: Map<string, { x: number; y: number; z: number }>): void }).applyPositions(positions);
+      expect(spy).not.toHaveBeenCalled();
     });
   });
 
@@ -296,12 +314,8 @@ describe('SceneController inferred-edge dispatch', () => {
 
   describe('layout-toggle replay', () => {
     it('preserves cached inferred edges across graph→tree→graph round-trip', () => {
-      const positions = new Map([
-        ['a', { x: 0, y: 0, z: 0 }],
-        ['b', { x: 10, y: 0, z: 0 }],
-      ]);
       const edges = [makeInferred('a', 'b')];
-      ctrl.setInferredEdges(edges, positions);
+      ctrl.setInferredEdges(edges);
       ctrl.setInferredEdgeVisibility(true);
 
       // Toggle to tree (overlay tears down, cache survives) and back.
@@ -326,12 +340,8 @@ describe('SceneController inferred-edge dispatch', () => {
     });
 
     it('replays cached edges after a graph→tree→graph round-trip', () => {
-      const positions = new Map([
-        ['a', { x: 0, y: 0, z: 0 }],
-        ['b', { x: 10, y: 0, z: 0 }],
-      ]);
       const edges = [makeInferred('a', 'b')];
-      ctrl.setInferredEdges(edges, positions);
+      ctrl.setInferredEdges(edges);
       ctrl.setLayout('tree');
       ctrl.setLayout('graph');
       const replayed = ctrl.getInferredEdgeMesh()!;
@@ -349,11 +359,7 @@ describe('SceneController inferred-edge dispatch', () => {
     });
 
     it('setInferredEdges in tree mode logs a debug note and updates the cache only', () => {
-      const positions = new Map([
-        ['a', { x: 0, y: 0, z: 0 }],
-        ['b', { x: 10, y: 0, z: 0 }],
-      ]);
-      ctrl.setInferredEdges([makeInferred('a', 'b')], positions);
+      ctrl.setInferredEdges([makeInferred('a', 'b')]);
       expect(consoleSpy).toHaveBeenCalled();
       const msg = String(consoleSpy.mock.calls[0]?.[0] ?? '');
       expect(msg.toLowerCase()).toContain('tree');
@@ -374,11 +380,7 @@ describe('SceneController inferred-edge dispatch', () => {
 
   describe('detach', () => {
     it('clears the inferred-edge cache + mesh on detach', () => {
-      const positions = new Map([
-        ['a', { x: 0, y: 0, z: 0 }],
-        ['b', { x: 10, y: 0, z: 0 }],
-      ]);
-      ctrl.setInferredEdges([makeInferred('a', 'b')], positions);
+      ctrl.setInferredEdges([makeInferred('a', 'b')]);
       ctrl.setInferredEdgeVisibility(true);
       ctrl.detach();
       expect(ctrl.getInferredEdgeMesh()).toBeNull();

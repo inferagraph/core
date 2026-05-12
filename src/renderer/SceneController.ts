@@ -1751,6 +1751,17 @@ export class SceneController implements InferredEdgeHost {
         this.edgeMesh!.updateSegment(index, source, target);
       });
     }
+    // Per-tick refresh of the inferred-edge overlay. The mesh holds
+    // refs to (sourceId, targetId) from the prior `setInferredEdges`
+    // call and rewrites its `Float32BufferAttribute` in place — no
+    // reallocation. Skip cleanly when no edges are active so the
+    // common-case (overlay hidden / not yet fetched) costs nothing.
+    if (
+      this.inferredEdgeMesh &&
+      this.lastInferredEdges.length > 0
+    ) {
+      this.inferredEdgeMesh.updatePositions(positions);
+    }
   }
 
   /**
@@ -2360,10 +2371,7 @@ export class SceneController implements InferredEdgeHost {
    *
    * Implements {@link InferredEdgeHost.setInferredEdges}.
    */
-  setInferredEdges(
-    edges: ReadonlyArray<InferredEdge>,
-    positions: ReadonlyMap<string, Vector3>,
-  ): void {
+  setInferredEdges(edges: ReadonlyArray<InferredEdge>): void {
     // Snapshot the input so the cache doesn't alias caller-mutable
     // state. We only need a shallow copy — `InferredEdge` is `readonly`
     // by contract.
@@ -2377,6 +2385,10 @@ export class SceneController implements InferredEdgeHost {
       return;
     }
 
+    // Build initial geometry from the live layout positions. The
+    // per-tick `applyPositions` path keeps the mesh in sync as the
+    // simulation runs, so callers never have to push positions in.
+    const positions = this.layoutEngine.getPositions();
     this.inferredEdgeMesh?.setInferredEdges(edges, positions);
     // Adding a freshly-allocated mesh (the InferredEdgeMesh disposes
     // and rebuilds on every setInferredEdges call) — re-register it

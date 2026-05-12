@@ -146,7 +146,9 @@ import { openaiProvider } from '@inferagraph/openai-provider';
 | `cache` | `CacheProvider` | Optional response cache. Default is no cache. |
 | `embeddingStore` | `EmbeddingStore` | Optional Tier-3 vector store; default `inMemoryEmbeddingStore()` is exported. |
 | `transport` | `Transport` | Override the default in-process chat transport (e.g., HTTP proxy). |
-| `showInferredEdges` | `boolean` | Toggle the dashed inferred-edge overlay. Default `false`. |
+| `showInferredEdges` | `boolean` | Toggle the dashed inferred-edge overlay. Default `false`. Flipping on triggers an auto-fetch via the configured `inferredEdgeStore`. |
+| `inferredEdgeStore` | `InferredEdgeStore` | Optional pluggable store; auto-fetch consumes this when `showInferredEdges` flips true. Default `RemoteInferredEdgeStore('/api/inferred-edges')` is the common browser shape. |
+| `onInferredEdgesLoadingChange` | `(loading) => void` | Fires `true` when the auto-fetch starts, `false` on success / error / cancel. |
 | `onChat` | `(event) => void` | Receives `text` + `done` events; tool calls dispatch silently to the renderer. |
 | `slugResolver` | `SlugResolver` | Phase 6 — translates input slugs to canonical NodeIds for hooks. |
 | `maxNodes` | `number` | Phase 6 — soft cap; `MemoryManager` LRU-evicts oldest non-protected nodes. |
@@ -180,6 +182,65 @@ interface DataAdapter {
   getContent(id): Promise<ContentData | undefined>;
 }
 ```
+
+## Inferred Relationships
+
+The library ships an end-to-end overlay for edges the system *believes* exist between two nodes but that are NOT present as explicit edges in the store. Three pieces:
+
+1. **Server-side compute + persistence.** `AIEngine.computeInferredEdges()` fuses graph signals (common neighbors, Jaccard, structural cosine), embedding similarity, and per-node LLM extraction via reciprocal-rank-fusion. Results land in the configured `InferredEdgeStore` (`inMemoryInferredEdgeStore()` for self-contained apps; `@inferagraph/cosmosdb` ships `CosmosInferredEdgeStore` for production persistence).
+2. **HTTP surface.** `createInferredEdgeRouteHandler(engine)` builds a Web-Standard `(Request) => Promise<Response>` that returns the persisted edges as JSON. Lazy-computes on first request if the store is empty; concurrent first-requests share a single in-flight compute.
+3. **Client read.** `RemoteInferredEdgeStore(url)` implements `InferredEdgeStore` against the route handler. Hand it to `<InferaGraph inferredEdgeStore={...}>`; the auto-fetch effect kicks in when `showInferredEdges` flips true and pipes the edges into the renderer.
+
+### Wiring — Next.js App Router
+
+```ts
+// app/api/inferred-edges/route.ts
+import { createInferredEdgeRouteHandler } from '@inferagraph/core/server';
+import { getServerEngine } from '@/lib/engine';
+export const GET = createInferredEdgeRouteHandler(await getServerEngine());
+```
+
+```tsx
+// app/page.tsx (or a client component)
+import { InferaGraph, RemoteInferredEdgeStore } from '@inferagraph/core';
+const inferredEdgeStore = new RemoteInferredEdgeStore('/api/inferred-edges');
+<InferaGraph
+  data={data}
+  inferredEdgeStore={inferredEdgeStore}
+  showInferredEdges={enabled}
+  onInferredEdgesLoadingChange={setLoading}
+/>;
+```
+
+### Wiring — Express (Node 20+ with global `Request`/`Response`)
+
+```ts
+const handler = createInferredEdgeRouteHandler(engine);
+app.get('/api/inferred-edges', async (req, res) => {
+  const r = await handler(new Request(`http://x${req.originalUrl}`));
+  res.status(r.status);
+  r.headers.forEach((v, k) => res.setHeader(k, v));
+  res.send(await r.text());
+});
+```
+
+### When to compute
+
+The lazy first-request compute covers most cold-start cases, but a heavy LLM source can take longer than is friendly inside a route handler. Production deployments usually trigger compute out-of-band:
+
+- **Scheduled** — a nightly cron / Azure Function / GitHub Actions workflow that calls `engine.computeInferredEdges()` against the shared store.
+- **On reindex** — wire `computeInferredEdges()` into your `GraphIndexer.reconcile()` step so a content refresh that bumps embeddings also recomputes inferred edges.
+- **On startup** — kick a fire-and-forget `computeInferredEdges()` after the server engine is constructed so the first chat / page load reads warm cache.
+
+The route handler can sit alongside any of those — the `lazyCompute: false` option disables the inline trigger when an upstream pipeline already owns the work.
+
+### Per-tick positioning
+
+Dashed inferred edges track node positions automatically while the force simulation runs. The renderer (`SceneController.applyPositions` → `InferredEdgeMesh.updatePositions`) rewrites the underlying `Float32BufferAttribute` in place on every frame — no buffer re-allocation, no rebuild. Callers push the edge *set* once (via the auto-fetch effect); the controller owns the rest.
+
+### Visualization follow-ups
+
+`InferredEdge` carries `score` (the fused confidence) and `reasoning` (a human-readable rationale when the LLM source contributed). v1 stores these but doesn't yet surface them visually. Open follow-ups: opacity-by-confidence, hover tooltip showing the reasoning, per-source breakdown via `InferredEdge.perSource`.
 
 ## LLM Providers
 

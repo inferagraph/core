@@ -177,6 +177,45 @@ export class InferredEdgeMesh {
   }
 
   /**
+   * Rewrite the endpoint coordinates of every active inferred edge in
+   * place. Called per-frame by {@link SceneController.applyPositions}
+   * so dashed overlays track node motion as the force simulation runs.
+   *
+   * The underlying `Float32BufferAttribute` is mutated and tagged
+   * `needsUpdate = true`; the TypedArray reference is preserved so
+   * three.js doesn't have to re-allocate or re-bind the GPU buffer.
+   *
+   * Edges whose `sourceId` or `targetId` is missing from `positions`
+   * are skipped (their buffer slots retain their prior values) — this
+   * matches the defensive drop in {@link setInferredEdges}.
+   *
+   * Safe no-op when no edges have been pushed yet (geometry is null).
+   */
+  updatePositions(positions: ReadonlyMap<NodeId, Vector3>): void {
+    if (!this.geometry) return;
+    const attr = this.geometry.getAttribute('position') as
+      | THREE.BufferAttribute
+      | THREE.Float32BufferAttribute
+      | undefined;
+    if (!attr) return;
+    const arr = attr.array as Float32Array;
+    for (let i = 0; i < this.lastEdges.length; i++) {
+      const edge = this.lastEdges[i];
+      const src = positions.get(edge.sourceId);
+      const tgt = positions.get(edge.targetId);
+      if (!src || !tgt) continue;
+      const offset = i * 6;
+      arr[offset + 0] = src.x;
+      arr[offset + 1] = src.y;
+      arr[offset + 2] = src.z;
+      arr[offset + 3] = tgt.x;
+      arr[offset + 4] = tgt.y;
+      arr[offset + 5] = tgt.z;
+    }
+    (attr as { needsUpdate: boolean }).needsUpdate = true;
+  }
+
+  /**
    * Toggle overlay visibility WITHOUT teardown. Defaults to `false`
    * (hidden) per the Phase 5 plan; hosts opt in via the
    * `showInferredEdges` prop on `<InferaGraph>` or via the

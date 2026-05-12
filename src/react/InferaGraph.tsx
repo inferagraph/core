@@ -19,6 +19,7 @@ import type { LLMProvider } from '../ai/LLMProvider.js';
 import type { CacheProvider } from '../cache/lruCache.js';
 import type { ChatEvent } from '../ai/ChatEvent.js';
 import type { EmbeddingStore } from '../ai/Embedding.js';
+import type { InferredEdgeStore } from '../ai/InferredEdge.js';
 import { inProcessTransport, type Transport } from '../ai/Transport.js';
 import { ChatContext, type InferaGraphChatContext } from './chatContext.js';
 import { useInferaGraphNeighbors } from './useInferaGraphNeighbors.js';
@@ -143,6 +144,23 @@ export interface InferaGraphProps {
    */
   showInferredEdges?: boolean;
   /**
+   * Pluggable {@link InferredEdgeStore}. When the host toggles
+   * `showInferredEdges` to `true`, the library calls
+   * `aiEngine.getInferredEdges()` (which delegates to this store) and
+   * pipes the result into the renderer. Omitting the store leaves
+   * the engine without a persistence layer — the overlay stays empty
+   * until the host pushes edges via another route.
+   */
+  inferredEdgeStore?: InferredEdgeStore;
+  /**
+   * Fires `true` when the auto-fetch effect kicks off (the
+   * `showInferredEdges` prop just flipped to `true`) and `false` when
+   * the fetch resolves, errors, or is cancelled by unmount. Hosts use
+   * this to render a brief spinner near the toggle while the inferred
+   * edges are loading from the server.
+   */
+  onInferredEdgesLoadingChange?: (loading: boolean) => void;
+  /**
    * Host-facing chat callback. Called with `text` and `done` events
    * only — tool calls (`apply_filter` / `highlight` / `focus` /
    * `annotate`) are dispatched silently to the renderer.
@@ -235,6 +253,7 @@ interface InferaGraphInnerProps {
   query?: string;
   transport?: Transport;
   showInferredEdges?: boolean;
+  onInferredEdgesLoadingChange?: (loading: boolean) => void;
   onChat?: (event: ChatEvent) => void;
   onDiagnostic?: (event: Extract<ChatEvent, { type: 'debug' }>) => void;
   onToolCallOutcome?: (outcome: {
@@ -269,6 +288,7 @@ function InferaGraphInner({
   query,
   transport,
   showInferredEdges,
+  onInferredEdgesLoadingChange,
   onChat,
   onDiagnostic,
   onToolCallOutcome,
@@ -477,6 +497,47 @@ function InferaGraphInner({
     controller.setInferredEdgeVisibility(showInferredEdges ?? false);
   }, [showInferredEdges]);
 
+  // Stable ref so the auto-fetch effect doesn't re-fire whenever a
+  // host accidentally hands us a fresh callback identity on each render.
+  const onInferredEdgesLoadingChangeRef = useRef(onInferredEdgesLoadingChange);
+  onInferredEdgesLoadingChangeRef.current = onInferredEdgesLoadingChange;
+
+  // Auto-fetch the inferred-edge overlay when the host opts in. The
+  // engine's `getInferredEdges()` delegates to whichever
+  // `InferredEdgeStore` is wired on the engine (the host plugs one in
+  // via `GraphProvider.inferredEdgeStore`). Result is piped to the
+  // renderer; per-tick positioning takes over from there.
+  //
+  // Cancellation: an `AbortController` short-circuits the apply path
+  // when the effect cleans up (toggle off, unmount, store swap) so a
+  // late-arriving fetch never paints stale edges onto the canvas. The
+  // store implementation is responsible for honoring the signal — the
+  // default `RemoteInferredEdgeStore` does.
+  useEffect(() => {
+    if (!showInferredEdges) return;
+    const controller = controllerRef.current;
+    if (!controller) return;
+    let cancelled = false;
+    onInferredEdgesLoadingChangeRef.current?.(true);
+    (async () => {
+      try {
+        const edges = await aiEngine.getInferredEdges();
+        if (cancelled) return;
+        // SceneController.setInferredEdges takes only edges since
+        // per-tick positioning owns coordinate updates.
+        controller.setInferredEdges(edges);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[InferaGraph] inferred-edges fetch failed', err);
+      } finally {
+        if (!cancelled) onInferredEdgesLoadingChangeRef.current?.(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [aiEngine, showInferredEdges]);
+
   // ---------- Phase 6 — click + expand wiring ----------
 
   // Stable refs for the host callbacks so the effects below don't have to
@@ -665,6 +726,8 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     query,
     transport,
     showInferredEdges,
+    inferredEdgeStore,
+    onInferredEdgesLoadingChange,
     onChat,
     onDiagnostic,
     onToolCallOutcome,
@@ -677,7 +740,12 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
     children,
   } = props;
   return (
-    <GraphProvider data={data} slugResolver={slugResolver} maxNodes={maxNodes}>
+    <GraphProvider
+      data={data}
+      slugResolver={slugResolver}
+      maxNodes={maxNodes}
+      inferredEdgeStore={inferredEdgeStore}
+    >
       <InferaGraphInner
         layout={layout}
         nodeRender={nodeRender}
@@ -698,6 +766,7 @@ export function InferaGraph(props: InferaGraphProps): React.JSX.Element {
         query={query}
         transport={transport}
         showInferredEdges={showInferredEdges}
+        onInferredEdgesLoadingChange={onInferredEdgesLoadingChange}
         onChat={onChat}
         onDiagnostic={onDiagnostic}
         onToolCallOutcome={onToolCallOutcome}

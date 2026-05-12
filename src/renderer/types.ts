@@ -5,7 +5,6 @@
  * without circular imports.
  */
 
-import type { NodeId, Vector3 } from '../types.js';
 import type { InferredEdge } from '../ai/InferredEdge.js';
 
 /**
@@ -140,14 +139,12 @@ export interface AnnotateHost {
  * Contract:
  *   - {@link setInferredEdges} REPLACES the entire stored edge set.
  *     Hosts that incrementally accumulate inferences must merge before
- *     calling.
+ *     calling. Positions are NOT a parameter — the controller's per-frame
+ *     tick rewrites endpoint coordinates from the live layout-engine
+ *     positions so the overlay tracks node motion automatically.
  *   - {@link setInferredEdgeVisibility} toggles the overlay's visibility
  *     WITHOUT teardown or rebuild. Hidden state is the v1 default
  *     (`showInferredEdges` defaults to `false` on the React prop).
- *   - The `positions` map mirrors the layout positions of the graph's
- *     explicit nodes — the same map already passed to
- *     `updateInstance`/`updateSegment`. The inferred-edge renderer does
- *     not own positions; it consumes them.
  *   - Calling either method while no inferred-edge mesh exists (e.g.
  *     before {@link SceneController.attach}, or in tree mode) is a
  *     well-defined no-op.
@@ -155,17 +152,16 @@ export interface AnnotateHost {
 export interface InferredEdgeHost {
   /**
    * Replace the rendered set of inferred edges. The implementation
-   * (re)builds the underlying line geometry to fit `edges.length` and
-   * uses `positions` to look up each endpoint's world-space coordinate.
+   * (re)builds the underlying line geometry to fit `edges.length`; the
+   * controller's per-frame tick then rewrites endpoint coordinates from
+   * the live layout-engine positions, so the overlay tracks node motion
+   * automatically without callers re-pushing on every frame.
    *
-   * Edges whose `sourceId` or `targetId` is missing from `positions`
-   * are dropped silently — the explicit-edge dedup in the merger should
-   * have removed them, but the renderer is defensive.
+   * Edges whose `sourceId` or `targetId` is missing from the active
+   * layout are dropped silently — the explicit-edge dedup in the merger
+   * should have removed them, but the renderer is defensive.
    */
-  setInferredEdges(
-    edges: ReadonlyArray<InferredEdge>,
-    positions: ReadonlyMap<NodeId, Vector3>,
-  ): void;
+  setInferredEdges(edges: ReadonlyArray<InferredEdge>): void;
   /**
    * Toggle the inferred-edge overlay's visibility. `false` hides the
    * overlay entirely without disposing geometry; `true` reveals it.

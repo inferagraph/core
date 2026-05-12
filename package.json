@@ -1,6 +1,6 @@
 {
   "name": "@inferagraph/core",
-  "version": "0.14.6",
+  "version": "0.15.0",
   "description": "AI-powered knowledge graph platform with WebGL visualization",
   "repository": {
     "type": "git",
@@ -39,6 +39,16 @@
       "require": {
         "types": "./dist/react.d.cts",
         "default": "./dist/react.cjs"
+      }
+    },
+    "./server": {
+      "import": {
+        "types": "./dist/server.d.ts",
+        "default": "./dist/server.js"
+      },
+      "require": {
+        "types": "./dist/server.d.cts",
+        "default": "./dist/server.cjs"
       }
     },
     "./themes/default.css": "./src/themes/default.css",

@@ -105,6 +105,8 @@ export type {
   InferredEdgeSource,
   InferredEdgeStore,
 } from './ai/InferredEdge.js';
+export { RemoteInferredEdgeStore } from './ai/RemoteInferredEdgeStore.js';
+export type { RemoteInferredEdgeStoreOptions } from './ai/RemoteInferredEdgeStore.js';
 export { computeGraphInferences } from './ai/inference/graph.js';
 export type {
   GraphInferenceCandidate,

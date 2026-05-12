@@ -7,6 +7,7 @@ import { StaticDataAdapter } from '../data/StaticDataAdapter.js';
 import { MemoryManager } from '../data/MemoryManager.js';
 import type { DataAdapter, DataAdapterConfig } from '../data/DataAdapter.js';
 import type { GraphData, NodeId } from '../types.js';
+import type { InferredEdgeStore } from '../ai/InferredEdge.js';
 
 /**
  * Slug → node-id resolver. Hosts that route detail pages by human-readable
@@ -64,6 +65,15 @@ export interface GraphProviderProps {
    * cap so memory grows with the dataset.
    */
   maxNodes?: number;
+  /**
+   * Pluggable {@link InferredEdgeStore} consumed by the engine for
+   * inferred-relationship persistence. Pass `RemoteInferredEdgeStore`
+   * in a browser host to read server-computed edges via HTTP; pass
+   * `inMemoryInferredEdgeStore()` for self-contained demos. Omitting
+   * leaves the engine without a store — `getInferredEdges()` returns
+   * `[]` and compute is a no-op.
+   */
+  inferredEdgeStore?: InferredEdgeStore;
   /** Called when initial data is loaded */
   onReady?: () => void;
 }
@@ -75,6 +85,7 @@ export function GraphProvider({
   initialViewConfig,
   slugResolver,
   maxNodes,
+  inferredEdgeStore,
   onReady,
 }: GraphProviderProps): React.JSX.Element {
   const storeRef = useRef<GraphStore>(null);
@@ -221,6 +232,13 @@ export function GraphProvider({
     setDataManagerGeneration((g) => g + 1);
     void initialize(fresh);
   }, [resolvedAdapter, initialize, isReady]);
+
+  // Push the optional InferredEdgeStore into the AIEngine. The engine's
+  // `setInferredEdgeStore` accepts `undefined` to clear the slot, so the
+  // host can toggle the dependency on/off without remounting.
+  useEffect(() => {
+    aiRef.current!.setInferredEdgeStore(inferredEdgeStore);
+  }, [inferredEdgeStore]);
 
   // Memoize the context value so consumer renders only see a fresh
   // identity when one of the underlying engines, the slug resolver, the
